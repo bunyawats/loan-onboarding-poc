@@ -18,6 +18,13 @@ monolith** — one deployable, seven strictly-bounded internal modules.
    status, and a session log. **This is the file that says what to do
    next.**
 
+Also useful, rendered from `CLAUDE.md`'s ASCII diagrams —
+[`docs/api-specification.md`](docs/api-specification.md) (every
+module's exact `service.py` signatures) and `docs/diagrams/`
+([ER](docs/diagrams/er-diagram.md),
+[system architecture](docs/diagrams/system-architecture.md),
+[module dependency graph](docs/diagrams/application-modules.md)).
+
 ## If you're a coding agent picking this up
 
 Read `IMPLEMENTATION_PLAN.md`'s **"How a session should use this

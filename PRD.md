@@ -45,7 +45,7 @@ either an undifferentiated app or seven separately-deployed services:
 | Customer BFF | mobile-first self-service UI (public) |
 | Back-Office BFF ("LOS") | Underwriter/Manager UI (Keycloak-gated) |
 | Customer | customer profile |
-| Account | the banking relationship an application is filed under |
+| Account | the banking relationship an *approved* application produces (§9.2) |
 | Application | the application entity, its state, and the submission document-completeness rule |
 | Document | the Mayan EDMS integration |
 | Workflow | the Temporal integration |
@@ -105,9 +105,12 @@ scoped to exactly what they're responsible for.
   by contrast, now has real Keycloak authentication — see §7 and §5.)
 - **A native mobile app.** "Mobile application" here means a
   mobile-first, responsive HTMX web app usable in a phone browser — not
-  an iOS/Android binary. The JSON API front door (`api/`) exists
-  alongside the HTMX BFF specifically so a native app could be added
-  later without touching business logic (see `CLAUDE.md`).
+  an iOS/Android binary. No separate JSON API module (`api/`) is built
+  for this POC — the seven modules in `CLAUDE.md` are it. A native app
+  later would be a new BFF-style caller of the same domain modules'
+  `service.py` functions, the same way `bff_customer`/`bff_backoffice`
+  are today — not a rework of business logic, but also not something
+  currently scaffolded.
 - **Staff-assisted / phone-in applications.** The only origination path
   in this POC is customer self-service. An internal "create on behalf
   of a customer" path is a plausible v2 addition, not built here.
@@ -183,6 +186,13 @@ single most important invariant to preserve; both reference projects
 call this out explicitly and enforce it in the shared service layer, not
 just the UI).
 
+**Reaching `APPROVED` — whichever arrow leads there — is also the
+moment an account gets created** (§9.2): a customer record if one
+didn't already exist for this applicant, and always a brand-new
+account. `REJECTED` and `CANCELLED` create neither. See `CLAUDE.md`'s
+"Applying without being a customer yet" for exactly where this happens
+and why it has to be idempotent.
+
 ### 6.3 Escalation threshold
 
 A single configurable amount (`MANAGER_ESCALATION_THRESHOLD_USD`, POC
@@ -206,6 +216,35 @@ on the submit action, not a silent failure. On mobile, document capture
 should support both "take a photo" (camera, for ID/paper documents) and
 "choose a file" (for PDFs already on the phone).
 
+A required category is satisfied by one or more uploaded documents —
+a customer can upload several files under "Bank Statements" or "Proof
+of Income" and the gate is satisfied the same as a single file would;
+there's no cap on how many documents one category can hold.
+
+### 6.5 Managed documents beyond the gate
+
+Three more document associations exist outside the submission-gate
+categories above — none of them customer-uploaded through the
+application flow, all of them consequences of an application reaching
+terminal `APPROVED` (§6.2, §9.2):
+
+- **`id_photo`** (customer, exactly one) — when a customer record is
+  created or matched at approval, the just-approved application's
+  "Government ID" document is re-tagged as this customer's `id_photo`
+  rather than asking them to upload it again. A returning customer
+  applying for a second loan doesn't get a second `id_photo` — the
+  first one stands.
+- **`welcome_letter`** (account, exactly one) — generated automatically
+  when the account is created at approval, no human involved. A simple
+  templated document (applicant name, product type, amount, decision
+  date) rather than a customer-facing form.
+- **`consent`** (account, versioned) — one logical document per
+  account whose content can be updated over time; each update is a new
+  *version* of the same document (Mayan's own file-versioning), not a
+  new document. **Which screen actually lets a customer or staff member
+  trigger a consent upload isn't decided yet** — see §11's open
+  questions.
+
 ## 7. Identity: customer side unauthenticated, back office real Keycloak
 
 The two sides of this app have deliberately different identity models —
@@ -215,13 +254,15 @@ treated separately below.
 
 On first visit, the app asks for an email or phone number — no
 password, no OTP, no verification — and stores it in a signed session
-cookie for that browser. This value becomes the customer's
-`applicant_identifier`, used both for "my applications" filtering in
-Postgres (the same visibility-invariant pattern `review-approval-temporal`
-uses for its Operator role: filter by
+cookie for that browser. **Setting this cookie is a pure client-side
+write — no database row is created at this point** (see §9.1 — a
+`customers` row only ever gets created on approval). This value becomes
+the applicant's `applicant_identifier`, used both for "my applications"
+filtering in Postgres (the same visibility-invariant pattern
+`review-approval-temporal` uses for its Operator role: filter by
 `WHERE applicant_identifier = :session_value`, enforced in the shared
-service layer, not just hidden in the UI) and as the `applicant_id`
-metadata value in Mayan's document hierarchy. **Because this surface is
+service layer, not just hidden in the UI) and as the top-level metadata
+value in Mayan's document hierarchy. **Because this surface is
 customer/public-facing, unauthenticated self-identification is a real
 risk** — anyone who knows or guesses another customer's email/phone can
 view their application status and documents. Treat any deployment of
@@ -317,7 +358,14 @@ screen design:
 - **Bulk decision**: select multiple eligible rows → confirm dialog
   listing each selected application's product type and applicant → one
   shared comment applied to the whole batch → fire N concurrent
-  decisions → per-item success/failure report.
+  decisions → per-item success/failure report. An Approve that would
+  violate §9.2's one-active-account-per-product-type rule shows up in
+  this same per-item report as a failure — the batch doesn't abort, and
+  every other eligible item still goes through.
+- **Approve can be refused with a reason**, same as the document gate:
+  an application whose applicant already holds an active account of the
+  same product type (§9.2) doesn't get signaled at all — the decision
+  form shows the conflict instead of submitting.
 - Decision buttons (single-item and bulk) only render for a logged-in
   session that actually holds the corresponding Keycloak permission
   (§7.2) — enforced server-side regardless of what the UI shows.
@@ -333,14 +381,29 @@ but each is touched exclusively by its owning module's code — treat
 them as if they were physically separate, since the point of the split
 is the ownership discipline, not where the bytes happen to sit.
 
+**Account-on-approval, not account-first**: an earlier draft of this
+PRD had an account auto-opened the moment a customer started an
+application — modeling an existing bank customer applying for another
+product. The actual intent is closer to real loan origination: **most
+applicants aren't customers yet, and an account is the *outcome* of an
+approved loan, not a precondition of filing one.** See `CLAUDE.md`'s
+"Applying without being a customer yet" for the full mechanics; the
+tables below reflect it.
+
 ### 9.1 Customer (owned by the Customer module)
 
 | Field | Notes |
 |---|---|
 | `customer_id` | UUID, primary key |
-| `applicant_identifier` | the customer's self-entered email/phone (§7.1) — the natural key a returning customer resolves to the same `customer_id` by |
+| `applicant_identifier` | the customer's self-entered email/phone (§7.1) — the natural key a returning applicant resolves to the same `customer_id` by |
 | `name`, `email`, `phone` | profile fields, editable over time |
 | `created_at` | |
+
+A row here isn't created just because someone typed an identifier and
+started an application — it's created (or matched, if one already
+exists for that identifier) **only when an application under that
+identifier is approved**. An applicant can submit and even complete
+several applications with no `customers` row existing for them at all.
 
 ### 9.2 Account (owned by the Account module)
 
@@ -348,17 +411,35 @@ is the ownership discipline, not where the bytes happen to sit.
 |---|---|
 | `account_id` | UUID, primary key |
 | `customer_id` | reference to the owning customer (resolved via a `service.py` function call, not a database join or foreign key — see `CLAUDE.md`'s "Data storage") |
-| `opened_at`, `status` | |
+| `product_type` | `personal_loan` \| `auto_loan` \| `mortgage` — the product this account resulted from |
+| `opened_at`, `status` | `status` is `ACTIVE` \| `CLOSED` |
 
-One account per customer for this POC, auto-opened the first time they
-start an application.
+**Not one account per customer.** A customer can hold multiple
+accounts over time — one per approved application. An account is
+created exactly once, at the moment an application reaches terminal
+`APPROVED` (§6.2) — never before, and never for a `REJECTED` or
+`CANCELLED` application.
+
+**A customer's `ACTIVE` accounts may never repeat a `product_type`.**
+A customer can hold a `CLOSED` `personal_loan` account and later open a
+new, `ACTIVE` one — just never two `ACTIVE` `personal_loan` accounts at
+once. An Underwriter or Manager attempting to Approve an application
+that would violate this gets refused with a clear reason (e.g.
+"applicant already has an active Personal Loan account") instead of
+the approval silently failing — same "reject with a specific reason"
+principle as §6.4's document gate. See `CLAUDE.md`'s "Applying without
+being a customer yet" for exactly where this check runs and its one
+accepted gap (a narrow race between two near-simultaneous approvals for
+the same customer and product type).
 
 ### 9.3 Application (owned by the Application module)
 
 | Field | Notes |
 |---|---|
 | `application_id` | UUID, primary key |
-| `customer_id`, `account_id` | references, resolved via `service.py` calls into the owning modules |
+| `applicant_identifier` | the durable identity key (§7.1) — always present at submission, regardless of whether the applicant is a recognized customer yet. This is what "a customer only sees their own applications" (§10 criterion 2) is actually keyed on. |
+| `customer_id` | **nullable** — set at submission if `applicant_identifier` matches an existing customer, otherwise `NULL` until (and unless) this application is later approved |
+| `account_id` | **nullable** — `NULL` for the application's entire non-terminal lifetime; set exactly once, when the application reaches terminal `APPROVED` |
 | `workflow_id` | Temporal workflow id, nullable (cleared if a Temporal admin deletes the execution — same reconciliation pattern as the reference project) |
 | `product_type` | `personal_loan` \| `auto_loan` \| `mortgage` |
 | `payload` | JSONB, product-specific fields |
@@ -368,10 +449,11 @@ start an application.
 | `manager_name`, `manager_comment`, `manager_decided_at` | set only for escalated applications |
 | `created_at`, `updated_at` | |
 
-`customer_id`, `account_id`, and `application_id` together are what's
-mirrored into Mayan's document metadata (`customer_id`, `account_id`,
-`application_id`) — see `CLAUDE.md`'s document-hierarchy section for
-the full three-level structure.
+`applicant_identifier` and `application_id` are what's mirrored into
+Mayan's document metadata — the hierarchy is two levels
+(`applicant_identifier -> application_id`), not three, precisely
+because `account_id` doesn't exist yet at document-upload time. See
+`CLAUDE.md`'s document-hierarchy section.
 
 ## 10. Success criteria for this POC
 
@@ -410,6 +492,12 @@ the full three-level structure.
 
 ## 11. Open questions (for the implementer / reviewer to resolve early)
 
+- **Which surface triggers a `consent` upload (§6.5)?** Not designed
+  yet — could be a post-approval customer screen, a back-office action,
+  or both. `document.service.upload_consent(account_id, file)` doesn't
+  care which caller uses it; this is purely a missing UI flow, not an
+  API gap. Needs a decision before Phase 10/11 builds whichever screen
+  it turns out to be.
 - Should the escalation threshold be per-product instead of global?
   (Deferred to POC v2 — see `CLAUDE.md`.)
 - Should `MORE_INFO_REQUESTED` → resubmit require *new* documents, or is

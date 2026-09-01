@@ -55,6 +55,8 @@ no network boundary forcing it — see "Enforcing the boundaries" below.
 
 ## Module dependency graph
 
+*(Rendered version: [`docs/diagrams/application-modules.md`](docs/diagrams/application-modules.md).)*
+
 ```
                          customer/    account/    document/    workflow/
                          (leaf)       (leaf)      (leaf --      (leaf --
@@ -70,19 +72,24 @@ no network boundary forcing it — see "Enforcing the boundaries" below.
                                     ╲           ╲      │  application/  │
                                      ╲           ╲     └───────────────┘
                                       ╲           ╲            │
-                    (customer_id/account_id passed in as       │
-                     opaque strings -- bff_customer resolves    │
-                     them via customer/account BEFORE calling   │
-                     application/, so application/ never        │
-                     imports customer/ or account/ itself)      │
+                    (application/service.py: READ-ONLY calls into  │
+                     customer/ and account/ only (find_by_identifier,│
+                     has_active_account_of_type, get). Writes       │
+                     (get_or_create, create_account) happen only    │
+                     in application/activities.py, on approval --   │
+                     see "Applying without being a customer yet")   │
                                                                  │
                         ┌────────────────────────────────────────┘
                         ▼
               bff_customer/          bff_backoffice/
-              (imports customer/,    (imports application/,
-               account/,              document/, workflow/,
-               application/,          customer/, account/ --
-               document/, workflow/)  for rendering detail)
+              (imports customer/     (imports application/,
+               [read-only find_by_    document/, workflow/,
+               identifier only],      customer/, account/ --
+               application/,          for rendering detail,
+               document/, workflow/;  possibly None pre-approval)
+               no account/ import --
+               nothing to find-or-
+               create there anymore)
                         │                      │
                         └──────────┬───────────┘
                                    ▼
@@ -91,6 +98,12 @@ no network boundary forcing it — see "Enforcing the boundaries" below.
                          "Breaking the application ↔
                          workflow cycle" below)
 ```
+
+**Not drawn above**: `application/activities.py` (not `service.py`)
+also has a downward edge to `customer/` and `account/`, used only to
+provision the account an approval produces — see "Applying without
+being a customer yet" below. Left off the diagram to keep it readable;
+the rule is stated explicitly in the bullet list below instead.
 
 Rules, in order of how often a shortcut will tempt someone to break
 them:
@@ -113,9 +126,29 @@ them:
   directly (an in-process function call — no HTTP, no serialization
   boundary beyond normal Python objects) and
   `workflow.service.start_workflow(...)`/`signal_decision(...)`/
-  `signal_resubmit(...)`. It does **not** import `customer/` or
-  `account/` — `customer_id`/`account_id` arrive as opaque strings from
-  whichever caller (a BFF) already resolved them.
+  `signal_resubmit(...)`.
+- **`application/service.py` may only call `customer/` and `account/`'s
+  read-only functions — never their writes.** Corrected from an earlier
+  draft of this file, which claimed `service.py` "never imports
+  `customer/` or `account/`" at all; that was already false the moment
+  `create_application()` started calling
+  `customer.service.find_by_identifier(...)` (a read-only lookup — see
+  "Applying without being a customer yet" below), and it's more false
+  now that `check_decision_allowed()` (§ below, PRD's active-account
+  rule) also calls `account.service.has_active_account_of_type(...)`.
+  The actual, consistent rule: `service.py` may read (`find_by_identifier`,
+  `get`, `has_active_account_of_type`), never write (`get_or_create`,
+  `create_account`). **`application/activities.py` is where every write
+  happens** — because approval is what creates the banking relationship
+  now (see "Applying without being a customer yet") — `persist_decision`
+  has to call `customer.service.get_or_create(...)` and
+  `account.service.create_account(...)` when a decision resolves to
+  terminal `APPROVED`. Both files' imports are normal downward
+  dependencies, not a cycle (`customer/`/`account/` don't import
+  anything back); `service.py`'s remaining read paths (`get`,
+  `list_for_applicant`, `list_by_status`) still don't need either
+  module at all, using the denormalized applicant fields instead, same
+  as always.
 - **`bff_customer/` and `bff_backoffice/` may import any domain module**
   (`customer/`, `account/`, `application/`, `document/`, `workflow/`),
   never each other, and never get imported back by anything below them.
@@ -185,6 +218,120 @@ microservices version of this plan had to replace with a whole
 `tests/contract/` suite because the two registries lived in separate
 processes. One process again means one import-time check is enough.
 
+### Applying without being a customer yet
+
+The original design had `bff_customer` eagerly create a `customer` row
+(and an `account` under it) the moment someone typed an identifier and
+started an application — modeling a bank's *existing* customer applying
+for another product. The actual product intent is closer to real loan
+origination: **most applicants aren't customers yet, and an account is
+the *outcome* of an approved loan, not something that pre-exists it.**
+
+- **`applications.applicant_identifier`** (new column, `NOT NULL`) is
+  the durable key for "which human is this," always known at
+  submission regardless of whether they're a recognized customer — the
+  same value `bff_customer`'s session cookie already holds (PRD §7.1).
+  This is what the customer-facing visibility filter (PRD §10 success
+  criterion 2) is keyed on now, **not** `customer_id` — it has to work
+  identically for a first-time applicant (no `customer_id` yet) and a
+  returning one.
+- **`applications.customer_id` is nullable.** `application.service.create_application(...)`
+  resolves it via a **read-only** lookup —
+  `customer.service.find_by_identifier(applicant_identifier) ->
+  Customer | None` — never a create. If the identifier matches an
+  existing customer, the application is linked immediately; if not,
+  `customer_id` stays `NULL` until (and unless) the application is
+  approved.
+- **`applications.account_id` is nullable**, and stays `NULL` for the
+  entire non-terminal lifetime of an application — there is no
+  "auto-opened account" anymore. `account.service.find_or_create_for_customer(...)`
+  is gone; `account/` no longer enforces one-account-per-customer at
+  all (see `account/`'s module section).
+- **Provisioning happens inside `application/activities.py`'s
+  `persist_decision`, only on the transition to terminal `APPROVED`**
+  (either the Underwriter's below-threshold approve, or the Manager's
+  approve after escalation — *not* the intermediate
+  `PENDING_MANAGER_APPROVAL` step, which isn't a terminal approval):
+  1. If `applications.customer_id` is still `NULL`, call
+     `customer.service.get_or_create(applicant_identifier) ->
+     Customer` (idempotent find-or-create — this is the *only* caller
+     of this function left; `bff_customer`'s identify step no longer
+     calls it, see `customer/`'s module section below).
+  2. Call `account.service.create_account(customer_id, product_type) ->
+     Account` — **always creates a new row**, no find-or-create
+     semantics, since accounts are 1:1 with approved applications now,
+     not 1:1 with customers (a customer can hold many accounts, one per
+     approved loan — a plain, non-unique index on
+     `accounts.customer_id`). `product_type` is a required column now
+     too — see the active-account rule immediately below.
+  3. Call `document.service.promote_government_id_to_customer_photo(application_id,
+     customer_id)` and `document.service.generate_welcome_letter(account_id,
+     customer_id, applicant_name, product_type, amount)` — see
+     `document/`'s module section for what each does. Both are part of
+     this same provisioning block, guarded by the same idempotency check
+     below (step 4), not separate activities.
+  4. Write `status`, the underwriter/manager decision columns,
+     `customer_id` (if newly resolved), and `account_id` (newly
+     created) in the **same** `UPDATE`, inside the same activity
+     execution as the rest of `persist_decision`'s work — deliberately
+     not a separate activity, to avoid a partial-provisioning state if
+     the process crashes between two activities.
+  - **This makes provisioning the one place in the whole codebase where
+    a Temporal activity's idempotency actually matters in a way that
+    can silently misbehave**: activities can be retried by Temporal
+    after a successful-but-unacknowledged execution. Creating a new
+    `account` row (or a second Welcome Letter, or re-promoting an
+    already-promoted `id_photo`) unconditionally on every call would
+    duplicate state on a retry. `persist_decision` **must** check
+    `applications.account_id IS NOT NULL` **first, before step 1**, and
+    if already set, skip the entire provisioning block (steps 1-3) and
+    just re-apply the (idempotent) status/decision-column write — the
+    activity as a whole must be safe to run twice.
+- **One customer, one active account per product type — enforced
+  *before* the decision is signaled, not just inside provisioning.**
+  `accounts.product_type` (new column) plus a partial unique index
+  (`db/schema.sql`'s `ux_accounts_customer_active_product_type`, on
+  `(customer_id, product_type) WHERE status = 'ACTIVE'`) is the
+  authoritative enforcement — a customer can hold any number of
+  `CLOSED` accounts of the same type, just never two `ACTIVE` ones at
+  once. But by the time `persist_decision` runs, the decision has
+  already been accepted by the workflow — there's no clean way to
+  surface an error back to whoever clicked Approve from that deep
+  inside activity execution. So the real gate is earlier:
+  `application.service.check_decision_allowed(application_id, decision)
+  -> list[str]` (empty = OK, same shape as `check_completeness`) —
+  called by `bff_backoffice` **before** it calls
+  `workflow.service.signal_decision(...)`, for both the single-item and
+  bulk-approve paths (bulk approve pre-filters each selected
+  application this way *before* collecting `workflow_ids` to hand to
+  `bulk_signal_decision`; anything blocked is reported as a per-item
+  failure, same shape as any other bulk partial-failure). Only relevant
+  for `decision == "APPROVE"` — Reject/RequestMoreInfo/Cancel never
+  create an account, so never conflict. This is what actually justifies
+  `application/service.py`'s new read-only call into
+  `account.service.has_active_account_of_type(customer_id,
+  product_type)` (see the corrected module-boundary rule above). **A
+  real, accepted gap, not fully closed**: the window between this
+  pre-check passing and `persist_decision` actually writing the account
+  is small but nonzero (e.g. two different staff members approving two
+  different applications for the same customer+product_type within
+  that window) — if it's ever hit, the partial unique index is the
+  backstop (the `INSERT` fails), but `persist_decision` has no special
+  handling for that failure today; it would surface as an activity
+  error rather than a clean outcome. Worth revisiting if this ever
+  stops being rare enough to ignore for a POC.
+- **Document hierarchy still gates submission on a two-level branch**
+  (`<applicant_identifier> -> <application_id> -> category`, see
+  "Document hierarchy" below) — document upload/completeness-check at
+  submission time never needs an `account_id`, since no account can
+  possibly exist before submission. Post-approval, the hierarchy gains
+  a separate `<applicant_identifier> -> id_photo` node and an
+  `<applicant_identifier> -> <account_id>` branch (Welcome Letter,
+  Consent) — see "Document hierarchy" below for the full tree; the
+  Account level isn't gone, it's just populated later than the
+  Application level, by a different code path (provisioning, not
+  submission).
+
 ## Modules, in detail
 
 ### 1. `bff_customer/` — Customer BFF
@@ -195,14 +342,22 @@ the domain modules' `service.py` functions.
 
 - Owns the customer self-identify session cookie (PRD §7.1) — signed
   Starlette `SessionMiddleware` cookie holding `applicant_identifier`,
-  no password, no Redis (nothing token-shaped to store).
+  no password, no Redis (nothing token-shaped to store). **Setting this
+  cookie is a pure client-side write — no database call at all**;
+  `customer/`'s row doesn't get created until (and unless) an
+  application under this identifier is approved (see "Applying without
+  being a customer yet").
 - Calls, all as direct in-process function calls:
-  `customer.service.identify_or_create(...)`,
-  `account.service.find_or_create_for_customer(customer_id)`,
+  `customer.service.find_by_identifier(...)` (read-only, optional —
+  e.g. for "welcome back" copy),
   `application.service.create_application(...)` /
-  `resubmit_application(...)` / `list_applications_for_customer(...)`,
-  `document.service.upload(...)` / `list_documents(...)`,
-  `workflow.service.signal_decision(..., decision="CANCELLED")`.
+  `resubmit_application(...)` / `list_for_applicant(applicant_identifier, ...)`,
+  `document.service.upload(applicant_identifier, application_id, ...)` /
+  `list_documents(...)`,
+  `workflow.service.signal_decision(..., decision="CANCELLED")`. **No
+  `account.service` call** — there's nothing for this BFF to
+  find-or-create anymore; account creation happens only inside
+  `application/activities.py` on approval.
 
 ### 2. `bff_backoffice/` — Back-Office BFF (the "LOS")
 
@@ -221,9 +376,27 @@ System) is this module's working name.
   being in the same process *is* the proof).
 - Calls `application.service` (paginated Underwriter/Manager queues,
   read), `document.service` (view documents), `workflow.service`
-  (single-item and bulk decision signals), `customer.service` +
-  `account.service` (render applicant/account detail in the review
-  dialog).
+  (single-item and bulk decision signals), `customer.service.get()` +
+  `account.service.get()` (render applicant/account detail in the review
+  dialog — **both are conditional on the application actually having a
+  `customer_id`/`account_id` set**; for a `PENDING_UNDERWRITING` or
+  `PENDING_MANAGER_APPROVAL` application the applicant may not be a
+  resolved customer yet, `account_id` is always `None` until terminal
+  `APPROVED` — the dialog falls back to the application's own
+  denormalized `applicant_name`/`applicant_email`/`applicant_phone`
+  fields in that case rather than calling `customer.service.get(None)`).
+- **Every Approve action — single-item or bulk — calls
+  `application.service.check_decision_allowed(application_id,
+  "APPROVE")` before calling `workflow.service.signal_decision(...)`/
+  `bulk_signal_decision(...)`** (PRD's active-account rule, "Applying
+  without being a customer yet"). A non-empty result blocks that
+  application: single-item shows the reason as an error instead of
+  sending the signal; bulk approve filters blocked applications out of
+  the batch *before* collecting `workflow_ids` and reports each one as
+  a per-item failure in the same result shape as any other bulk
+  partial-failure — it never reaches `bulk_signal_decision` at all.
+  Reject/RequestMoreInfo/Cancel skip this check entirely
+  (`check_decision_allowed` is a no-op unless `decision == "APPROVE"`).
 - Owns the bulk-selection store — reuse the same Redis instance this
   module already needs for Keycloak sessions.
 
@@ -232,11 +405,23 @@ System) is this module's working name.
 Owns the customer profile: `customer_id` (UUID), `applicant_identifier`
 (the email/phone the customer self-entered), `name`, `email`, `phone`,
 `created_at`. Owns the `customers` table — the only module whose code
-touches it.
+touches it. **A customer row no longer gets created on first visit** —
+see "Applying without being a customer yet" above; this module's
+create path only fires from inside an approval.
 
-- `service.identify_or_create(applicant_identifier) -> Customer` —
-  find-or-create, idempotent (the cookie may call this repeatedly
-  across visits).
+- `service.find_by_identifier(applicant_identifier) -> Customer |
+  None` — **read-only**, no side effects. Called by
+  `application.service.create_application(...)` at submission time to
+  link an application to an existing customer if one matches; also
+  usable by `bff_customer` (e.g. to show "welcome back" copy) without
+  ever writing a row.
+- `service.get_or_create(applicant_identifier) -> Customer` —
+  find-or-create, idempotent. **Called only from
+  `application/activities.py`'s `persist_decision`**, at the moment an
+  application resolves to terminal `APPROVED` and no existing customer
+  was already linked. Not called by `bff_customer`'s identify step —
+  the session cookie itself needs no database write at all now, it just
+  holds whatever `applicant_identifier` the customer typed.
 - `service.get(customer_id) -> Customer`.
 
 ### 4. `account/` — Account module
@@ -244,15 +429,36 @@ touches it.
 Owns the account entity: `account_id`, `customer_id` (stored as a plain
 column, **not** a database foreign key across module boundaries — see
 "Data storage" below for why even a same-database FK is deliberately
-avoided here), `opened_at`, `status`. Owns the `accounts` table
-exclusively. One account per customer for this POC, auto-opened the
-first time they start an application — modeling the banking
-relationship an application is filed under, matching
-`mayan-edms-customer-archive`'s "Account" level (its account-level
-document example, Welcome Letter, is a real document produced when an
-account relationship opens).
+avoided here), `product_type`, `opened_at`, `status`. Owns the
+`accounts` table exclusively. **An account is the outcome of an
+approved loan, not something a customer has going into one** — see
+"Applying without being a customer yet" above. One customer can hold
+**many** accounts (one per approved application, over time), so unlike
+the original draft there's no one-account-per-customer uniqueness
+constraint — **but a customer's `ACTIVE` accounts may never repeat a
+`product_type`** (a customer can have a `CLOSED` and a new `ACTIVE`
+`personal_loan` account, just never two `ACTIVE` ones), enforced by
+`db/schema.sql`'s partial unique index on `(customer_id, product_type)
+WHERE status = 'ACTIVE'`.
 
-- `service.find_or_create_for_customer(customer_id) -> Account`.
+- `service.create_account(customer_id, product_type) -> Account` —
+  always creates a new row, no find-or-create semantics (an account
+  isn't a singleton per customer anymore). **Called only from
+  `application/activities.py`'s `persist_decision`**, exactly once per
+  application that reaches terminal `APPROVED` — see that section's
+  idempotency note on why `persist_decision` must check
+  `applications.account_id` before calling this, not call it
+  unconditionally on every activity execution. Not itself
+  conflict-safe — relies on `check_decision_allowed` (below) having
+  already blocked the decision if this would violate the active-account
+  rule; the partial unique index is the last-resort backstop, not the
+  primary defense.
+- `service.has_active_account_of_type(customer_id, product_type) ->
+  bool` — **read-only**, the one function that makes the active-account
+  rule enforceable *before* a decision is signaled. Called by
+  `application.service.check_decision_allowed(...)`, never directly by
+  a BFF (mirrors `customer.service.find_by_identifier`'s role: a
+  read-only check `application/service.py` is allowed to make).
 - `service.get(account_id) -> Account`.
 
 ### 5. `application/` — Application module
@@ -264,14 +470,31 @@ completeness gate, PRD §6.4) — the direct successor to
 application domain specifically now that other domains have their own
 modules.
 
-- `service.create_application(customer_id, account_id, product_type,
-  payload, ...)` — generates `application_id` (UUID) first, validates
+- `service.create_application(applicant_identifier, product_type,
+  payload, applicant_name, applicant_email, applicant_phone, amount)` —
+  **no `customer_id`/`account_id` params** — neither is guaranteed to
+  exist yet (see "Applying without being a customer yet" above).
+  Generates `application_id` (UUID) first, resolves
+  `customer_id` via the **read-only** `customer.service.find_by_identifier(applicant_identifier)`
+  (`None` if this is a new applicant — `account_id` is always `None` at
+  this point, full stop, regardless), validates
   `payload` against the `product_type`'s Pydantic schema (owned here, in
   `application/schemas.py`), calls `document.service.check_completeness(...)`;
   if satisfied, calls `workflow.service.start_workflow(application_id,
-  product_type, payload, ...)`. **The actual `applications` row isn't
+  product_type, payload, amount, applicant_identifier, customer_id)`.
+  **`amount` is passed to `start_workflow` as its own argument, never
+  folded into `payload`** — the workflow needs it to run PRD §6.3's
+  escalation-threshold check at the Approve transition, but `payload`
+  stays product-specific-fields-only and the workflow stays
+  payload-agnostic (never inspects `payload` itself — `amount` is the
+  one common field it *does* need to see, so it travels as a named
+  parameter, not a payload lookup). `applicant_identifier` and the
+  possibly-`None` `customer_id` travel the same way, purely so
+  `persist_application` (the workflow's first activity) has them to
+  write into the row — `workflow/` still never inspects either value,
+  just forwards them as opaque activity arguments. **The actual `applications` row isn't
   written by this function directly** — `persist_application` is one of
-  the three activities in `application/activities.py` (see "Breaking
+  the four activities in `application/activities.py` (see "Breaking
   the cycle"), invoked by the workflow's own `run()` method as its
   first step, the same way `review-approval-temporal`'s workflow calls
   `persist_request` at the start of `run()` rather than the caller
@@ -290,18 +513,41 @@ modules.
   re-check, then `workflow.service.signal_resubmit(...)` against the
   *existing* `workflow_id` (the same running execution, still waiting
   from `MORE_INFO_REQUESTED` — not a new workflow start).
+- `service.check_decision_allowed(application_id, decision) ->
+  list[str]` — blocking-reason strings, `[]` if the decision may
+  proceed (same shape as `check_completeness`). A no-op (`[]`
+  immediately) unless `decision == "APPROVE"`. **Called by
+  `bff_backoffice` before it calls `workflow.service.signal_decision(...)`**
+  — never by `application/activities.py`, which has no clean way to
+  surface an error back to a decision-maker from inside a running
+  activity. Resolves the application's `customer_id` (if still `NULL`,
+  a brand-new applicant can't conflict with anything — return `[]`
+  immediately) and calls the **read-only**
+  `account.service.has_active_account_of_type(customer_id,
+  product_type)`; if `True`, returns a message naming the conflicting
+  product type. See "Applying without being a customer yet" for the
+  full active-account rule and its accepted race-window gap.
 - `service.get(application_id)`,
-  `service.list_for_customer(customer_id, page, ...)`,
-  `service.list_by_status(status, page, ...)` (staff queues). All three
-  support the reference project's paginated, `query_id`-cached list
-  pattern — see the `list-pagination-bulk-actions` skill.
+  `service.list_for_applicant(applicant_identifier, page, ...)`,
+  `service.list_by_status(status, page, ...)` (staff queues). **The
+  customer-facing list is keyed on `applicant_identifier`, not
+  `customer_id`** — it has to return an applicant's own applications
+  even before any of them are approved and `customer_id` gets resolved
+  (see "Applying without being a customer yet"). All three support the
+  reference project's paginated, `query_id`-cached list pattern — see
+  the `list-pagination-bulk-actions` skill.
 - **`activities.py`** — the concrete Temporal activity implementations
   (see "Breaking the cycle" above): `persist_application`,
   `persist_decision`, `persist_resubmit`, one per state-changing
   operation (don't collapse into one generic activity — each has
   different column-update semantics, same reasoning as the reference
   project). This is where `underwriter_name`/`manager_name` actually get
-  written, sourced from the `actor_name` the signal carried.
+  written, sourced from the `actor_name` the signal carried, **and**
+  where `persist_decision` provisions the customer/account on a
+  terminal `APPROVED` transition (see "Applying without being a
+  customer yet" above for the exact sequence and its idempotency
+  requirement) — the one file in this module allowed to import
+  `customer/` and `account/`.
 
 **Denormalized applicant fields, on purpose**: `applicant_name`/
 `applicant_email`/`applicant_phone` are captured on the application
@@ -322,18 +568,74 @@ The direct promotion of `mayan-edms-customer-archive`'s
 No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
 "Data storage") is the only persistence behind it.
 
-- `service.upload(application_id, category, file)` — create-document →
-  upload-file (`action_name=replace`) → attach metadata (`customer_id`,
-  `account_id`, `application_id`, `category`) → rebuild index. Same
-  four-step sequence, and the same gotchas #1-4 below, as the reference
-  project's upload path.
+- `service.upload(applicant_identifier, application_id, category,
+  file)` — create-document → upload-file (`action_name=replace`) →
+  attach metadata (`applicant_identifier`, `application_id`, `category`)
+  → rebuild index. Same four-step sequence, and the same gotchas #1-4
+  below, as the reference project's upload path. **No `account_id` or
+  `customer_id` param** — the document hierarchy is two levels now
+  (`<applicant_identifier> -> <application_id> -> category`, see
+  "Document hierarchy" below): there's no `account_id` to organize
+  under at upload time (uploads happen before submission, before any
+  account can possibly exist — see "Applying without being a customer
+  yet") and `customer_id` may not exist yet either.
+  `applicant_identifier` is required here, not resolved internally —
+  `document/` is a leaf module and never imports `application/`, so the
+  caller (`bff_customer`, which already has it from the session cookie)
+  passes it straight through.
 - `service.list_documents(application_id)`.
 - `service.check_completeness(application_id, product_type) ->
   list[str]` (missing categories, empty if satisfied) — called by
-  `application.service` at create/resubmit time.
+  `application.service` at create/resubmit time. **A category is
+  satisfied by one or more documents, not exactly one** — a customer
+  can upload three separate PDFs under "Bank Statements" and the gate
+  is satisfied the same as if they'd uploaded one; `upload()` is safe
+  to call repeatedly for the same `application_id`/`category`, each
+  call creating a distinct Mayan document, never overwriting a prior
+  one. (This resolves "an application can have multiple financial-proof
+  documents" — no renaming, no new category: "Proof of Income" already
+  works this way and always was meant to.)
 - `service.preview(application_id, document_id)` — streams the file
   from Mayan for in-app viewing, so neither BFF template needs its own
   Mayan credentials.
+
+**Three more managed document types, beyond the submission-gate
+categories above** — all system-triggered, none uploaded by a customer
+through the application flow:
+
+- `service.promote_government_id_to_customer_photo(application_id,
+  customer_id) -> None` — **called only from
+  `application/activities.py`'s `persist_decision`**, as one more step
+  of the same APPROVE-provisioning sequence described in "Applying
+  without being a customer yet" (guarded by the same `account_id IS
+  NOT NULL` idempotency check — this whole block only runs once). Finds
+  the just-approved application's "Government ID" document and attaches
+  `customer_id` metadata to it (**re-tags the existing document, does
+  not copy it** — one Mayan document, findable from both the
+  application's node and the customer's `id_photo` node once the index
+  rebuilds) rather than asking a brand-new customer to upload the same
+  photo twice.
+- `service.generate_welcome_letter(account_id, customer_id,
+  applicant_name, product_type, amount) -> DocumentRef` — **called only
+  from `application/activities.py`'s `persist_decision`**, immediately
+  after `account.service.create_account(...)` succeeds, same
+  provisioning block. Renders a simple templated PDF (no live data
+  beyond the plain arguments passed in — `document/` doesn't import
+  `application/`, `customer/`, or `account/` to go get anything itself)
+  and uploads it tagged to the new `account_id`. System-generated, no
+  human in the loop, exactly one per account.
+- `service.upload_consent(account_id, file) -> DocumentRef` — **true
+  Mayan document versioning, not a new document per call**: if the
+  account already has a "consent" document, this uploads a new *file
+  version* of that same document (Mayan retains the version history
+  natively); if not, it creates the document first. Not restricted to
+  one caller — either BFF can call it once `account_id` exists (both
+  already import `document/`); which surface actually exposes a UI for
+  this is not yet designed — see `PRD.md`'s open questions.
+- `service.list_customer_documents(customer_id) -> list[DocumentRef]`,
+  `service.list_account_documents(account_id) -> list[DocumentRef]` —
+  for staff/customer viewing (`id_photo`; `welcome_letter` + `consent`
+  respectively).
 
 Owns `scripts/setup_document_hierarchy.sh` (one-time, not idempotent)
 and the Mayan Index Template definition.
@@ -343,10 +645,28 @@ and the Mayan Index Template definition.
 The direct promotion of `review-approval-temporal`'s `workflow/`
 package, deliberately kept **generic** now that `application/` owns the
 concrete activity implementations (see "Breaking the cycle" above) —
-this module knows Temporal, not loan applications.
+this module knows Temporal, not loan applications. "Generic" is about
+*imports and data shape* (no import of `application/`, `payload` is an
+opaque `dict[str, Any]` never inspected), not about the state machine
+itself — `LoanApplicationWorkflow`'s states and its escalation-threshold
+check (PRD §6.2, §6.3) are loan-specific business rules that live here
+because Temporal workflow code has to be colocated with its `run()`
+method; the module boundary this module actually enforces is "doesn't
+reach into `application/`'s table or types," not "contains zero
+domain knowledge."
 
-- `service.start_workflow(application_id, product_type, payload) ->
-  workflow_id`.
+- `service.start_workflow(application_id, product_type, payload, amount,
+  applicant_identifier, customer_id) -> workflow_id` — `amount` is a
+  plain `Decimal`/`float` argument, not read out of `payload`;
+  `LoanApplicationWorkflow.run()` needs it to compare against
+  `MANAGER_ESCALATION_THRESHOLD_USD` at the Approve transition (PRD
+  §6.3). This is the one piece of loan-domain-shaped data `workflow/`
+  handles directly — see the note on `workflow/`'s "generic" framing
+  below. `applicant_identifier` and the possibly-`None` `customer_id`
+  are opaque strings the workflow forwards to the `persist_application`
+  activity by name, exactly like `amount`, `product_type`, and
+  `payload` — `workflow/` never inspects any of them, it just carries
+  them from `start_workflow`'s caller through to the activity call.
 - `service.signal_decision(workflow_id, actor_role, decision,
   actor_name, comment)` — called directly by `bff_backoffice`
   (Approve/Reject/RequestMoreInfo) and `bff_customer` (Cancel).
@@ -381,22 +701,95 @@ this module knows Temporal, not loan applications.
 
 ```
 Loan Onboarding Archive
-└── <customer_id>
-       └── <account_id>
-              └── <application_id>
-                     ├── Government ID
-                     ├── Proof of Income
-                     ├── Bank Statements
-                     ├── Credit Report
-                     ├── Property Appraisal      (mortgage only)
-                     └── Vehicle Title/Invoice   (auto_loan only)
+└── <applicant_identifier>
+       ├── <application_id>              (created at submission, always)
+       │      ├── Government ID
+       │      ├── Proof of Income
+       │      ├── Bank Statements
+       │      ├── Credit Report
+       │      ├── Property Appraisal      (mortgage only)
+       │      └── Vehicle Title/Invoice   (auto_loan only)
+       ├── id_photo                      (appears only once an application under
+       │                                  this applicant_identifier is approved --
+       │                                  same Mayan document as that application's
+       │                                  Government ID, re-tagged, not copied)
+       └── <account_id>                  (appears only once an application under
+              ├── Welcome Letter          this applicant_identifier is approved)
+              └── Consent                 (single document, multiple file versions)
 ```
 
-Directly `mayan-edms-customer-archive`'s own `Customer → Account →
-Application` shape. The same **five gotchas** documented in that
-project's `docs/document-hierarchy-setup.md` apply unchanged — read
-that file before touching the index template or `document/`'s setup
-script:
+**Two required metadata types beyond the original three**
+(`applicant_identifier`, `application_id`, `category`): **`account_id`**
+(new — the account branch's node key, present only on `Welcome
+Letter`/`Consent` documents, absent on everything under
+`<application_id>`) and **`customer_id`** (attached to the promoted
+`id_photo` document alongside its original `application_id`/category
+metadata, purely so staff search can find it by customer — not itself
+an index branch key, since `applicant_identifier` already plays that
+role).
+
+**Multi-leaf placement — source-level confidence, not yet
+empirically confirmed (flag for Phase 5)**: the `id_photo` node depends
+on one Mayan document satisfying two different leaf-node paths in the
+same index template at once — the existing `<application_id> ->
+Government ID` path (via `application_id` + `category` metadata) and
+the new `<applicant_identifier> -> id_photo` path (via `customer_id`
+metadata, no `application_id` in that leaf's condition). A source read
+of `mayan/apps/document_indexing/models/index_instance_models.py`'s
+`_document_add()` shows it walks *every* child branch at each tree
+level and links the document into *all* branches whose conditions
+independently evaluate true — not just the first match — which is
+exactly this behavior. That's meaningfully more confidence than "an
+assumption" (a session investigating whether to replace Index Templates
+with Cabinets confirmed this by reading Mayan's actual source, not just
+inferring it), but it's still not the same as gotchas #1-5 below, which
+came from hands-on testing against a running instance. **Cabinets were
+evaluated as an alternative and rejected as the hierarchy's backbone**
+— they also support true multi-membership and are synchronous (no
+Celery, unlike Index Templates), but the project's actual usage pattern
+is automatic, upload-time classification via API, which is Index
+Templates' idiomatic niche, not Cabinets' (a third-party source
+describes Cabinets as manual, file-manager-style curation). Confirm the
+multi-leaf behavior against a real Mayan instance in P5-2 before
+building `promote_government_id_to_customer_photo` on top of it; if it
+doesn't hold, the fallback is a real copy (two Mayan documents, extra
+storage, `id_photo` no longer literally "the same document") — document
+whichever it turns out to be, right here, once verified.
+
+**A sharper, previously-implicit consequence of gotcha #2 (async
+reindex)**: `document.service.check_completeness()` and
+`list_documents()`/`list_customer_documents()`/`list_account_documents()`
+**must query Mayan's document/metadata search API directly, filtering
+on the relevant id + category metadata — never read the Index Template
+tree.** Metadata attachment itself is synchronous; only the *index's*
+recomputed tree membership is async (Celery-driven, per gotcha #2). If
+`check_completeness` walked the index tree instead, a customer who
+uploads their last required document and immediately hits Submit could
+get a false "still missing" result purely from index lag — a real
+correctness bug, not a hypothetical, since `create_application()` calls
+`check_completeness()` synchronously right after the customer's last
+upload (PRD §6.4). The Index Template tree exists for staff to browse
+the archive visually in Mayan's own UI; it is not a data source for any
+of this application's own logic.
+
+**Two levels on the application branch, not `mayan-edms-customer-archive`'s three** — that
+project's `Customer → Account → Application` shape assumed both a
+customer and an account already existed at document-upload time. Here
+neither does: documents are uploaded and the completeness gate checked
+*before* submission (PRD §6.4), and an account is now the *outcome* of
+an approved application, not a precondition of filing one (see
+"Applying without being a customer yet" above). `applicant_identifier`
+is used as the top level specifically because it's the one identity
+value guaranteed to exist at upload time regardless of whether the
+applicant is a recognized customer yet — using `customer_id` instead
+would mean branching this index between "customer" and "prospect"
+sub-trees, or re-parenting documents after approval (Mayan gotcha #2's
+async reindex makes that a real cost, not just an inconvenience); a
+flat `applicant_identifier` node sidesteps both. The same **five
+gotchas** documented in `mayan-edms-customer-archive`'s
+`docs/document-hierarchy-setup.md` still apply — read that file before
+touching the index template or `document/`'s setup script (they're
+about index-template mechanics, not the specific number of levels):
 
 1. Empty index-node expressions don't prune the branch — every leaf
    condition must repeat the full ancestor requirement set.
@@ -469,6 +862,8 @@ purpose-built identity problem — PRD §7.1).
 
 ## Data storage
 
+*(ER diagram: [`docs/diagrams/er-diagram.md`](docs/diagrams/er-diagram.md).)*
+
 **One application database, `loan_onboarding`**, holding all three
 domain tables — `customers` (owned by `customer/`), `accounts` (owned
 by `account/`), `applications` (owned by `application/`) — plus a
@@ -529,6 +924,10 @@ loan-onboarding-poc/
 ├── keycloak/
 │   └── import/loanrealm-realm.json
 ├── docs/
+│   ├── api-specification.md   # internal service.py contracts (all 7 modules)
+│   └── diagrams/               # rendered Mermaid versions of this file's
+│                                # ASCII diagrams -- ER, system architecture,
+│                                # module dependency graph
 ├── .importlinter              # or pyproject.toml [tool.importlinter] --
 │                              # encodes the dependency graph above
 ├── tests/
@@ -613,6 +1012,8 @@ project's `worker.py` already runs as a process separate from its
 
 ## Docker Compose topology (local dev)
 
+*(Rendered version: [`docs/diagrams/system-architecture.md`](docs/diagrams/system-architecture.md).)*
+
 Much smaller than the microservices version of this plan — one app
 image instead of seven:
 
@@ -640,6 +1041,15 @@ for `KEYCLOAK_ISSUER`.
 - No real customer authentication on `bff_customer/` (PRD §7.1) — still
   the standout risk; unaffected by `bff_backoffice/`'s real Keycloak
   auth, since they're separate surfaces with separate identity models.
+- The active-account-per-product-type rule (`accounts.product_type`'s
+  partial unique index, "Applying without being a customer yet") is
+  checked before a decision is signaled, but not atomically with it —
+  two near-simultaneous Approve decisions for the same customer and
+  product type could both pass `check_decision_allowed` before either
+  commits. The database constraint stops the bad state from ever being
+  written, but `persist_decision` has no graceful handling for the
+  resulting write failure; it would surface as an activity error, not a
+  clean outcome.
 - Module boundaries are enforced by import-linter config, not by a
   process/network boundary — a determined or careless change can still
   violate them if CI isn't actually wired to fail on a violation. Don't

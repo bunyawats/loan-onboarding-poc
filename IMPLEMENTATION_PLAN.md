@@ -150,11 +150,17 @@ assumption; until then treat it as provisional, not settled.)*
 - [ ] **P2-1** — `customer/models.py`, `customer/db.py` (the only code
       touching the `customers` table).
 - [ ] **P2-2** — `customer/service.py`:
-      `identify_or_create(applicant_identifier) -> Customer`
-      (find-or-create, idempotent), `get(customer_id) -> Customer`.
-      DoD: unit tests cover both the find and the create branch of
-      `identify_or_create` (call it twice with the same identifier,
-      assert the second call returns the same `customer_id`).
+      `find_by_identifier(applicant_identifier) -> Customer | None`
+      (read-only, no side effects), `get_or_create(applicant_identifier)
+      -> Customer` (find-or-create, idempotent — see `CLAUDE.md`'s
+      "Applying without being a customer yet": this is called only from
+      `application/activities.py` on approval, never from
+      `bff_customer`), `get(customer_id) -> Customer`.
+      DoD: unit tests cover `find_by_identifier` returning `None` for no
+      match, and both the find and the create branch of `get_or_create`
+      (call it twice with the same identifier, assert the second call
+      returns the same `customer_id`, and that no second row was
+      created).
 
 ---
 
@@ -167,11 +173,25 @@ dependency between them.
 - [ ] **P3-1** — `account/models.py`, `account/db.py` (the only code
       touching the `accounts` table).
 - [ ] **P3-2** — `account/service.py`:
-      `find_or_create_for_customer(customer_id) -> Account`,
-      `get(account_id) -> Account`.
-      DoD: unit test proves calling `find_or_create_for_customer` twice
-      for the same `customer_id` returns the same `account_id` (one
-      account per customer for this POC — PRD §9.2).
+      `create_account(customer_id, product_type) -> Account` (always
+      creates a new row — no find-or-create; an account is 1:1 with an
+      approved application, not 1:1 with a customer, see `CLAUDE.md`'s
+      "Applying without being a customer yet"),
+      `has_active_account_of_type(customer_id, product_type) -> bool`
+      (read-only — the function `application.service.check_decision_allowed`
+      calls in Phase 6), `get(account_id) -> Account`.
+      DoD: unit test proves calling `create_account` twice for the same
+      `customer_id` with **different** `product_type`s returns two
+      different `account_id`s (a customer can hold multiple accounts —
+      PRD §9.2, revised); a second unit test drives
+      `create_account` twice for the same `customer_id` and **same**
+      `product_type` and confirms the second call fails against the
+      real schema's partial unique index (`db/schema.sql`'s
+      `ux_accounts_customer_active_product_type`) — not just that the
+      function *would* reject it, the actual constraint firing;
+      `has_active_account_of_type` tested both ways (true after one
+      `ACTIVE` account of that type exists, false again after it's
+      `CLOSED`).
 
 ---
 
@@ -225,7 +245,12 @@ name, so this phase does not need `application/activities.py` to exist).
       error against a `WorkflowEnvironment`'s local server (don't need
       real activities to prove the bootstrap logic itself works).
 - [ ] **P4-4** — `workflow/service.py`: `start_workflow(application_id,
-      product_type, payload) -> workflow_id`, `signal_decision(...)`,
+      product_type, payload, amount, applicant_identifier, customer_id)
+      -> workflow_id` (`amount`/`applicant_identifier`/`customer_id` are
+      named arguments, not read out of `payload` — the workflow needs
+      `amount` for the PRD §6.3 escalation check, and forwards
+      `applicant_identifier`/`customer_id` untouched to the
+      `persist_application` activity), `signal_decision(...)`,
       `signal_resubmit(...)`, `bulk_signal_decision(workflow_ids,
       decision, actor_name, comment)` (fan-out via `asyncio.gather()`,
       cap `_MAX_BULK_SIZE = 50`, catch only the exception types
@@ -248,37 +273,96 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       `mayan-edms-customer-archive/docker-compose.yml`).
       DoD: `docker compose up -d mayan`, log in at `localhost:8000`.
 - [ ] **P5-2** — `scripts/setup_document_hierarchy.sh`: creates the
-      metadata types (`customer_id`, `account_id`, `application_id`,
-      `category`), document types, and the three-level Index Template
-      per `CLAUDE.md`'s "Document hierarchy". **Read
+      metadata types (`applicant_identifier`, `application_id`,
+      `account_id`, `customer_id`, `category`), document types, and the
+      full Index Template per `CLAUDE.md`'s "Document hierarchy" — the
+      submission-gate branch (`applicant_identifier -> application_id ->
+      category`), the `id_photo` leaf directly under
+      `applicant_identifier` (via `customer_id` metadata, no
+      `application_id` in that leaf's condition), and the
+      `applicant_identifier -> account_id -> {Welcome Letter, Consent}`
+      branch. **Read
       `mayan-edms-customer-archive/docs/document-hierarchy-setup.md`
       before writing this** — all five gotchas apply.
       DoD (integration-verify): run the script against the fresh
       instance from P5-1; manually upload one test document per level,
       confirm the tree renders correctly in Mayan's UI, wait the ~10-15s
-      for the async index rebuild before checking.
+      for the async index rebuild before checking. **Also specifically
+      verify the `id_photo` multi-membership assumption**
+      (`CLAUDE.md`'s flagged, not-yet-confirmed note in "Document
+      hierarchy"): upload one document with both `application_id`+
+      `category=Government ID` metadata AND `customer_id` metadata set,
+      confirm it appears under *both*
+      `<application_id>/Government ID` *and*
+      `<applicant_identifier>/id_photo` in the rendered tree. If it
+      doesn't, stop and record the actual behavior in `CLAUDE.md` before
+      P6-3/P5-5 build `promote_government_id_to_customer_photo` against
+      an assumption that turned out false.
 - [ ] **P5-3** — `document/mayan_client.py`: thin async wrapper,
       `Accept: application/json` default header (do not omit — see
       `CLAUDE.md`), service-account token obtained lazily and refreshed
       on 401, metadata/document-type id lookups cached for process
       lifetime.
-- [ ] **P5-4** — `document/service.py`: `upload(application_id, category,
-      file)` (create → upload with `action_name=replace` → attach
-      metadata → rebuild index), `list_documents(application_id)`,
+- [ ] **P5-4** — `document/service.py`: `upload(applicant_identifier,
+      application_id, category, file)` (create → upload with
+      `action_name=replace` → attach metadata → rebuild index) — no
+      `customer_id`/`account_id` param; `document/` is a leaf module and
+      neither exists yet at upload time under the account-on-approval
+      model (see `CLAUDE.md`), `list_documents(application_id)`,
       `check_completeness(application_id, product_type) -> list[str]`
       (missing categories, per PRD §6.4's per-product required-category
       table), `preview(application_id, document_id)` (streams from
-      Mayan).
+      Mayan). **`check_completeness` and `list_documents` must query
+      Mayan's document/metadata search API directly (filtered on
+      `application_id` + `category`), never read the Index Template
+      tree** — the tree's rebuild is async (gotcha #2) but metadata
+      attachment isn't, and `check_completeness` runs synchronously
+      right after the customer's last upload (`application.service.create_application`)
+      — reading the tree here risks a false "still missing" result from
+      pure reindex lag, not an actual missing document. See `CLAUDE.md`'s
+      "Document hierarchy" for the full reasoning.
       DoD (integration-verify): upload a real file (not a hand-typed
       stub — verify with `file <path>` that it has a real page count,
       per gotcha #4), confirm `check_completeness` correctly reports
-      missing vs. satisfied for a partially-uploaded application.
+      missing vs. satisfied for a partially-uploaded application, **and
+      specifically confirm `check_completeness` returns satisfied
+      immediately after the final required upload — before waiting out
+      the ~10-15s index-rebuild window** (proves it isn't reading the
+      index tree).
+- [ ] **P5-5** — `document/service.py`, part 2 — the managed-document
+      functions (PRD §6.5): `promote_government_id_to_customer_photo(application_id,
+      customer_id)` (re-tags the existing Government ID document with
+      `customer_id` metadata, rebuilds index — does not fetch/re-upload
+      the file), `generate_welcome_letter(account_id, customer_id,
+      applicant_name, product_type, amount) -> DocumentRef` (renders a
+      simple templated PDF, uploads it tagged to `account_id` —
+      plain-argument signature only, no `application/`/`customer/`/
+      `account/` imports), `upload_consent(account_id, file) ->
+      DocumentRef` (finds the account's existing "consent" document if
+      any and uploads a new **file version** of it via Mayan's own
+      versioning, `action_name=new`* rather than `replace` — creates
+      the document first if none exists yet; *confirm the exact
+      `action_name` value against Mayan's API during this task, same
+      "don't guess a string ID" caution as gotcha #3),
+      `list_customer_documents(customer_id)`,
+      `list_account_documents(account_id)`.
+      DoD (integration-verify): call `upload_consent` twice for the same
+      `account_id` with two different files, confirm Mayan shows **one**
+      document with **two versions** (not two documents) when inspected
+      directly; call `promote_government_id_to_customer_photo` and
+      confirm no new document was created (same `document_id` as the
+      original Government ID upload, just additional metadata).
 
 ---
 
 ## Phase 6 — Application Module
 
-**Depends on:** Phases 1, 4, 5. **Unblocks:** Phase 7.
+**Depends on:** Phases 1, 2, 3, 4, 5 (specifically P5-5, not just
+Phase 5's earlier tasks). **Unblocks:** Phase 7. **Phases 2 and 3 are
+new dependencies vs. the original ordering** — `application/
+activities.py`'s `persist_decision` now calls `customer.service` and
+`account.service` on approval (see `CLAUDE.md`'s "Applying without
+being a customer yet"), so P6-3 can't be written until both exist.
 
 - [ ] **P6-1** — `application/models.py`, `application/db.py` (the only
       code touching the `applications` table).
@@ -299,26 +383,65 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       all four decision outcomes in one activity (APPROVE/REJECT/
       REQUEST_MORE_INFO/CANCEL — same columns, different values, same
       reasoning as the reference project's merged `persist_decision`).
+      **This file is the one place in `application/` allowed to import
+      `customer/` and `account/`** (see `CLAUDE.md`'s "Applying without
+      being a customer yet") — it already imports `document/`, so the
+      two `document.service` calls below aren't a new edge: when
+      `persist_decision` is called with a terminal `APPROVED` status, it
+      must (a) check `applications.account_id IS NOT NULL` first and
+      skip the entire block below if so (a Temporal retry of an
+      already-completed execution — none of these calls are
+      independently idempotent), (b) call
+      `customer.service.get_or_create(applicant_identifier)` only if
+      `customer_id` is still `NULL`, (c) call
+      `account.service.create_account(customer_id, product_type)`
+      (always — new row every time this path actually runs; **not
+      conflict-checked again here** — `application.service.check_decision_allowed`
+      (P6-5b, below) already ran before this decision was ever
+      signaled, so this call trusts that, with the schema's partial
+      unique index as the only backstop against the documented race
+      window), (d) call
+      `document.service.promote_government_id_to_customer_photo(application_id,
+      customer_id)` and
+      `document.service.generate_welcome_letter(account_id, customer_id,
+      applicant_name, product_type, amount)` (PRD §6.5), (e) write
+      status + decision columns + resolved `customer_id`/`account_id`
+      together in one update.
       DoD: unit tests call each activity function directly (no Temporal
-      needed for this) against a test database, confirm the right
-      columns land.
+      needed for this) against a test database, mocking
+      `document.service.promote_government_id_to_customer_photo`/
+      `generate_welcome_letter` at the function-call level (same
+      "mock at the boundary" convention `CLAUDE.md`'s Testing section
+      already uses for `document.service`/`workflow.service`), confirm
+      the right columns land — **including a test that calls
+      `persist_decision` with `APPROVED` twice in a row for the same
+      application and asserts only one account gets created, and that
+      the two `document.service` calls only happen once** (the
+      retry-idempotency case above), and a test confirming a
+      `REJECTED`/`CANCELLED` call never touches `customer/`/`account/`
+      or these two `document.service` functions at all.
 - [ ] **P6-4** — `application/service.py`, part 1:
-      `create_application(customer_id, account_id, product_type,
+      `create_application(applicant_identifier, product_type,
       payload, applicant_name, applicant_email, applicant_phone,
-      amount)`. Generates `application_id` first, validates `payload`
+      amount)`. **No `customer_id`/`account_id` params** — generates
+      `application_id`, resolves `customer_id` via the read-only
+      `customer.service.find_by_identifier(applicant_identifier)`
+      (`None` if no match — `account_id` is always `None` at creation
+      regardless), validates `payload`
       against P6-2's schema, calls `document.service.check_completeness`;
       if categories are missing, returns them without calling
       `workflow.service` at all. If satisfied, calls
       `workflow.service.start_workflow(application_id, product_type,
-      payload)`, then polls via `_wait_until()` (bounded ~50ms/5s,
+      payload, amount, applicant_identifier, customer_id)`, then polls via `_wait_until()` (bounded ~50ms/5s,
       always returns the last read even on timeout — see `CLAUDE.md`)
       against `application/db.py`'s own read until the row (written by
       `persist_application` inside the workflow's `run()`) appears.
       DoD (integration-verify): with the real stack up, submit a
       complete application and confirm it lands in
-      `PENDING_UNDERWRITING` in Postgres, then submit an incomplete one
-      and confirm no workflow was started (check Temporal Web UI — no
-      new execution).
+      `PENDING_UNDERWRITING` in Postgres with `customer_id`/`account_id`
+      both still `NULL` (assuming a brand-new `applicant_identifier`),
+      then submit an incomplete one and confirm no workflow was started
+      (check Temporal Web UI — no new execution).
 - [ ] **P6-5** — `application/service.py`, part 2:
       `resubmit_application(application_id, payload)` — same gate
       re-check, then `workflow.service.signal_resubmit()` against the
@@ -331,13 +454,35 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       call in the test setup rather than waiting on the BFF), resubmit,
       confirm it's back at `PENDING_UNDERWRITING` on the *same*
       `workflow_id`.
+- [ ] **P6-5b** — `application/service.py`, part 2b:
+      `check_decision_allowed(application_id, decision) -> list[str]`
+      (blocking-reason strings, `[]` if OK — no-op unless `decision ==
+      "APPROVE"`, per PRD §9.2's one-active-account-per-product-type
+      rule). Resolves the application's `customer_id` (short-circuit to
+      `[]` if still `NULL` — a brand-new applicant can't conflict with
+      anything), calls the read-only
+      `account.service.has_active_account_of_type(customer_id,
+      product_type)`. **`bff_backoffice` (Phase 10) must call this
+      before `workflow.service.signal_decision(...)`/`bulk_signal_decision(...)`**
+      — this task only builds the check itself, not the call site.
+      DoD: unit tests cover the short-circuit (`customer_id` still
+      `NULL`), the blocked case (an `ACTIVE` account of the same
+      `product_type` already exists), the allowed case (no conflicting
+      `ACTIVE` account, or only a `CLOSED` one of that type), and that
+      `REJECT`/`REQUEST_MORE_INFO`/`CANCELLED` always return `[]`
+      without calling `account.service` at all.
 - [ ] **P6-6** — `application/service.py`, part 3: `get(application_id)`,
-      `list_for_customer(applicant_identifier, page, ...)`,
+      `list_for_applicant(applicant_identifier, page, ...)`,
       `list_by_status(status, page, ...)`. Paginated, `query_id`-cached
       per the `list-pagination-bulk-actions` skill's pattern (load that
       skill before writing this task) — mint a `query_id` server-side
       for the total count, echo it back, re-verify any client-supplied
-      `filter` before trusting a cached count.
+      `filter` before trusting a cached count. **`applicant_identifier`,
+      not `customer_id`** — this list has to work for an applicant with
+      no approved application yet, whose `customer_id` is still `NULL`
+      on every row (see `CLAUDE.md`'s "Applying without being a
+      customer yet"); `application/` never imports `customer/` for this
+      path either way.
       DoD: unit tests cover pagination math (page boundaries, empty
       result set) and that a `query_id` minted for one
       `applicant_identifier` filter is rejected/ignored if reused with a
@@ -457,16 +602,31 @@ and `htmx4` skills before starting this phase.**
       screens calling `application.service.list_by_status(...)`,
       auto-refresh every 5s.
 - [ ] **P10-2** — Row detail dialog: applicant/loan fields (via
-      `customer.service`/`account.service`), product-specific payload
+      `customer.service.get()`/`account.service.get()` **when
+      `customer_id`/`account_id` are set** — fall back to the
+      application's own denormalized `applicant_name`/`applicant_email`/
+      `applicant_phone` when they're `NULL`, which is the normal case
+      for anything not yet terminally `APPROVED` — see `CLAUDE.md`'s
+      "Applying without being a customer yet"), product-specific payload
       fields, document links (`document.service.preview(...)`),
       single-item decision form gated by
       `_user_permissions(user)` (buttons only render for a granted
-      scope).
+      scope). **On Approve specifically, call
+      `application.service.check_decision_allowed(application_id,
+      "APPROVE")` first** (P6-5b) — a non-empty result shows the
+      conflict as a form error and never calls
+      `workflow.service.signal_decision(...)` at all.
 - [ ] **P10-3** — Bulk selection: server-side store
       (`bff_backoffice/selection_store.py`, reusing the Redis instance
       from P9-3), checkbox column, "select all on this page," selection
       toolbar, confirm dialog with one shared comment, calling
-      `workflow.service.bulk_signal_decision(...)`.
+      `workflow.service.bulk_signal_decision(...)`. **For a bulk
+      Approve, call `check_decision_allowed` per selected application
+      first** and filter conflicting ones out of the batch *before*
+      collecting `workflow_ids` — report each filtered-out application
+      in the same per-item result shape `bulk_signal_decision` already
+      returns for any other failure, rather than passing its
+      `workflow_id` through to `bulk_signal_decision` at all.
 - [ ] **P10-4** — Pagination: `query_id`-cached counts per the skill's
       pattern, correct across the 5s auto-poll.
       DoD (integration-verify, whole phase): log in as `underwriter1`,
@@ -475,7 +635,10 @@ and `htmx4` skills before starting this phase.**
       Underwriter, confirm it appears on `/ui/manager` for `manager1`
       and not for `underwriter1`; confirm a permission-lacking session
       gets a real 403 attempting a decision action directly (not just a
-      hidden button — try the route with `curl`/a raw request).
+      hidden button — try the route with `curl`/a raw request); **create
+      a second application for a customer who already has an active
+      account of the same product type, confirm Approve is refused with
+      a clear reason and no workflow signal is sent** (PRD §9.2).
 
 ---
 
@@ -488,8 +651,8 @@ precedent in either reference project — the most novel phase.
       holding `applicant_identifier`, no password. `/apply` redirects
       to an identify screen if the cookie is missing.
 - [ ] **P11-2** — "My Applications" screen:
-      `application.service.list_for_customer(...)`, status badges, "Apply
-      for a new loan" CTA.
+      `application.service.list_for_applicant(applicant_identifier,
+      ...)`, status badges, "Apply for a new loan" CTA.
 - [ ] **P11-3** — New Application flow: product-type picker → common +
       product-specific fields → document upload (camera capture for ID
       via `<input type="file" capture>`, file picker for
