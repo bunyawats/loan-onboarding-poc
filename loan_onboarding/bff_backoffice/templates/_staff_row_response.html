@@ -1,0 +1,14 @@
+{% import "_staff_row.html" as row_macros %}
+{#
+  A bare <tr> here would get its outer tr/td tags stripped by the
+  browser's HTML parser -- <tr>/<td> are only valid inside a table
+  (htmx4 skill's "Swapping <tr>/<td> fragments outside a <table>
+  context"). Wrapping in a real <table><tbody> gives the parser a valid
+  context so the <tr> survives intact; the caller uses
+  select: 'tr' (see routes.py's _staff_decision -> htmx.ajax call in
+  _detail_dialog.html) to pull just the <tr> back out of this wrapper
+  for the actual swap.
+#}
+<table><tbody>
+{{ row_macros.staff_row(application, role, permissions) }}
+</tbody></table>

@@ -1,0 +1,127 @@
+{% set a = application %}
+{% set badge_classes = {
+  "pending_underwriting": "bg-amber-100 text-amber-800",
+  "more_info_requested": "bg-orange-100 text-orange-800",
+  "pending_manager_approval": "bg-blue-100 text-blue-800",
+  "approved": "bg-green-100 text-green-800",
+  "rejected": "bg-red-100 text-red-800",
+  "cancelled": "bg-gray-200 text-gray-700",
+} %}
+{#
+  Applicant fields fall back to the application's own denormalized
+  values whenever customer_id/account_id aren't set yet -- the normal
+  case for anything not yet terminally APPROVED (CLAUDE.md's "Applying
+  without being a customer yet").
+#}
+{% set applicant_name = customer.name if customer and customer.name else a.applicant_name %}
+{% set applicant_email = customer.email if customer and customer.email else a.applicant_email %}
+{% set applicant_phone = customer.phone if customer and customer.phone else a.applicant_phone %}
+{% set can_decide = a.status == (
+  "PENDING_UNDERWRITING" if role == "underwriter" else "PENDING_MANAGER_APPROVAL"
+) %}
+{% set my_options = decision_options(role) | selectattr(2, "in", permissions) | list %}
+<div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+  <div class="bg-white rounded-xl p-6 w-[560px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
+    <h2 class="text-lg font-semibold mt-0 mb-4">Application Detail</h2>
+    {% if error %}
+    <div class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mb-3">{{ error }}</div>
+    {% endif %}
+
+    <div class="grid grid-cols-2 gap-4 mb-4">
+      <div>
+        <label class="block text-xs font-semibold mb-1 text-gray-700">Applicant</label>
+        <div class="text-sm py-0.5">{{ applicant_name }}</div>
+        <div class="text-sm py-0.5 text-gray-500">{{ applicant_email }}</div>
+        <div class="text-sm py-0.5 text-gray-500">{{ applicant_phone }}</div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold mb-1 text-gray-700">Product</label>
+        <div class="text-sm py-0.5">{{ a.product_type|replace("_", " ")|title }}</div>
+        <div class="text-sm py-0.5 text-gray-500">${{ "{:,.2f}".format(a.amount) }}</div>
+      </div>
+    </div>
+
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Status</label>
+      <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(a.status|lower, 'bg-gray-200 text-gray-700') }}">
+        {{ a.status|replace("_", " ") }}
+      </span>
+    </div>
+
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Application Details</label>
+      <table class="w-full text-sm border-collapse">
+        {% for key, value in a.payload.items() %}
+        <tr class="border-b border-gray-100 last:border-b-0">
+          <td class="py-1 pr-3 text-gray-500 whitespace-nowrap">{{ key|replace("_", " ")|title }}</td>
+          <td class="py-1">{{ value }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Documents</label>
+      {% if documents %}
+      <ul class="text-sm list-none p-0 m-0">
+        {% for doc in documents %}
+        <li class="py-0.5">
+          <a class="text-blue-700 hover:underline" target="_blank" rel="noopener"
+            href="/ui/{{ role }}/{{ a.application_id }}/documents/{{ doc.document_id }}/preview">
+            {{ doc.category }} -- {{ doc.filename }}
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="text-sm text-gray-500 m-0">No documents.</p>
+      {% endif %}
+    </div>
+
+    {% if a.underwriter_name %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Underwriter decision</label>
+      <div class="text-sm py-0.5">{{ a.underwriter_name }}{% if a.underwriter_comment %} -- {{ a.underwriter_comment }}{% endif %}</div>
+    </div>
+    {% endif %}
+    {% if a.manager_name %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Manager decision</label>
+      <div class="text-sm py-0.5">{{ a.manager_name }}{% if a.manager_comment %} -- {{ a.manager_comment }}{% endif %}</div>
+    </div>
+    {% endif %}
+
+    {% if can_decide and my_options %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional)</label>
+      <textarea id="decision-comment-{{ a.application_id }}"
+        class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm min-h-[80px]"></textarea>
+    </div>
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+      {#
+        Same pattern as every other dialog's confirm button (htmx4
+        skill's "stable per-item element" indicator placement): read the
+        comment, close the dialog immediately, then fire the decision in
+        the background -- the row's own Review button (still on screen)
+        is what shows progress via its own spinner.
+      #}
+      {% for decision, label, permission in my_options %}
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md {{ 'bg-green-600 text-white hover:bg-green-700' if decision == 'APPROVE' else ('bg-red-600 text-white hover:bg-red-700' if decision == 'REJECT' else 'bg-amber-500 text-white hover:bg-amber-600') }}"
+        onclick="var c = document.getElementById('decision-comment-{{ a.application_id }}').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/{{ role }}/{{ a.application_id }}/decision', {source: document.getElementById('review-btn-{{ a.application_id }}'), target: '#row-{{ a.application_id }}', select: 'tr', swap: 'outerHTML swap:400ms', values: {decision: '{{ decision }}', comment: c}})">
+        {{ label }}
+      </button>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">Close</button>
+    </div>
+    {% endif %}
+  </div>
+</div>

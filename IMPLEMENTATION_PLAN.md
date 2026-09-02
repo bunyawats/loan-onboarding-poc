@@ -74,7 +74,7 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 9 — done.** Phase 7 was a real milestone: everything
+**Phases 0 through 10 — done.** Phase 7 was a real milestone: everything
 below the two BFFs (customer/account/application/document/workflow,
 the worker processes, the full approve/reject/escalate/resubmit/cancel
 lifecycle) now works end to end against the real local stack, with a
@@ -84,13 +84,15 @@ confirmed clean against the current codebase and confirmed to actually
 fail CI on a real violation (P8-2's note). Phase 9 built the realm
 import and all three `bff_backoffice/` auth modules
 (`keycloak_auth.py`/`session_store.py`/`keycloak_session.py`), verified
-against a real local Keycloak + Redis. Start here:
-[Phase 10](#phase-10--back-office-bff-ui-staff-screens) (Back-Office
-BFF UI) — depends on Phases 7 and 9 (both now done). **Load the
-`list-pagination-bulk-actions` and `htmx4` skills before starting**, per
-that phase's own instruction. Phase 11 (Customer BFF UI) needs Phases
-2, 3, 5, 7 (all done) and could run instead/in parallel if a session
-prefers.
+against a real local Keycloak + Redis. **Phase 10 built `app.py` and
+`bff_backoffice/routes.py` — the first real, browser-usable screen in
+this whole project** — and walked its entire DoD checklist through an
+actual browser against the real stack (real Keycloak login, real
+Postgres/Temporal/Mayan), not curl simulation. Start here:
+[Phase 11](#phase-11--customer-bff-ui-self-service-mobile-flow)
+(Customer BFF UI) — depends on Phases 2, 3, 5, 7 (all done). **Load the
+`htmx4` skill before starting**, per that phase's own instruction — this
+is the most novel phase, no direct reference-project precedent.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1387,11 +1389,36 @@ this and Phase 7 done).
 **Depends on:** Phases 7, 9. **Load the `list-pagination-bulk-actions`
 and `htmx4` skills before starting this phase.**
 
-- [ ] **P10-1** — `bff_backoffice/routes.py`: `/ui/login` (Keycloak
+- [x] **P10-1** — `bff_backoffice/routes.py`: `/ui/login` (Keycloak
       Authorization Code flow), `/ui/underwriter`, `/ui/manager` — list
       screens calling `application.service.list_by_status(...)`,
       auto-refresh every 5s.
-- [ ] **P10-2** — Row detail dialog: applicant/loan fields (via
+      > DONE: also built `app.py` (the composition root, not previously
+      > listed as its own task but required for any of this to run —
+      > mounts `SessionMiddleware`, exception handlers mapping
+      > `keycloak_session.py`'s `RequireLoginRedirect`/`RoleDenied`/
+      > `PermissionDenied` to a 303 redirect / 403s, and
+      > `bff_backoffice`'s router). Underwriter and Manager screens
+      > share one set of route handlers parameterized by `role`
+      > (`"underwriter"`/`"manager"`) and one shared template set — a
+      > deliberate simplification versus the reference project's literal
+      > per-role file duplication, since the two screens differ only in
+      > which `status` they filter on and which decisions/permissions
+      > apply, never in structure. Followed the reference project's own
+      > `bff/ui.py`/templates exactly for the mechanics (fetched and
+      > read directly): OOB toolbar refresh, the `_rows`/`_rows_body`
+      > split so the 5s poll never rebuilds the header's select-all
+      > checkbox, `select: 'tr'` + a `<table><tbody>` wrapper for
+      > single-row swaps (htmx4 skill's documented gotcha), the
+      > `HX-Retarget`/`HX-Reswap`/`HX-Reselect` error-path headers.
+      > **`keycloak_session.py`'s functions (P9-4) take a plain
+      > `session_id`, not a `Request`** (that module's own documented
+      > adaptation) — `routes.py` supplies thin FastAPI-dependency
+      > wrappers (`_role_dependency(role)`, `_session_user_dependency`)
+      > that extract `request.session.get(SESSION_KEY)` and delegate,
+      > which is exactly the "thin, framework-coupled layer on top"
+      > that module's docstring anticipated.
+- [x] **P10-2** — Row detail dialog: applicant/loan fields (via
       `customer.service.get()`/`account.service.get()` **when
       `customer_id`/`account_id` are set** — fall back to the
       application's own denormalized `applicant_name`/`applicant_email`/
@@ -1406,7 +1433,23 @@ and `htmx4` skills before starting this phase.**
       "APPROVE")` first** (P6-5b) — a non-empty result shows the
       conflict as a form error and never calls
       `workflow.service.signal_decision(...)` at all.
-- [ ] **P10-3** — Bulk selection: server-side store
+      > DONE: added a `document.service.preview(...)`-backed streaming
+      > route (`/ui/{role}/{application_id}/documents/{document_id}/preview`,
+      > not explicitly named in this task's own text but required to
+      > make "document links" real) — verified in a real browser tab
+      > that a linked PDF actually opens and renders, not just that the
+      > link exists. Decision buttons are built from a shared
+      > `_decision_options(role)` helper (`(decision, label,
+      > permission)` triples) registered as Jinja globals alongside
+      > `_has_select_column`, so every template computes visibility from
+      > `role`/`permissions` it already has, rather than threading extra
+      > context keys through every render call site. `wait_for_status_change()`
+      > (a new public function added to `application/service.py`,
+      > reusing its existing private `_wait_until` primitive) is what
+      > lets the single-row response show the *actual* post-decision
+      > status immediately, since `signal_decision()` only confirms
+      > Temporal accepted the signal.
+- [x] **P10-3** — Bulk selection: server-side store
       (`bff_backoffice/selection_store.py`, reusing the Redis instance
       from P9-3), checkbox column, "select all on this page," selection
       toolbar, confirm dialog with one shared comment, calling
@@ -1417,7 +1460,17 @@ and `htmx4` skills before starting this phase.**
       in the same per-item result shape `bulk_signal_decision` already
       returns for any other failure, rather than passing its
       `workflow_id` through to `bulk_signal_decision` at all.
-- [ ] **P10-4** — Pagination: `query_id`-cached counts per the skill's
+      > DONE: `selection_store.py` is a plain Redis `SET` per session id
+      > (`SADD`/`SREM`/`SMEMBERS`) — simpler than the reference
+      > project's own JSON-blob `SessionMemory` since this project
+      > doesn't need that module's bundled pagination-fallback tier (see
+      > P10-4's note). Bulk toolbar offers one button per decision the
+      > role's screen supports and the user actually holds the
+      > permission for (up to three for Underwriter, two for Manager).
+      > Verified live in the browser: bulk-approved two applications in
+      > one action, got "2 succeeded, 0 failed", and the list correctly
+      > dropped both from the queue via the OOB table refresh.
+- [x] **P10-4** — Pagination: `query_id`-cached counts per the skill's
       pattern, correct across the 5s auto-poll.
       DoD (integration-verify, whole phase): log in as `underwriter1`,
       confirm `/ui/manager` is inaccessible; approve a below-threshold
@@ -1429,6 +1482,88 @@ and `htmx4` skills before starting this phase.**
       a second application for a customer who already has an active
       account of the same product type, confirm Approve is refused with
       a clear reason and no workflow signal is sent** (PRD §9.2).
+      > DONE: reuses `application.service.list_by_status`'s existing
+      > `query_id` cache as-is — **deliberately no Redis-backed
+      > pagination-fallback tier** (the reference project's own
+      > `SessionMemory`-based tier 2/3 resilience), since neither staff
+      > screen here has a per-user ownership filter to protect (both are
+      > pure status filters, unlike that project's operator screen) —
+      > a `query_id` miss just means "recompute for real," which the
+      > `list-pagination-bulk-actions` skill explicitly calls an
+      > acceptable simplification. **Full DoD walked end to end against
+      > the real stack via an actual browser** (`claude-in-chrome`, real
+      > Keycloak Authorization Code login, not curl-simulated) rather
+      > than assumed from route code:
+      > - `underwriter1` logs in for real, sees all 7 seeded test
+      >   applications with correct data.
+      > - `/ui/manager` confirmed inaccessible for `underwriter1` two
+      >   ways: the page itself (role-gated redirect/403 text visible in
+      >   the rendered page) and a raw in-page `fetch()` returning a
+      >   real `403 requires role: manager`.
+      > - Solo approve (a $10,000 application): row updates to
+      >   `APPROVED` in place via the `select: 'tr'` swap.
+      > - Bulk approve (2 applications): "2 succeeded, 0 failed",
+      >   OOB-refreshed list correctly drops both.
+      > - Reject: works identically.
+      > - Escalation ($60,000 → above `MANAGER_ESCALATION_THRESHOLD_USD`):
+      >   Underwriter-approve moves it to `PENDING_MANAGER_APPROVAL` and
+      >   off the Underwriter's own queue; logged out, logged back in as
+      >   `manager1`, confirmed it — and *only* it — appears on
+      >   `/ui/manager`; Manager-approved it to terminal `APPROVED`;
+      >   confirmed via a direct DB query that `customer_id`/`account_id`
+      >   were both provisioned (full `persist_decision` flow, real
+      >   Mayan calls included, fired correctly from a real UI click).
+      > - Permission-lacking session real 403: while logged in as
+      >   `underwriter1`, a raw in-page `fetch()` `POST` directly to
+      >   `/ui/manager/<id>/decision` (never rendered as a button for
+      >   this session) returned `403 requires permission: ManagerApprove`
+      >   — not a hidden-button-only restriction.
+      > - Active-account conflict: **the first attempt at this check used
+      >   flawed test data** (both "conflict" applications were created
+      >   *before* either was approved, so neither ever got a resolved
+      >   `customer_id` — `check_decision_allowed` correctly short-circuits
+      >   to "allowed" for a `customer_id`-still-`NULL` application, per
+      >   its own documented, deliberate design; this was a test-setup
+      >   ordering mistake, not a code bug). Redid it correctly: approved
+      >   one application for a fresh applicant (creating a customer +
+      >   active `personal_loan` account), *then* submitted a second
+      >   application for that *same* applicant (which correctly resolved
+      >   `customer_id` at creation time, since the customer now existed),
+      >   then clicked Approve on it as `underwriter1` — the dialog
+      >   re-opened (via the `HX-Retarget`/`HX-Reselect` error path,
+      >   confirmed working) showing "customer already has an active
+      >   personal_loan account" in red, status remained
+      >   `PENDING_UNDERWRITING`, no workflow signal sent.
+      > - Document preview: clicked an actual document link in the
+      >   detail dialog, confirmed a real tab opened showing the
+      >   rendered PDF ("Government ID").
+      > A real Keycloak redirect-URI gap was found and fixed along the
+      > way: the realm import only registered `localhost:8000`/`app:8000`
+      > callback URLs, but this session's native (non-Docker) test
+      > server ran on `8001` (`8000` was already held locally by Mayan)
+      > — added `http://localhost:8001/ui/callback` (+ matching
+      > `webOrigins`/post-logout-redirect) to
+      > `keycloak/import/loanrealm-realm.json` as a documented,
+      > permanent native-dev alternative, re-imported via a fresh
+      > container (not a plain restart, which the `keycloak-admin` skill
+      > documents as silently skipping re-import). **Flagging for a
+      > later phase, not fixed now**: `app.py`'s own docstring example
+      > and the realm's primary redirect URIs both assume port `8000`,
+      > which is *also* Mayan's published host port (P5-1) — once an
+      > `app`/`app-backoffice` Docker Compose service is actually added
+      > (not scoped to Phase 10's tasks), it and `mayan` will need
+      > distinct host ports; not a problem today since `app` isn't a
+      > Compose service yet, but worth remembering when it becomes one.
+      > No dedicated `tests/unit/bff_backoffice/test_routes.py` was
+      > added — `routes.py`/`app.py` are thin FastAPI/Jinja glue over
+      > already-unit-tested modules (`keycloak_session.py`,
+      > `application.service`, etc.), and the reference project this is
+      > adapted from has no unit test file for its own equivalent
+      > `bff/ui.py` either, relying on exactly this kind of real-stack
+      > integration verification instead — consistent with, not a
+      > shortcut around, this project's established testing convention.
+      > Full `tests/unit/` suite (176 tests, unaffected by this phase)
+      > reconfirmed passing throughout. **This completes Phase 10.**
 
 ---
 
@@ -1499,6 +1634,55 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 10 (Back-Office BFF UI) complete, all four
+  tasks checked. Built `app.py` (composition root: `SessionMiddleware`,
+  exception handlers for `keycloak_session.py`'s three custom
+  exceptions) and `bff_backoffice/routes.py` — the first phase that
+  actually wires everything from Phases 1-9 into a browser-usable
+  screen. Underwriter and Manager share one route-handler set and one
+  template set, parameterized by `role`, rather than the reference
+  project's literal per-role duplication. Added
+  `bff_backoffice/selection_store.py` (P10-3, a plain Redis SET per
+  session id) and a public `application.service.wait_for_status_change()`
+  (reusing the existing private `_wait_until` primitive) so a decision
+  route can show the real post-decision status immediately rather than
+  waiting for the next 5s poll. No dedicated unit test file for
+  `routes.py`/`app.py` — thin FastAPI/Jinja glue over already-tested
+  modules, matching the reference project's own precedent (its
+  `bff/ui.py` has no unit test file either); verified instead by
+  **walking the entire Phase 10 DoD through a real browser**
+  (`claude-in-chrome`: real Keycloak Authorization Code login, not
+  curl) against the full local stack — every DoD bullet confirmed
+  working: role gate (403 on `/ui/manager` for `underwriter1`), solo
+  and bulk approve, reject, the full escalation path with a manager
+  login switch and confirmed customer/account provisioning, a
+  permission-lacking session's raw `fetch()` to a decision route
+  getting a real 403, document preview actually rendering a PDF in a
+  new tab, and the active-account-conflict block. **Two real things
+  found and fixed along the way, not hypothetical**: (1) a Keycloak
+  redirect-URI gap — the realm only registered port `8000` callback
+  URLs, but this session's native test server ran on `8001` since
+  Mayan already held `8000` locally; added `8001` to
+  `keycloak/import/loanrealm-realm.json` as a documented permanent
+  native-dev alternative, re-imported via a fresh container (a plain
+  restart silently skips re-import, per the `keycloak-admin` skill);
+  (2) the first active-account-conflict test attempt used flawed test
+  data (both "conflict" applications created before either was
+  approved, so neither had a resolved `customer_id`, so
+  `check_decision_allowed` correctly — not a bug — returned "allowed")
+  — redone with the second application submitted *after* the first was
+  approved, which correctly triggered the block with a clear error
+  message rendered right back into the dialog via the
+  `HX-Retarget`/`HX-Reselect` error path. `CLAUDE.md` updated in two
+  places: the `keycloak_session.py` Request-decoupling adaptation
+  (Identity section) and a new Known Gap flagging that `app`'s planned
+  host port `8000` will collide with `mayan`'s once a real `app`
+  Compose service is added (not yet, so not urgent). Full
+  `tests/unit/` suite (176 tests) reconfirmed unaffected. Next: Phase
+  11 (Customer BFF UI) — load the `htmx4` skill first; this is the
+  most novel phase, no direct reference-project precedent to adapt
+  from.
 
 - **2026-09-02** — Phase 9 (Keycloak Realm & Back-Office Auth Plumbing)
   complete, all four tasks checked. Loaded the `keycloak-admin` skill

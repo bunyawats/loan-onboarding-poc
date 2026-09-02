@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex justify-between items-center mb-4">
+  <h1 class="text-xl font-semibold m-0">
+    {% if role == "underwriter" %}Underwriting Queue{% else %}Manager Approval Queue{% endif %}
+  </h1>
+</div>
+{% include "_bulk_toolbar.html" %}
+{% include "_staff_list.html" %}
+{% endblock %}

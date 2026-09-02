@@ -275,3 +275,20 @@ async def list_by_status(
     records = await application_db.list_by_status(status, page_size, offset)
     items = [Application.from_record(r) for r in records]
     return ApplicationPage(items=items, total=total, page=page, page_size=page_size, query_id=query_id)
+
+
+async def wait_for_status_change(application_id: UUID, previous_status: str) -> Application:
+    """Poll until `status` no longer equals `previous_status` or we time
+    out (same bounded `_wait_until()` this module already uses for
+    `create_application`/`resubmit_application`) -- `bff_backoffice`
+    (Phase 10) calls this right after `workflow.service.signal_decision()`/
+    `bulk_signal_decision()`, which only confirm Temporal *accepted* the
+    signal, so a route that immediately re-renders the affected row(s)
+    needs this to show the actual post-decision state rather than
+    whatever was true a moment ago. Always returns the current
+    `Application` even on timeout (the activity is just running slower
+    than usual -- the row still re-renders, just possibly still showing
+    the pre-decision status until the next 5s poll catches up)."""
+    record = await _wait_until(application_id, lambda r: r["status"] != previous_status)
+    assert record is not None, f"application {application_id} disappeared while waiting for a decision"
+    return Application.from_record(record)

@@ -1,0 +1,70 @@
+{#
+  Shared by every bulk decision (Approve/Reject/Request More Info) --
+  one template, multiple call sites, same pattern as _staff_row.html
+  rather than copy-pasting near-identical dialogs.
+
+  Context: role, decision (APPROVE/REJECT/REQUEST_MORE_INFO), action
+  (its display label), items (already-fetched Application objects --
+  no ownership/visibility filter needed here, since neither staff
+  screen has one), page, query_id (the list page the user was on,
+  round-tripped so the post-action OOB table refresh lands back on the
+  same page).
+
+  No application_ids param here at all: selection lives server-side
+  (selection_store.py), so both the dialog-open and execute routes read
+  it themselves -- nothing client-submitted to re-validate.
+#}
+{% set badge_classes = {
+  "pending_underwriting": "bg-amber-100 text-amber-800",
+  "more_info_requested": "bg-orange-100 text-orange-800",
+  "pending_manager_approval": "bg-blue-100 text-blue-800",
+} %}
+{% set button_color = "bg-green-600 text-white hover:bg-green-700" if decision == "APPROVE" else ("bg-red-600 text-white hover:bg-red-700" if decision == "REJECT" else "bg-amber-500 text-white hover:bg-amber-600") %}
+<div id="dialog-root" class="fixed inset-0 bg-slate-900/45 flex items-center justify-center z-50">
+  <div class="bg-white rounded-xl p-6 w-[560px] max-w-[92vw] max-h-[86vh] overflow-y-auto shadow-2xl">
+    <h2 class="text-lg font-semibold mt-0 mb-4">Bulk {{ action }} ({{ items | length }} selected)</h2>
+    {% if error %}
+    <div class="bg-red-50 text-red-800 border border-red-200 px-3 py-2 rounded-md text-sm mb-3">{{ error }}</div>
+    {% endif %}
+
+    {% if not items %}
+    <p class="text-sm text-gray-600 mb-4">Nothing selected -- select one or more applications first.</p>
+    {% else %}
+    <div class="mb-4 max-h-[240px] overflow-y-auto border border-gray-200 rounded-md">
+      <table class="w-full border-collapse text-sm">
+        <tbody>
+          {% for a in items %}
+          <tr class="border-b border-gray-100 last:border-b-0">
+            <td class="px-2.5 py-1.5">{{ a.applicant_name }}</td>
+            <td class="px-2.5 py-1.5 text-gray-500">{{ a.product_type|replace("_", " ") }}</td>
+            <td class="px-2.5 py-1.5">
+              <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(a.status|lower, 'bg-gray-200 text-gray-700') }}">
+                {{ a.status|replace("_", " ") }}
+              </span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Comment (optional, applied to all)</label>
+      <textarea id="bulk-comment"
+        class="w-full px-2.5 py-2 border border-gray-200 rounded-md text-sm min-h-[80px]"></textarea>
+    </div>
+    {% endif %}
+
+    <div class="flex justify-end gap-2 mt-5">
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md bg-gray-200 text-gray-800 hover:bg-gray-300"
+        onclick="document.getElementById('dialog-container').innerHTML=''">{{ "Close" if not items else "Never mind" }}</button>
+      {% if items %}
+      <button type="button"
+        class="px-3.5 py-2 text-sm font-medium rounded-md {{ button_color }}"
+        onclick="var c = document.getElementById('bulk-comment').value; document.getElementById('dialog-container').innerHTML = ''; htmx.ajax('POST', '/ui/{{ role }}/bulk-decision', {target: '#dialog-container', swap: 'innerHTML', values: {decision: '{{ decision }}', comment: c, page: {{ page }}, query_id: '{{ query_id }}'}})">
+        Confirm {{ action }}
+      </button>
+      {% endif %}
+    </div>
+  </div>
+</div>

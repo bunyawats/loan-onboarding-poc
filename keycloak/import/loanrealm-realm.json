@@ -29,11 +29,12 @@
       "serviceAccountsEnabled": false,
       "redirectUris": [
         "http://localhost:8000/ui/callback",
-        "http://app:8000/ui/callback"
+        "http://app:8000/ui/callback",
+        "http://localhost:8001/ui/callback"
       ],
-      "webOrigins": ["http://localhost:8000"],
+      "webOrigins": ["http://localhost:8000", "http://localhost:8001"],
       "attributes": {
-        "post.logout.redirect.uris": "http://localhost:8000/ui/login##http://app:8000/ui/login"
+        "post.logout.redirect.uris": "http://localhost:8000/ui/login##http://app:8000/ui/login##http://localhost:8001/ui/login"
       },
       "authorizationServicesEnabled": true,
       "authorizationSettings": {

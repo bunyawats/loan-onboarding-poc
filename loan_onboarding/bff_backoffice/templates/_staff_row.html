@@ -1,0 +1,53 @@
+{% macro staff_row(a, role, permissions=[], selected_ids=[], page=1, query_id="") %}
+{% set badge_classes = {
+  "pending_underwriting": "bg-amber-100 text-amber-800",
+  "more_info_requested": "bg-orange-100 text-orange-800",
+  "pending_manager_approval": "bg-blue-100 text-blue-800",
+  "approved": "bg-green-100 text-green-800",
+  "rejected": "bg-red-100 text-red-800",
+  "cancelled": "bg-gray-200 text-gray-700",
+} %}
+{#
+  Selection column exists whenever this role holds at least one of its
+  screen's decision permissions -- within that column, a checkbox only
+  renders for rows this session could plausibly select (all of them
+  here, since the list is already filtered to this role's own actionable
+  status). Buttons/checkboxes reflect this user's *actual* granted
+  permissions, not just role membership -- defense in depth alongside
+  the route-level checks (see routes.py's _user_permissions()).
+#}
+{% set select_col = has_select_column(role, permissions) %}
+<tr id="row-{{ a.application_id }}">
+  {% if select_col %}
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
+    {#
+      application_ids is sent as a single string, not a JS array --
+      htmx's hx-vals hands an array value to FormData.set(), which
+      stringifies via Array.prototype.toString() (comma-joined into ONE
+      field), not one field per element (htmx4 skill). ids are UUIDs,
+      never containing a literal comma.
+    #}
+    <input type="checkbox" name="application_ids" value="{{ a.application_id }}"
+      {% if a.application_id | string in selected_ids %}checked{% endif %}
+      hx-post="/ui/{{ role }}/bulk-select" hx-swap="none"
+      hx-vals='js:{"application_ids": "{{ a.application_id }}", "checked": event.target.checked, "page": {{ page }}, "query_id": "{{ query_id }}"}'>
+  </td>
+  {% endif %}
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ a.applicant_name }}</td>
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">{{ a.product_type|replace("_", " ") }}</td>
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">${{ "{:,.2f}".format(a.amount) }}</td>
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
+    <span class="inline-block px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap {{ badge_classes.get(a.status|lower, 'bg-gray-200 text-gray-700') }}">
+      {{ a.status|replace("_", " ") }}
+    </span>
+  </td>
+  <td class="px-3.5 py-2.5 border-b border-gray-200 text-sm">
+    <button id="review-btn-{{ a.application_id }}"
+      class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-blue-100 text-blue-800 hover:bg-blue-200 disabled:opacity-50"
+      hx-get="/ui/{{ role }}/{{ a.application_id }}/detail" hx-target="#dialog-container" hx-swap="innerHTML" hx-indicator="#review-spinner-{{ a.application_id }}">
+      <span id="review-spinner-{{ a.application_id }}" class="htmx-indicator transition-opacity duration-200 [&.htmx-request]:!duration-0 w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin [animation-duration:.3s]"></span>
+      Review
+    </button>
+  </td>
+</tr>
+{% endmacro %}

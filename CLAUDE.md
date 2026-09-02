@@ -915,6 +915,23 @@ Directly reuses `review-approval-temporal`'s mechanism:
   deliberate, audited correction in the reference project after an
   earlier version had both and produced two different 403 reasons for
   the same denied action.
+- **`keycloak_session.py`'s functions take a plain `session_id: str |
+  None`, never a FastAPI `Request`** — a deliberate adaptation from the
+  reference project's own `bff/keycloak_session.py`, whose equivalent
+  functions read `request.session`/`request.app.state.redis` directly.
+  That coupling makes a function untestable without a real Starlette
+  `Request`; since `app.py` didn't exist yet when this module was
+  written (Phase 9, before Phase 10's routes), there was no reason its
+  session-resolution *logic* should depend on a web framework to be
+  unit-tested. `bff_backoffice/routes.py` (Phase 10) supplies the thin,
+  framework-coupled layer on top — small dependency-wrapper functions
+  (`_role_dependency(role)`, `_session_user_dependency`) that read
+  `request.session.get(SESSION_KEY)` and delegate into
+  `keycloak_session.py`'s plain functions. Same split
+  `workflow/service.py` already uses relative to `worker_main.py` for
+  an analogous reason (framework/runtime-agnostic core, a thin
+  composition-root/route layer on top) — not a new pattern for this
+  codebase, just applied one level down.
 
 `underwriter_name`/`manager_name` come from the authenticated session's
 `preferred_username`, passed through as `actor_name` on the decision
@@ -1104,6 +1121,17 @@ for `KEYCLOAK_ISSUER`.
 
 ## Known gaps to state explicitly once built
 
+- **`app`/`app-backoffice`'s planned host port (`8000`, per this file's
+  own `app.py` docstring example and `keycloak/import/loanrealm-realm.json`'s
+  primary redirect URIs) collides with `mayan`'s already-published host
+  port `8000` (P5-1).** Not a problem *today* — there's no `app`/
+  `app-backoffice` Compose service yet, Phase 10's own manual
+  verification ran `app.py` natively on port `8001` instead, and the
+  realm now also registers `http://localhost:8001/ui/callback` as a
+  documented native-dev alternative — but whoever adds the real Compose
+  service needs to pick a different host port for it (or for `mayan`)
+  rather than assuming `8000` is free, and update the realm's redirect
+  URIs to match whatever's actually chosen.
 - **Mayan's default REST API rate limit (`REST_API_THROTTLING_RATE_USER`,
   20 req/sec out of the box) is real and gets hit at POC scale, not just
   in theory** — found in P5-4/P5-5 by actually running

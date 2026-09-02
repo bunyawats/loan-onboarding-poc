@@ -1,0 +1,12 @@
+{#
+  Standalone wrapper around _staff_rows_body.html's <tbody> -- used as
+  the periodic poll's own response body and the bulk-select route's
+  response, where the tbody isn't already sitting inside a live
+  <table> the way _staff_list.html provides it. Callers use
+  hx-select="tbody" to pull the <tbody> back out of this wrapper before
+  the actual swap (htmx4 skill's "Swapping <tr>/<td> fragments outside
+  a <table> context").
+#}
+<table>
+{% include "_staff_rows_body.html" %}
+</table>
