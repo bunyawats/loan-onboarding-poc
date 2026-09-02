@@ -1635,6 +1635,10 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-02** — Confirmed Phase 10's CI run
+  (`gh run list --branch main`, run id `33600965098`, commit `49eae82`)
+  completed `success` in 1m6s. No follow-up fix needed.
+
 - **2026-09-02** — Phase 10 (Back-Office BFF UI) complete, all four
   tasks checked. Built `app.py` (composition root: `SessionMiddleware`,
   exception handlers for `keycloak_session.py`'s three custom
