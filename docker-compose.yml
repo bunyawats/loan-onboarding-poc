@@ -13,6 +13,17 @@ name: loan-onboarding-poc
 # not a literal copy-paste. Its `webapp` service (a demo front end) has
 # no equivalent need here, since document/ talks to Mayan's API
 # directly.
+#
+# worker-workflow/worker-activity (P7-2) follow review-approval-
+# temporal's own identical WORKER_MODE split: workflow code is pure/
+# deterministic and never touches Postgres or Mayan, so worker-workflow
+# gets neither DATABASE_URL nor Mayan credentials; worker-activity runs
+# application/activities.py's real implementations, so it needs both
+# (DATABASE_URL for the applications/customers/accounts tables it
+# writes to on approval, Mayan credentials for the two managed-document
+# calls in that same provisioning block). No `app`/`app-customer`/
+# `app-backoffice` service yet -- those come in Phase 10/11 once the
+# BFFs exist.
 
 services:
   db:
@@ -130,6 +141,44 @@ services:
     depends_on:
       - mayan-db
       - mayan-redis
+
+  # --- P7-2: worker processes (worker_main.py), same WORKER_MODE-split
+  # pattern as review-approval-temporal's own worker-workflow/
+  # worker-activity services.
+  worker-workflow:
+    build: .
+    command: python -m loan_onboarding.worker_main
+    depends_on:
+      temporal:
+        condition: service_started
+    environment:
+      WORKER_MODE: workflow
+      LOAN_PRODUCT_TYPE: ${LOAN_PRODUCT_TYPE:-}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      # No DATABASE_URL or MAYAN_* here on purpose -- workflow code is
+      # pure/deterministic and never touches Postgres or Mayan, so this
+      # service runs with zero DB/Mayan credentials.
+    restart: on-failure
+
+  worker-activity:
+    build: .
+    command: python -m loan_onboarding.worker_main
+    depends_on:
+      db:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      WORKER_MODE: activity
+      LOAN_PRODUCT_TYPE: ${LOAN_PRODUCT_TYPE:-}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-loan_onboarding}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      MAYAN_BASE_URL: http://mayan:8000
+      MAYAN_SERVICE_ACCOUNT_USERNAME: ${MAYAN_SERVICE_ACCOUNT_USERNAME:-admin}
+      MAYAN_SERVICE_ACCOUNT_PASSWORD: ${MAYAN_SERVICE_ACCOUNT_PASSWORD:-changeme}
+    restart: on-failure
 
 volumes:
   db_data:

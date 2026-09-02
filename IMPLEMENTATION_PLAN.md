@@ -1055,9 +1055,32 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > buffers stdout by default when it isn't a TTY, not a bug in the
       > module itself, just a manual-verification gotcha worth noting so
       > a future check doesn't mistake buffering for a hang.)
-- [ ] **P7-2** — Add `worker-workflow`/`worker-activity` (or one
+- [x] **P7-2** — Add `worker-workflow`/`worker-activity` (or one
       `worker` service, per `CLAUDE.md`'s Deployment section) to
       `docker-compose.yml`.
+      > DONE: two services (not one), mirroring
+      > `review-approval-temporal`'s own identical split exactly.
+      > `worker-workflow` gets neither `DATABASE_URL` nor Mayan
+      > credentials (workflow code is pure/deterministic); `worker-
+      > activity` gets both (it runs `application/activities.py`'s real
+      > implementations, which write to Postgres and call `document.service`
+      > on approval). Verified for real: `docker compose up -d --build
+      > worker-workflow worker-activity` builds and starts both against
+      > the real local `temporal`/`db` containers, both stayed `Up` with
+      > zero restarts after 40+ seconds (no crash-loop). Then went
+      > further than "stays up" — drove a real `create_application` call
+      > from the host (after uploading real documents to the also-running
+      > `mayan` service) and confirmed **the actual Docker Compose
+      > `worker-workflow`/`worker-activity` containers** (not the
+      > ad-hoc in-process worker every other P6/P7-1 verification used)
+      > processed it end to end to a real `PENDING_UNDERWRITING` row —
+      > the first verification this session that didn't need a
+      > throwaway worker stand-in. Stopped both containers after
+      > verifying (this repo's convention is not to leave extra
+      > containers running between sessions). Verified via the same
+      > temporary 5433 Postgres port remap as every other Phase 6/7
+      > task (reverted before committing, zero diff beyond P7-2's own
+      > intended additions).
 - [ ] **P7-3** — **First true end-to-end run**, no UI yet — drive it
       entirely through `application.service` + `workflow.service` calls
       from a script or `pytest` integration test: create a
