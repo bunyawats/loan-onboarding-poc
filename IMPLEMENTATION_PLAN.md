@@ -74,18 +74,20 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 7 — done.** Phase 7 was a real milestone: everything
+**Phases 0 through 8 — done.** Phase 7 was a real milestone: everything
 below the two BFFs (customer/account/application/document/workflow,
 the worker processes, the full approve/reject/escalate/resubmit/cancel
 lifecycle) now works end to end against the real local stack, with a
 real bug found and fixed along the way (see P7-3's note and `CLAUDE.md`'s
-updated provisioning-sequence section). Phase 7's own text calls this a
-natural point for a human to spot-check before continuing into
-Keycloak/UI work (Phases 9/10/11) — flagging that rather than
-proceeding unprompted. If continuing in phase order regardless:
-[Phase 8](#phase-8--import-linter--ci) (Import-Linter & CI) is next,
-depending on Phases 2-7 (all now satisfied); Phase 9 (Keycloak Realm)
-only depends on Phase 0 and could run first/in parallel instead.
+updated provisioning-sequence section). Phase 8 added `import-linter`,
+confirmed clean against the current codebase and confirmed to actually
+fail CI on a real violation (P8-2's note). Start here:
+[Phase 9](#phase-9--keycloak-realm--back-office-auth-plumbing)
+(Keycloak Realm & Back-Office Auth Plumbing) — next in phase order,
+depends only on Phase 0. Phase 10 (Back-Office BFF UI) additionally
+needs Phase 7 (done); Phase 11 (Customer BFF UI) needs Phases 2, 3, 5,
+7 (all done). Load the `keycloak-admin` skill before starting Phase 9,
+per that phase's own instruction.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1191,11 +1193,30 @@ do this against an empty skeleton).
       > reverted (`git checkout --`) and re-confirmed clean — proves the
       > contracts actually enforce something, not just that they happen
       > to pass. Added `import-linter` to `dev` extras.
-- [ ] **P8-2** — Wire the import-linter run into the CI workflow from
+- [x] **P8-2** — Wire the import-linter run into the CI workflow from
       P0-6, required (not just informational) — a failure here should
       fail the build.
       DoD: deliberately introduce a one-line boundary violation in a
       throwaway branch, confirm CI fails on it, then revert.
+      > DONE: uncommented/activated the `lint-imports` step P0-6 had
+      > already reserved a slot for in `.github/workflows/ci.yml`, right
+      > after the unit-tests step (same job, so a lint failure fails the
+      > whole job — genuinely required, not a separate informational
+      > job that could be ignored). Pushed the real P8-1 config to
+      > `main` first and confirmed it green (`gh run watch`, run
+      > `33593588677`, both "Run unit tests" and the new "Check module
+      > boundaries (import-linter)" step passed). **Then did the DoD's
+      > actual required check, for real**: created branch
+      > `throwaway/p8-2-ci-violation-check`, added one line to
+      > `document/service.py` importing `workflow.service` (a real,
+      > direct violation of "document/ never imports application/ or
+      > workflow/"), pushed, and confirmed via `gh run watch` (run
+      > `33593657262`) that "Run unit tests" still passed but "Check
+      > module boundaries (import-linter)" failed with exit code 1,
+      > failing the overall job — proving the gate actually blocks a
+      > bad push rather than just existing. Deleted the throwaway branch
+      > both locally and on the remote afterward, confirmed `main` is
+      > clean. **This completes Phase 8.**
 
 ---
 
@@ -1359,6 +1380,32 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 8 (Import-Linter & CI) complete, both tasks
+  checked. Added `import-linter` to `pyproject.toml`'s `[tool.importlinter]`
+  (one config file for everything, no separate `.importlinter`): a
+  `layers` contract for the overall hierarchy
+  (`customer|account|document|workflow` as the bottom, mutually
+  independent leaf layer, nothing below them; `application`; then
+  `bff_customer|bff_backoffice`; then `(app)|worker_main` on top, `app`
+  marked optional since it doesn't exist until Phase 10/11) plus one
+  `forbidden` contract per literal "never imports" bullet in
+  `CLAUDE.md`'s dependency-graph section, for direct traceability.
+  `lint-imports` passed clean on the very first run against the current
+  codebase (7 kept, 0 broken) — every module boundary held through
+  Phases 1-7 with zero accidental violations, a genuinely clean result
+  rather than one requiring a fix. Confirmed the contracts actually
+  enforce something (not just happen to pass) by temporarily adding a
+  real violation, watching both the layers contract and the specific
+  contract catch it with a file/line citation, then reverting. Wired
+  into CI's already-reserved P0-6 slot (P8-2), pushed, confirmed green;
+  then did the DoD's actual required check for real: pushed a one-line
+  boundary violation to a throwaway branch, confirmed via `gh run
+  watch` that the new "Check module boundaries" step failed the build
+  (exit code 1) while unit tests still passed, then deleted the
+  throwaway branch both locally and on the remote. Next: Phase 9
+  (Keycloak Realm & Back-Office Auth Plumbing) — load the
+  `keycloak-admin` skill first, per that phase's own instruction.
 
 - **2026-09-02** — Phase 7 (Worker Composition Root & End-to-End
   Workflow Verification) complete, all three tasks checked. `worker_main.py`
