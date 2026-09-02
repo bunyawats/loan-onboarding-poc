@@ -1376,7 +1376,11 @@ is.)*
   7's own text flags this as a natural pause point for a human to
   spot-check before Keycloak/UI work (Phases 9-11) begins** — the next
   session should read that note in Current Status before just picking
-  the next unchecked box.
+  the next unchecked box. Pushed and confirmed green on GitHub Actions
+  CI (`gh run watch`, run `33592767191`, `unit-tests` passed in 38s —
+  `tests/integration/` isn't part of CI's scope, per P0-6, so this only
+  confirms the 133 unit tests, already separately verified locally
+  alongside the real integration run above).
 
 - **2026-09-02** — Phase 6 (Application Module) complete, all six tasks
   checked (P6-1 through P6-6). `application/models.py`/`db.py` (P6-1) is
