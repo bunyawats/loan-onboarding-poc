@@ -2238,8 +2238,9 @@ is.)*
   Non-email input rejected before a code is ever generated. Updated
   `CLAUDE.md`'s "Identity" section, module description, and Known
   Gaps, plus PRD.md §4/§5/§7.1/§8.1/§9.1/§10 for the narrowed
-  (not fully closed -- delivery is still fake) scope. Not
-  committed/pushed yet pending user confirmation.
+  (not fully closed -- delivery is still fake) scope. Committed and
+  pushed (commit `126ee38`); CI run (`gh run list --branch main`, run
+  id `33651773769`) completed `success` in 46s.
 
 - **2026-09-02** — Closed the in-batch half of the active-account
   race window itself (the previous fix only made the *outcome* of
