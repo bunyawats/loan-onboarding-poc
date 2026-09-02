@@ -888,6 +888,14 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-02** — Confirmed Phase 4's commit (`8312db9`) is green on
+  GitHub Actions CI (`gh run watch`, run `33583072309`, `unit-tests`
+  succeeded) — the `temporalio.testing.WorkflowEnvironment` tests need
+  no Postgres service container (unlike Phase 2/3's tests), so this
+  confirms they also work in CI's clean environment (which has to fetch
+  the ephemeral time-skipping test server binary itself, not reuse a
+  locally-cached one), not just locally.
+
 - **2026-09-02** — Phase 4 complete, all four tasks checked (created
   `.venv` and `pip install -e ".[dev]"` for the first time this
   session — no venv existed yet in this checkout). `workflow/`'s four
