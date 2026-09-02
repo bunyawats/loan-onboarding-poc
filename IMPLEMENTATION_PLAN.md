@@ -1820,6 +1820,10 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-02** — Confirmed Phase 11's CI run
+  (`gh run list --branch main`, run id `33605775301`, commit `b2b4423`)
+  completed `success` in 45s. No follow-up fix needed.
+
 - **2026-09-02** — Phase 11 (Customer BFF UI) complete, all four tasks
   checked. Built `bff_customer/identity.py` (own `itsdangerous`-signed
   cookie, corrected from `CLAUDE.md`'s earlier "slot inside
