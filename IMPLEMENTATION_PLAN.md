@@ -2202,6 +2202,45 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-02** — Closed `bff_customer`'s no-real-auth gap
+  (`CLAUDE.md`/PRD.md's long-standing "standout risk"): a customer used
+  to be able to type *any* email/phone with zero verification and
+  immediately see and act on every application under it. Asked the
+  user to pick a verification mechanism and delivery backend before
+  starting (a genuine product decision, unlike the previous two bug
+  fixes) -- chose email OTP with fake/console delivery for this POC
+  (no real SMTP/Twilio/SendGrid provider exists in this project).
+  Added `bff_customer/identity.py`'s pending-verification cookie (a
+  second, short-lived signed cookie holding the code's *hash*, not the
+  code itself -- same no-Redis philosophy as the existing session
+  cookie) with a 5-attempt lockout, and `bff_customer/notifications.py`
+  (fake delivery -- one function, meant to be the only thing a real
+  provider integration would need to change). New routes:
+  `POST /apply/identify` now starts verification instead of setting the
+  session directly; new `POST /apply/identify/verify` checks the code.
+  Dropped phone-number identifiers along with this fix (SMS needs a
+  provider too) -- confirmed with the user as an accepted scope
+  reduction. **A real implementation bug caught before it shipped**:
+  first draft used `logging.getLogger(__name__).info(...)` to "log the
+  code server-side" -- this codebase has no logging configuration
+  anywhere (no `basicConfig`, no handler), so the call silently
+  inherited the root logger's default `WARNING` level and never
+  appeared in `docker compose logs`, confirmed live before switching to
+  a plain `print()`. 16 new regression tests (212 total unit tests),
+  `lint-imports` clean. Rebuilt `app` and verified live end-to-end:
+  identify with a fresh email -> code shown on the verify page (dev
+  mode) and printed server-side -> wrong code shows "Incorrect code.
+  Try again." -> 5 wrong attempts (verified via `curl` with a cookie
+  jar) clears the pending verification, and even the *correct* code
+  fails afterward with "Enter your email again" until a fresh
+  `/apply/identify` submission -> correct code within the attempt
+  budget lands on "My Applications" as the verified identity.
+  Non-email input rejected before a code is ever generated. Updated
+  `CLAUDE.md`'s "Identity" section, module description, and Known
+  Gaps, plus PRD.md §4/§5/§7.1/§8.1/§9.1/§10 for the narrowed
+  (not fully closed -- delivery is still fake) scope. Not
+  committed/pushed yet pending user confirmation.
+
 - **2026-09-02** — Closed the in-batch half of the active-account
   race window itself (the previous fix only made the *outcome* of
   losing it clean -- see the entry below this one). Added

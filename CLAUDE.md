@@ -411,6 +411,26 @@ the domain modules' `service.py` functions.
   ride on `bff_backoffice`'s shared `SessionMiddleware` session, under
   its own key — ordinary UI flow state, not identity, so it doesn't
   need its own signing mechanism.
+- **This cookie is now only ever set after email verification, not on
+  the strength of a self-typed identifier alone.** Corrected after
+  being flagged as this POC's standout risk (Known Gaps below): typing
+  someone else's email used to be sufficient to see and act on every
+  application filed under it. `/apply/identify`'s `POST` now generates
+  a 6-digit code (`identity.generate_verification_code()`), "sends" it
+  via `notifications.send_verification_code(...)` (fake/dev-only
+  delivery — see that module's docstring for why and what a real
+  provider integration would change), and stashes its *hash* (never
+  the code itself) in a second, short-lived signed cookie
+  (`identity.start_verification(...)`, 10-minute expiry). A new
+  `/apply/identify/verify` route checks the submitted code against
+  that hash (`identity.verify_code(...)`) before ever calling
+  `set_applicant_identifier`; 5 wrong attempts
+  (`identity.record_failed_verification_attempt(...)`) clears the
+  pending cookie and forces a fresh code. **Phone-number identifiers
+  were dropped along with this fix** — the identify form now only
+  accepts an email address, since SMS delivery would need a real SMS
+  provider this project has none of either; confirmed with the user as
+  an accepted scope reduction of choosing email OTP specifically.
 - Calls, all as direct in-process function calls:
   `customer.service.find_by_identifier(...)` (read-only, optional —
   e.g. for "welcome back" copy),
@@ -984,10 +1004,21 @@ reference project.
 Two completely different mechanisms — see PRD §7 for the product
 framing.
 
-### Customer side (`bff_customer/`) — still no real auth
+### Customer side (`bff_customer/`) — email-verified, still no password
 
-Signed session cookie holding `applicant_identifier`, no password, no
-Redis.
+**Corrected from an earlier draft of this file**, which described this
+surface as having no verification at all -- closed after being flagged
+as this POC's standout risk (see Known Gaps below for the full
+mechanism and the fix). Signed session cookie holding
+`applicant_identifier`, no password, no Redis -- but the cookie is now
+only ever set after the applicant proves ownership of that identifier
+via a 6-digit one-time code, not on the strength of just typing it in.
+See `bff_customer/identity.py`'s module docstring for the full design
+(a second, short-lived signed cookie holding the code's *hash*, not
+the code itself, still no Redis -- the same "no server-side state"
+philosophy this module already had, just applied to a second cookie)
+and `bff_customer/notifications.py`'s for why delivery is fake/dev-only
+in this POC.
 
 ### Back-office side (`bff_backoffice/`) — real Keycloak, direct reuse
 
@@ -1173,6 +1204,7 @@ loan-onboarding-poc/
     ├── bff_customer/
     │   ├── routes.py
     │   ├── identity.py
+    │   ├── notifications.py    # fake/dev-only verification-code delivery
     │   └── templates/
     ├── bff_backoffice/
     │   ├── routes.py
@@ -1362,9 +1394,33 @@ for `KEYCLOAK_ISSUER`.
   volume grows; fine for a POC, would need real server-side filtering
   (or caching, or a lower-frequency rebuild strategy) before this scaled
   past that.
-- No real customer authentication on `bff_customer/` (PRD §7.1) — still
-  the standout risk; unaffected by `bff_backoffice/`'s real Keycloak
-  auth, since they're separate surfaces with separate identity models.
+- **Resolved, narrowed rather than fully closed.** `bff_customer/` used
+  to accept a self-typed email or phone number with zero verification
+  (PRD §7.1) — this POC's standout risk, called out repeatedly in this
+  file and PRD.md as the single highest-priority gap. **Fixed** by
+  requiring email verification (a 6-digit one-time code, entered back
+  correctly) before the session cookie is ever set — see this file's
+  "Identity" section and `bff_customer/identity.py`'s module docstring
+  for the full mechanism, and `tests/unit/bff_customer/test_identity.py`
+  for the regression tests (round-trip, tampered/garbage rejection, the
+  5-attempt lockout). Confirmed live: entering a wrong code shows
+  "Incorrect code. Try again."; 5 wrong attempts in a row clears the
+  pending verification and the correct code no longer works afterward
+  without restarting from `/apply/identify`; the correct code lands on
+  "My Applications" as the verified identity. **What's still a real,
+  accepted limitation, not a gap in the mechanism itself**: this POC
+  has no real email/SMS provider (no SMTP, no Twilio/SendGrid/SES
+  credentials anywhere in `.env.example`), so delivery is fake --
+  `bff_customer/notifications.py` only prints the code server-side,
+  and the verify-code page also shows it directly in the response
+  (labeled as dev-only) since no real inbox will ever receive it
+  otherwise. This proves the mechanism, not a production-ready login --
+  see PRD §7.1 for the "treat any real deployment as non-public until a
+  real provider replaces the fake one" framing this carries forward.
+  Also dropped along with this fix: phone-number identifiers (SMS
+  delivery would need a provider this project doesn't have either) --
+  the identify form is email-only now, confirmed with the user as an
+  accepted scope reduction, not an oversight.
 - **Resolved (the "no graceful handling" half only — the race window
   itself is deliberately still open, see below).** The active-account-
   per-product-type rule (`accounts.product_type`'s partial unique

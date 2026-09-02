@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Enter your code -- Loan Onboarding{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold mb-1">Check your email</h1>
+<p class="text-sm text-gray-600 mb-6">We sent a 6-digit code to <strong>{{ applicant_identifier }}</strong>. Enter it below to continue.</p>
+
+{% if dev_code %}
+<div class="mb-4 px-3 py-2.5 rounded-md bg-amber-50 text-amber-800 text-sm border border-amber-200">
+  <strong>Dev mode:</strong> this POC has no real email delivery configured, so your code is shown here instead of being emailed: <strong>{{ dev_code }}</strong>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="mb-4 px-3 py-2.5 rounded-md bg-red-50 text-red-700 text-sm border border-red-200">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/apply/identify/verify" class="space-y-4">
+  <div>
+    <label class="block text-sm font-medium text-gray-700 mb-1.5" for="code">6-digit code</label>
+    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus
+      class="w-full min-h-12 px-3.5 py-3 text-base border border-gray-300 rounded-lg tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-blue-500">
+  </div>
+  <button type="submit"
+    class="w-full min-h-12 px-4 py-3 text-base font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+    Verify
+  </button>
+</form>
+
+<p class="text-sm text-gray-500 mt-4">
+  Wrong email? <a class="text-blue-600 hover:underline" href="/apply/identify">Start over</a>.
+</p>
+{% endblock %}

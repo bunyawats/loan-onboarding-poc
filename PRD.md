@@ -99,10 +99,14 @@ scoped to exactly what they're responsible for.
 
 ## 4. Non-goals (out of scope for this POC)
 
-- **Real customer authentication.** No password, no OTP/magic-link
-  verification. See §7 — this remains the biggest deliberate risk this
-  POC accepts, and it's called out again there. (The back-office side,
-  by contrast, now has real Keycloak authentication — see §7 and §5.)
+- **Production-grade customer authentication.** Still no password, and
+  still no real email/SMS provider (see §7.1's correction — an email
+  OTP *mechanism* now exists, but its delivery is fake/dev-only, and
+  the identifier itself is the only thing verified, not a real
+  credential). Treat this as narrowed, not closed — a controlled
+  demo/dev risk instead of "anyone can type anyone's email," not a
+  production-ready login. (The back-office side, by contrast, has real
+  Keycloak authentication — see §7 and §5.)
 - **A native mobile app.** "Mobile application" here means a
   mobile-first, responsive HTMX web app usable in a phone browser — not
   an iOS/Android binary. No separate JSON API module (`api/`) is built
@@ -130,12 +134,12 @@ scoped to exactly what they're responsible for.
 
 ## 5. Roles
 
-The customer side has no real authentication; the back-office side now
-does, via Keycloak (see §7 for both).
+The customer side verifies the applicant's email (no password); the
+back-office side has real Keycloak login (see §7 for both).
 
 | Role | Surface | Authentication | Can do |
 |---|---|---|---|
-| **Customer** | Mobile-first web app (public-facing) | None — self-entered email/phone, unverified | Identify themself, apply for a loan (product type + details), upload required documents from their phone, submit for review, track status of their own application(s), respond to "more info requested" by editing/uploading and resubmitting, cancel their own application while it's not yet terminal. |
+| **Customer** | Mobile-first web app (public-facing) | Email-verified via a one-time code, no password (§7.1) | Identify themself, apply for a loan (product type + details), upload required documents from their phone, submit for review, track status of their own application(s), respond to "more info requested" by editing/uploading and resubmitting, cancel their own application while it's not yet terminal. |
 | **Underwriter** | Back-office web app | Real Keycloak login | See all applications pending underwriter review, view the applicant's uploaded documents, decide **Approve** / **Reject** / **Request More Info**, act individually or in bulk. |
 | **Manager** | Back-office web app | Real Keycloak login | See only applications escalated to them (loan amount at/above the escalation threshold, already Underwriter-approved), decide **Approve** / **Reject**, act individually or in bulk. |
 
@@ -250,29 +254,55 @@ terminal `APPROVED` (§6.2, §9.2):
 The two sides of this app have deliberately different identity models —
 treated separately below.
 
-### 7.1 Customer side (public-facing) — still no real auth
+### 7.1 Customer side (public-facing) — email-verified, still no password
 
-On first visit, the app asks for an email or phone number — no
-password, no OTP, no verification — and stores it in a signed session
-cookie for that browser. **Setting this cookie is a pure client-side
-write — no database row is created at this point** (see §9.1 — a
-`customers` row only ever gets created on approval). This value becomes
-the applicant's `applicant_identifier`, used both for "my applications"
-filtering in Postgres (the same visibility-invariant pattern
-`review-approval-temporal` uses for its Operator role: filter by
-`WHERE applicant_identifier = :session_value`, enforced in the shared
-service layer, not just hidden in the UI) and as the top-level metadata
-value in Mayan's document hierarchy. **Because this surface is
-customer/public-facing, unauthenticated self-identification is a real
-risk** — anyone who knows or guesses another customer's email/phone can
-view their application status and documents. Treat any deployment of
-this POC as non-public (e.g., behind a shared gateway password, VPN, or
-an explicit "demo only" banner) until real customer authentication (a
-passwordless email/SMS link, or a proper identity provider) replaces
-this. This remains the single highest-priority item in `CLAUDE.md`'s
-hardening section — adding Keycloak to the back office (below) does
-**not** address it, since it's a separate surface with a separate
-identity model.
+**Corrected from an earlier draft of this section**, which described
+this surface as accepting an unverified, self-typed email *or* phone
+number with no proof of ownership — closed after being flagged as this
+POC's standout risk (`CLAUDE.md`'s Known Gaps). On first visit, the app
+now asks for an **email address only** (phone-number identifiers were
+dropped along with this fix — see the note at the end of this section
+for why) and sends a 6-digit one-time code to it; the applicant has to
+type that code back correctly before a signed session cookie is ever
+set for that browser. **Still no password, and still no database row
+created at verification time** (see §9.1 — a `customers` row only ever
+gets created on approval) — only the identifier itself is verified,
+which is what actually closes the risk (typing an email you don't own
+no longer gets you in), not an added credential. This verified value
+becomes the applicant's `applicant_identifier`, used both for "my
+applications" filtering in Postgres (the same visibility-invariant
+pattern `review-approval-temporal` uses for its Operator role: filter
+by `WHERE applicant_identifier = :session_value`, enforced in the
+shared service layer, not just hidden in the UI) and as the top-level
+metadata value in Mayan's document hierarchy.
+
+**A real, accepted limitation of this fix, not a full close**: this
+POC has no real email/SMS provider configured (no SMTP, no
+Twilio/SendGrid/SES credentials, nothing in `.env.example`), and
+standing one up was explicitly out of scope for this pass. The
+verification code is "sent" via a fake delivery function that only
+prints it server-side and — since no real inbox will ever receive it —
+the verify-code page also shows the code directly in its own response,
+clearly labeled as a dev-only artifact of not having real delivery.
+This is enough to prove the *mechanism* (an attacker who doesn't
+control the target inbox still can't complete verification against a
+real deployment with real delivery wired in) but **treat any actual
+deployment of this POC as non-public** until a real provider replaces
+the fake one — the code being visible in the page response today would
+defeat the whole point outside a controlled demo/dev setting. Swapping
+in a real provider is meant to be a small, isolated change (one
+function, same signature, in `bff_customer/notifications.py`) plus
+dropping the dev-mode code display, not a redesign of the flow itself.
+
+Also dropped: phone-number identifiers. The original design let a
+customer identify by "email or phone number" with equal footing; since
+this fix verifies by email code specifically (SMS delivery would need
+a real SMS provider this project doesn't have either), the identify
+form now only accepts an email address. A customer who'd have typed a
+phone number before is simply asked for an email instead — a real,
+if narrow, scope reduction from the original PRD wording above,
+confirmed with the user as an accepted tradeoff of choosing email OTP
+over standing up two verification channels for a POC.
 
 ### 7.2 Back-office side (internal, Underwriter/Manager) — real Keycloak
 
@@ -319,7 +349,8 @@ the concrete Resource/Scope/Policy layout and Docker Compose wiring.
 
 ### 8.1 Customer app (mobile-first, responsive)
 
-- **Identify** — one-time (per browser) email/phone entry, no password.
+- **Identify** — one-time (per browser) email entry + a 6-digit
+  verification code sent to it (§7.1), no password.
 - **My Applications** — the customer's own applications only, status
   badges, "Apply for a new loan" call to action.
 - **New Application** — a mobile-friendly step flow: pick product type →
@@ -395,7 +426,7 @@ tables below reflect it.
 | Field | Notes |
 |---|---|
 | `customer_id` | primary key — `cus-` followed by a random 9-digit number, generated by the shared `idgen` service and assigned by application code at insert time (not a database default). See `CLAUDE.md`'s "Data storage" for the format, the shared generator, and the accepted collision-probability tradeoff of a digits-only, 9-character id. |
-| `applicant_identifier` | the customer's self-entered email/phone (§7.1) — the natural key a returning applicant resolves to the same `customer_id` by |
+| `applicant_identifier` | the customer's email, verified via a one-time code (§7.1) — the natural key a returning applicant resolves to the same `customer_id` by |
 | `name`, `email`, `phone` | profile fields, editable over time |
 | `created_at` | |
 
@@ -463,10 +494,12 @@ because `account_id` doesn't exist yet at document-upload time. See
    → customer resubmits → decide) → terminal state, verified both via
    the HTMX UI (customer and staff sides) and by watching the workflow
    execute in the Temporal Web UI.
-2. A customer only ever sees their own applications; typing a different
-   email/phone at the identify screen shows a different (empty, unless
-   reused) application list — proving the visibility filter actually
-   filters, not just hides via CSS.
+2. A customer only ever sees their own applications; verifying a
+   different email at the identify screen shows a different (empty,
+   unless reused) application list — proving the visibility filter
+   actually filters, not just hides via CSS. (Verifying, not just
+   typing, per §7.1's fix — the applicant now has to prove ownership of
+   the email before this filter is even reachable.)
 3. Documents uploaded via the customer's phone are visible/organized in
    Mayan's own hierarchy view, and submission is blocked with a clear
    message until required categories are present.

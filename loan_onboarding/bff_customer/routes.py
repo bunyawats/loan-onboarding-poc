@@ -32,7 +32,7 @@ from temporalio.client import Client
 from loan_onboarding.application import schemas as application_schemas
 from loan_onboarding.application import service as application_service
 from loan_onboarding.application.models import Application, ApplicationNotFound
-from loan_onboarding.bff_customer import identity
+from loan_onboarding.bff_customer import identity, notifications
 from loan_onboarding.document import service as document_service
 from loan_onboarding.document.models import UploadedFile
 from loan_onboarding.idgen import service as idgen_service
@@ -89,6 +89,19 @@ STATUS_LABELS = {
 
 def _category_slug(category: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", category.lower()).strip("-")
+
+
+# Deliberately loose -- this is a format check, not a deliverability
+# one (no MX lookup, no real validation library -- email_validator
+# isn't a dependency of this project). Its only job is rejecting
+# obviously-not-an-email input before a verification code is ever
+# generated for it; a real, wrong email still just means the applicant
+# never receives their code and can't get past /apply/identify/verify.
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _looks_like_email(value: str) -> bool:
+    return bool(_EMAIL_PATTERN.match(value))
 
 
 templates.env.globals["category_slug"] = _category_slug
@@ -157,13 +170,61 @@ async def identify_form(request: Request):
 
 @router.post("/identify", response_class=HTMLResponse)
 async def identify_submit(request: Request, applicant_identifier: str = Form(...)):
-    applicant_identifier = applicant_identifier.strip()
-    if not applicant_identifier:
+    """Starts email verification -- does NOT set the real session cookie
+    directly anymore (see `identity.py`'s module docstring for the gap
+    this closes). Generates a fresh code, "sends" it (fake delivery,
+    `notifications.py`), and stashes its hash in a short-lived pending-
+    verification cookie; the applicant has to prove they received it,
+    via `identify_verify` below, before `set_applicant_identifier` is
+    ever called."""
+    applicant_identifier = applicant_identifier.strip().lower()
+    if not _looks_like_email(applicant_identifier):
         return templates.TemplateResponse(
-            request, "identify.html", {"error": "Enter an email or phone number."}, status_code=400
+            request, "identify.html", {"error": "Enter a valid email address."}, status_code=400
         )
+
+    code = identity.generate_verification_code()
+    notifications.send_verification_code(applicant_identifier, code)
+
+    response = templates.TemplateResponse(
+        request,
+        "verify_code.html",
+        {
+            "applicant_identifier": applicant_identifier,
+            # Shown only because delivery is fake for this POC -- see
+            # notifications.py's docstring. A real provider integration
+            # would drop this entirely.
+            "dev_code": code,
+        },
+    )
+    identity.start_verification(response, applicant_identifier, code)
+    return response
+
+
+@router.post("/identify/verify", response_class=HTMLResponse)
+async def identify_verify(request: Request, code: str = Form(...)):
+    pending = identity.get_pending_verification(request)
+    if pending is None:
+        return templates.TemplateResponse(
+            request,
+            "identify.html",
+            {"error": "That code expired or was never requested. Enter your email again."},
+            status_code=400,
+        )
+
+    if not identity.verify_code(pending, code):
+        response = templates.TemplateResponse(
+            request,
+            "verify_code.html",
+            {"applicant_identifier": pending.applicant_identifier, "error": "Incorrect code. Try again."},
+            status_code=400,
+        )
+        identity.record_failed_verification_attempt(response, pending)
+        return response
+
     response = RedirectResponse(url="/apply/applications", status_code=303)
-    identity.set_applicant_identifier(response, applicant_identifier)
+    identity.set_applicant_identifier(response, pending.applicant_identifier)
+    identity.clear_pending_verification(response)
     return response
 
 
