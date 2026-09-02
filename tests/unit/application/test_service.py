@@ -1,12 +1,10 @@
-"""application/service.py's create_application tests mock
-workflow.service.start_workflow and _get_temporal_client at the
-function-call boundary (CLAUDE.md's Testing convention: mock
-document.service/workflow.service calls for a module under test) --
-no real Temporal server needed. document.service.check_completeness is
-mocked the same way (no real Mayan needed). customer.service runs for
-real against Postgres (same deliberate exception as every other
+"""application/service.py's tests mock workflow.service/document.service
+at the function-call boundary (CLAUDE.md's Testing convention) -- no
+real Temporal server or Mayan needed. customer.service/account.service
+run for real against Postgres (same deliberate exception as every other
 db-backed test in this package) since resolving an existing customer_id
-is exactly the integration point worth exercising for real."""
+and the active-account-per-product-type rule are exactly the
+integration points worth exercising for real."""
 
 import uuid
 from decimal import Decimal
@@ -14,7 +12,9 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from loan_onboarding.account import db as account_db
 from loan_onboarding.application import db as application_db, service
+from loan_onboarding.application.models import ApplicationNotFound
 from loan_onboarding.customer import db as customer_db
 
 
@@ -23,6 +23,8 @@ async def _clean_tables():
     app_pool = await application_db._get_pool()
     yield
     await app_pool.execute("DELETE FROM applications")
+    acct_pool = await account_db._get_pool()
+    await acct_pool.execute("DELETE FROM accounts")
     cust_pool = await customer_db._get_pool()
     await cust_pool.execute("DELETE FROM customers")
 
@@ -264,3 +266,156 @@ async def test_wait_until_timeout_returns_none_application_even_though_workflow_
     assert len(start_workflow_calls) == 1
     assert result.missing_categories == []
     assert result.application is None
+
+
+# ----------------------------------------------------------------------
+# resubmit_application
+# ----------------------------------------------------------------------
+
+async def _seed_application(**overrides) -> uuid.UUID:
+    application_id = overrides.pop("application_id", uuid.uuid4())
+    defaults = dict(
+        application_id=application_id,
+        applicant_identifier="alice@example.com",
+        customer_id=None,
+        workflow_id=f"loan-application-{application_id}",
+        product_type="personal_loan",
+        payload=_personal_loan_payload(),
+        applicant_name="Alice",
+        applicant_email="alice@example.com",
+        applicant_phone="555-0100",
+        amount=Decimal("10000"),
+    )
+    defaults.update(overrides)
+    await application_db.insert(**defaults)
+    return application_id
+
+
+async def test_resubmit_raises_application_not_found_for_unknown_id():
+    with pytest.raises(ApplicationNotFound):
+        await service.resubmit_application(uuid.uuid4(), _personal_loan_payload())
+
+
+async def test_resubmit_missing_documents_returns_missing_categories_without_signaling(monkeypatch):
+    application_id = await _seed_application()
+    _mock_completeness(monkeypatch, missing=["Credit Report"])
+
+    signal_calls = []
+
+    async def fake_signal_resubmit(client, workflow_id, payload):
+        signal_calls.append((workflow_id, payload))
+
+    monkeypatch.setattr(service.workflow_service, "signal_resubmit", fake_signal_resubmit)
+    monkeypatch.setattr(service, "_get_temporal_client", _fake_get_client)
+
+    result = await service.resubmit_application(application_id, _personal_loan_payload())
+
+    assert result.application is None
+    assert result.missing_categories == ["Credit Report"]
+    assert signal_calls == []
+
+
+async def test_resubmit_signals_existing_workflow_and_waits_for_payload_update(monkeypatch):
+    application_id = await _seed_application(payload={"purpose": "old", "employment_status": "employed", "monthly_income": "1"})
+    _mock_completeness(monkeypatch, missing=[])
+    monkeypatch.setattr(service, "_get_temporal_client", _fake_get_client)
+
+    signal_calls = []
+
+    async def fake_signal_resubmit(client, workflow_id, payload):
+        signal_calls.append((workflow_id, payload))
+        # Simulate persist_resubmit (the activity a real worker would run).
+        await application_db.update_resubmission(application_id, payload)
+
+    monkeypatch.setattr(service.workflow_service, "signal_resubmit", fake_signal_resubmit)
+
+    new_payload = {"purpose": "updated", "employment_status": "employed", "monthly_income": "2"}
+    result = await service.resubmit_application(application_id, new_payload)
+
+    assert len(signal_calls) == 1
+    assert signal_calls[0][0] == f"loan-application-{application_id}"
+    assert result.missing_categories == []
+    assert result.application is not None
+    assert result.application.payload == new_payload
+    assert result.application.status == "PENDING_UNDERWRITING"
+    assert result.application.workflow_id == f"loan-application-{application_id}"
+
+
+async def test_resubmit_validates_payload_against_stored_product_type(monkeypatch):
+    application_id = await _seed_application(product_type="personal_loan")
+    _mock_completeness(monkeypatch, missing=[])
+
+    with pytest.raises(ValidationError):
+        await service.resubmit_application(application_id, {"purpose": "missing other fields"})
+
+
+async def _fake_get_client():
+    return "fake-temporal-client"
+
+
+# ----------------------------------------------------------------------
+# check_decision_allowed
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("decision", ["REJECT", "REQUEST_MORE_INFO", "CANCELLED"])
+async def test_check_decision_allowed_noop_for_non_approve_decisions(monkeypatch, decision):
+    application_id = await _seed_application()
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("account.service must not be called for a non-APPROVE decision")
+
+    monkeypatch.setattr(service.account_service, "has_active_account_of_type", fail_if_called)
+
+    result = await service.check_decision_allowed(application_id, decision)
+    assert result == []
+
+
+async def test_check_decision_allowed_short_circuits_when_customer_id_null(monkeypatch):
+    application_id = await _seed_application(customer_id=None)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("account.service must not be called when customer_id is NULL")
+
+    monkeypatch.setattr(service.account_service, "has_active_account_of_type", fail_if_called)
+
+    result = await service.check_decision_allowed(application_id, "APPROVE")
+    assert result == []
+
+
+async def test_check_decision_allowed_blocks_when_active_account_of_same_type_exists():
+    customer = await customer_db.get_or_create("conflict@example.com")
+    customer_id = customer["customer_id"]
+    await account_db.create(customer_id, "personal_loan")
+    application_id = await _seed_application(
+        applicant_identifier="conflict@example.com", customer_id=customer_id, product_type="personal_loan"
+    )
+
+    result = await service.check_decision_allowed(application_id, "APPROVE")
+    assert result != []
+    assert "personal_loan" in result[0]
+
+
+async def test_check_decision_allowed_permits_when_only_closed_account_of_same_type_exists():
+    customer = await customer_db.get_or_create("closed-ok@example.com")
+    customer_id = customer["customer_id"]
+    account = await account_db.create(customer_id, "personal_loan")
+    acct_pool = await account_db._get_pool()
+    await acct_pool.execute("UPDATE accounts SET status = 'CLOSED' WHERE account_id = $1", account["account_id"])
+
+    application_id = await _seed_application(
+        applicant_identifier="closed-ok@example.com", customer_id=customer_id, product_type="personal_loan"
+    )
+
+    result = await service.check_decision_allowed(application_id, "APPROVE")
+    assert result == []
+
+
+async def test_check_decision_allowed_permits_when_no_conflicting_account_exists():
+    customer = await customer_db.get_or_create("clean@example.com")
+    customer_id = customer["customer_id"]
+    application_id = await _seed_application(
+        applicant_identifier="clean@example.com", customer_id=customer_id, product_type="personal_loan"
+    )
+
+    result = await service.check_decision_allowed(application_id, "APPROVE")
+    assert result == []

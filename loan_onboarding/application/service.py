@@ -22,7 +22,7 @@ from temporalio.client import Client
 from loan_onboarding.account import service as account_service
 from loan_onboarding.application import db as application_db
 from loan_onboarding.application import schemas
-from loan_onboarding.application.models import Application, ApplicationSubmissionResult
+from loan_onboarding.application.models import Application, ApplicationNotFound, ApplicationSubmissionResult
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.workflow import service as workflow_service
@@ -121,3 +121,51 @@ async def create_application(
     record = await _wait_until(application_id, lambda r: True)
     application = Application.from_record(record) if record is not None else None
     return ApplicationSubmissionResult(application_id=application_id, application=application, missing_categories=[])
+
+
+async def resubmit_application(application_id: UUID, payload: dict[str, Any]) -> ApplicationSubmissionResult:
+    """Same document gate re-check as `create_application`, then
+    `workflow.service.signal_resubmit()` against the *existing*
+    `workflow_id` -- the same running execution, still waiting from
+    `MORE_INFO_REQUESTED`, never a new workflow start."""
+    record = await application_db.get(application_id)
+    if record is None:
+        raise ApplicationNotFound(application_id)
+
+    validated_payload = schemas.validate_payload(record["product_type"], payload)
+
+    missing = await document_service.check_completeness(str(application_id), record["product_type"])
+    if missing:
+        return ApplicationSubmissionResult(
+            application_id=application_id, application=None, missing_categories=missing
+        )
+
+    client = await _get_temporal_client()
+    await workflow_service.signal_resubmit(client, record["workflow_id"], validated_payload)
+
+    updated = await _wait_until(application_id, lambda r: r["payload"] == validated_payload)
+    application = Application.from_record(updated) if updated is not None else None
+    return ApplicationSubmissionResult(application_id=application_id, application=application, missing_categories=[])
+
+
+async def check_decision_allowed(application_id: UUID, decision: str) -> list[str]:
+    """Blocking-reason strings, `[]` if `decision` may proceed -- a
+    no-op unless `decision == "APPROVE"` (PRD §9.2's
+    one-active-account-per-product-type rule; Reject/RequestMoreInfo/
+    Cancel never create an account, so never conflict). Called by
+    `bff_backoffice` *before* signalling a decision -- never by
+    `application/activities.py`, which has no clean way to surface an
+    error back to a decision-maker from inside a running activity."""
+    if decision != "APPROVE":
+        return []
+
+    record = await application_db.get(application_id)
+    if record is None or record["customer_id"] is None:
+        # A brand-new applicant (no resolved customer yet) can't
+        # possibly conflict with an existing active account.
+        return []
+
+    has_active = await account_service.has_active_account_of_type(record["customer_id"], record["product_type"])
+    if has_active:
+        return [f"customer already has an active {record['product_type']} account"]
+    return []

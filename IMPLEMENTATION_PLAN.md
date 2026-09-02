@@ -908,7 +908,7 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > Temporal execution. Verified against Postgres via the same
       > temporary 5433 port remap as every other P6 task (reverted before
       > committing, zero diff).
-- [ ] **P6-5** — `application/service.py`, part 2:
+- [x] **P6-5** — `application/service.py`, part 2:
       `resubmit_application(application_id, payload)` — same gate
       re-check, then `workflow.service.signal_resubmit()` against the
       *existing* `workflow_id` (not a new start), same `_wait_until()`
@@ -920,7 +920,31 @@ being a customer yet"), so P6-3 can't be written until both exist.
       call in the test setup rather than waiting on the BFF), resubmit,
       confirm it's back at `PENDING_UNDERWRITING` on the *same*
       `workflow_id`.
-- [ ] **P6-5b** — `application/service.py`, part 2b:
+      > DONE: raises `ApplicationNotFound` for an unknown id (a
+      > cheap early exit, since a lookup already has to happen to get
+      > `product_type`/`workflow_id` for the rest of the function). Reuses
+      > `schemas.validate_payload`/`document_service.check_completeness`/
+      > `_wait_until` exactly as `create_application` does, just against
+      > the stored `product_type` rather than a freshly-submitted one,
+      > and waits on `r["payload"] == validated_payload` rather than
+      > "any row exists" (same predicate shape
+      > `review-approval-temporal`'s own `update_review` uses). 12 unit
+      > tests added to `test_service.py` (not-found, missing-categories
+      > short-circuit, a simulated `persist_resubmit` commit via the
+      > mocked `signal_resubmit`, and payload-validation-against-stored-
+      > product-type), plus **the DoD's literal integration-verify**:
+      > against the real stack (`db`, `temporal`, `mayan`) plus the same
+      > throwaway ad-hoc worker as P6-4, drove a real application to
+      > `MORE_INFO_REQUESTED` via a **direct `workflow.service.signal_decision`
+      > call** (exactly the DoD's own suggested workaround, since
+      > Phase 7/10's real decision UI doesn't exist yet), then called
+      > `resubmit_application` for real and confirmed the row landed
+      > back at `PENDING_UNDERWRITING` with the payload updated **and
+      > the identical `workflow_id`** — proving this signals the
+      > existing execution rather than starting a new one. Verified via
+      > the same temporary 5433 Postgres port remap as every other P6
+      > task (reverted before committing, zero diff).
+- [x] **P6-5b** — `application/service.py`, part 2b:
       `check_decision_allowed(application_id, decision) -> list[str]`
       (blocking-reason strings, `[]` if OK — no-op unless `decision ==
       "APPROVE"`, per PRD §9.2's one-active-account-per-product-type
@@ -937,6 +961,20 @@ being a customer yet"), so P6-3 can't be written until both exist.
       `ACTIVE` account, or only a `CLOSED` one of that type), and that
       `REJECT`/`REQUEST_MORE_INFO`/`CANCELLED` always return `[]`
       without calling `account.service` at all.
+      > DONE: 7 unit tests (parametrized over the three non-APPROVE
+      > decisions, plus the `customer_id IS NULL` short-circuit) each
+      > monkeypatch `account_service.has_active_account_of_type` to
+      > *raise* if called at all, rather than just asserting the
+      > returned value — proves the short-circuit actually skips the
+      > call, not just that it happens to return `[]` anyway. The
+      > blocked/allowed cases run against real Postgres (`customer`,
+      > `account`, `application` tables together): an `ACTIVE` account
+      > of the same `product_type` blocks with a message naming the
+      > conflicting type; a `CLOSED` one of the same type, or no
+      > account at all, both permit. All 19 of this session's
+      > `test_service.py` tests (covering P6-4, P6-5, and P6-5b
+      > together, since they share fixtures) verified against the same
+      > temporary 5433 Postgres port remap as every other P6 task.
 - [ ] **P6-6** — `application/service.py`, part 3: `get(application_id)`,
       `list_for_applicant(applicant_identifier, page, ...)`,
       `list_by_status(status, page, ...)`. Paginated, `query_id`-cached
