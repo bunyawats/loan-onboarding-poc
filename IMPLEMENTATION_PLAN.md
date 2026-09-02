@@ -2217,8 +2217,16 @@ is.)*
   — confirmed via `psql` the second application stayed at
   `PENDING_UNDERWRITING` and via worker logs that no activity ever ran
   for it (the old bug's `FAILED` Temporal workflow + silent stuck
-  application no longer happens). Not committed/pushed yet pending
-  user confirmation.
+  application no longer happens). Committed and pushed (commit
+  `fb345a8`). **First CI run on this push failed on an unrelated,
+  pre-existing flaky test**: `tests/unit/bff_customer/test_identity.py::test_get_rejects_a_tampered_cookie`
+  flipped only the last character of the signed cookie to "tamper" it
+  — base64url's last character in a group can carry unused padding
+  bits, so some single-character substitutions decode to the exact
+  same underlying signature bytes and the "tampered" cookie still
+  verifies. Fixed by flipping a full 4-character base64 group instead
+  (commit `13b9151`); confirmed 30 consecutive local reruns all pass.
+  Re-ran CI on the follow-up push — green.
 
 - **2026-09-02** — Confirmed the CI run for Phase 13's push
   (`gh run list --branch main`, run id `33637386503`, commit `ccad573`)
