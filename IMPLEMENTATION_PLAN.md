@@ -74,10 +74,10 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0, 1, and 2 — done**, including CI confirmed green on GitHub
-Actions with the new Postgres service container. Start here:
-[P3-1](#phase-3--account-module) (Account Module) — no dependency on
-Phase 2, could equally have gone first.
+**Phases 0 through 3 — done.** Start here:
+[P4-1](#phase-4--workflow-module-generic-orchestration-only) (Workflow
+Module) — depends only on Phase 0, next in phase order regardless of
+Phases 2/3 being done first.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -261,9 +261,14 @@ assumption; until then treat it as provisional, not settled.)*
 Can run in parallel with Phase 2 if two sessions ever overlap — no
 dependency between them.
 
-- [ ] **P3-1** — `account/models.py`, `account/db.py` (the only code
+- [x] **P3-1** — `account/models.py`, `account/db.py` (the only code
       touching the `accounts` table).
-- [ ] **P3-2** — `account/service.py`:
+      > DONE: same conventions as `customer/db.py` (own lazily-init'd
+      > `asyncpg` pool, `Account` dataclass + `from_record`,
+      > `AccountNotFound`). `db.create()` deliberately does **not**
+      > catch the partial unique index's violation — that's on purpose
+      > (see below), not an oversight.
+- [x] **P3-2** — `account/service.py`:
       `create_account(customer_id, product_type) -> Account` (always
       creates a new row — no find-or-create; an account is 1:1 with an
       approved application, not 1:1 with a customer, see `CLAUDE.md`'s
@@ -283,6 +288,22 @@ dependency between them.
       `has_active_account_of_type` tested both ways (true after one
       `ACTIVE` account of that type exists, false again after it's
       `CLOSED`).
+      > DONE: `tests/unit/account/test_service.py`, 7 tests, all
+      > passing against a real local Postgres — same deliberate
+      > "hits a real database" exception as Phase 2 (already documented
+      > in `CLAUDE.md`'s Testing section, no further doc changes needed
+      > this time). Confirmed
+      > `asyncpg.exceptions.UniqueViolationError` actually raises on
+      > the second same-`product_type` call (real constraint, not a
+      > simulated one), plus two DoD-adjacent checks: a different
+      > `customer_id` with the same `product_type` doesn't collide, and
+      > closing an account (raw `UPDATE` in the test, since no
+      > `close_account` function exists anywhere in the plan yet) frees
+      > the slot for a new `ACTIVE` account of that type — the actual
+      > behavior the whole rule exists for, not just the boolean flip.
+      > CI already has the Postgres service container from Phase 2, so
+      > nothing new needed there — will still confirm green after
+      > push.
 
 ---
 
@@ -800,6 +821,23 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 3 complete, both tasks checked.
+  `account/models.py`, `db.py`, `service.py` built, same conventions as
+  Phase 2's `customer/` module. Unlike `customer/db.py`'s
+  `get_or_create`, `account/db.py`'s `create()` deliberately does
+  **not** guard against the partial unique index — that's by design
+  (the pre-check is supposed to happen one layer up, in
+  `application.service.check_decision_allowed`, Phase 6), and the
+  Phase 3 tests specifically prove the raw
+  `asyncpg.exceptions.UniqueViolationError` fires rather than swallow
+  it. Reused Phase 2's Postgres-in-CI setup as-is, no CI changes
+  needed. Same local port collision as Phase 2 (native Postgres on
+  5432) — remapped temporarily for verification, reverted before
+  committing, not re-documenting the same issue at length again. Next:
+  Phase 4 (Workflow Module) per phase order, though Phase 5 (Document
+  Module) is equally unblocked (both depend only on Phase 0) if a
+  session wants to do that one first instead.
 
 - **2026-09-02** — Phase 2 complete, both tasks checked, including
   CI's new Postgres service container confirmed green on GitHub
