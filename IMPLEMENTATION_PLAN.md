@@ -463,7 +463,7 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       > account credentials (`admin`/`changeme`) returns a real token —
       > confirms the container, its Postgres, and its default admin
       > account all actually work, not just that the container starts.
-- [ ] **P5-2** — `scripts/setup_document_hierarchy.sh`: creates the
+- [x] **P5-2** — `scripts/setup_document_hierarchy.sh`: creates the
       metadata types (`applicant_identifier`, `application_id`,
       `account_id`, `customer_id`, `category`), document types, and the
       full Index Template per `CLAUDE.md`'s "Document hierarchy" — the
@@ -489,6 +489,40 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       doesn't, stop and record the actual behavior in `CLAUDE.md` before
       P6-3/P5-5 build `promote_government_id_to_customer_photo` against
       an assumption that turned out false.
+      > DONE: two document types, not three, since `applicant_identifier`
+      > (not `customer_id`) is the top-level branch key here — "Application
+      > Document" (`applicant_identifier`/`application_id`/`category`
+      > required, `customer_id` optional/attached later) and "Account
+      > Document" (`applicant_identifier`/`account_id`/`category`
+      > required); this partition is what lets every leaf condition stay
+      > a single check (an Account Document has no `application_id` field
+      > at all, so `metadata_value_of.application_id` is naturally empty
+      > for it, no extra `not account_id` clause needed on the
+      > application-branch leaf). Ran against the real P5-1 instance and
+      > verified with a throwaway Python script (scratchpad, not
+      > committed): uploaded a real 1-page PDF as a Government ID
+      > (Application Document), rebuilt, confirmed it landed under
+      > `<applicant_identifier>/<application_id>/Government ID`; uploaded
+      > a second real PDF as a Welcome Letter (Account Document), rebuilt,
+      > confirmed it landed under `<applicant_identifier>/<account_id>/Welcome
+      > Letter`; then attached `customer_id` to the *first* document
+      > (simulating promotion), rebuilt again, and confirmed via
+      > `GET /index_instances/<id>/nodes/.../documents/` that the exact
+      > same document id now appears under **both**
+      > `Government ID` *and* `id_photo` simultaneously — the flagged
+      > multi-membership assumption in `CLAUDE.md`'s "Document hierarchy"
+      > empirically confirmed, not just source-read; `CLAUDE.md` updated
+      > in place to record this (no fallback-to-copy path needed).
+      > Correctly used `/index_instances/<id>/nodes/` (the rendered
+      > instance tree, with real `value`s and `documents_url`s) rather
+      > than `/index_templates/<id>/nodes/` (the template's static
+      > expression definitions) for verification — an easy mix-up since
+      > both return a similarly-shaped `results` array; only the instance
+      > endpoint has actual per-document node data. Also observed the
+      > expected cosmetic "None" group nodes (gotcha #1) appearing
+      > alongside real siblings once documents of both types existed —
+      > harmless, `link_documents: false` on all of them, exactly as the
+      > reference project's docs predict.
 - [ ] **P5-3** — `document/mayan_client.py`: thin async wrapper,
       `Accept: application/json` default header (do not omit — see
       `CLAUDE.md`), service-account token obtained lazily and refreshed

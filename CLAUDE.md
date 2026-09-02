@@ -748,33 +748,35 @@ metadata, purely so staff search can find it by customer — not itself
 an index branch key, since `applicant_identifier` already plays that
 role).
 
-**Multi-leaf placement — source-level confidence, not yet
-empirically confirmed (flag for Phase 5)**: the `id_photo` node depends
-on one Mayan document satisfying two different leaf-node paths in the
-same index template at once — the existing `<application_id> ->
-Government ID` path (via `application_id` + `category` metadata) and
-the new `<applicant_identifier> -> id_photo` path (via `customer_id`
-metadata, no `application_id` in that leaf's condition). A source read
-of `mayan/apps/document_indexing/models/index_instance_models.py`'s
-`_document_add()` shows it walks *every* child branch at each tree
-level and links the document into *all* branches whose conditions
-independently evaluate true — not just the first match — which is
-exactly this behavior. That's meaningfully more confidence than "an
-assumption" (a session investigating whether to replace Index Templates
-with Cabinets confirmed this by reading Mayan's actual source, not just
-inferring it), but it's still not the same as gotchas #1-5 below, which
-came from hands-on testing against a running instance. **Cabinets were
-evaluated as an alternative and rejected as the hierarchy's backbone**
-— they also support true multi-membership and are synchronous (no
-Celery, unlike Index Templates), but the project's actual usage pattern
-is automatic, upload-time classification via API, which is Index
-Templates' idiomatic niche, not Cabinets' (a third-party source
-describes Cabinets as manual, file-manager-style curation). Confirm the
-multi-leaf behavior against a real Mayan instance in P5-2 before
-building `promote_government_id_to_customer_photo` on top of it; if it
-doesn't hold, the fallback is a real copy (two Mayan documents, extra
-storage, `id_photo` no longer literally "the same document") — document
-whichever it turns out to be, right here, once verified.
+**Multi-leaf placement — empirically confirmed against a real instance
+in P5-2 (2026-09-02), not just source-level confidence.** The
+`id_photo` node depends on one Mayan document satisfying two different
+leaf-node paths in the same index template at once — the
+`<application_id> -> Government ID` path (via `application_id` +
+`category` metadata) and the `<applicant_identifier> -> id_photo` path
+(via `customer_id` metadata, no `application_id` in that leaf's
+condition). A source read of
+`mayan/apps/document_indexing/models/index_instance_models.py`'s
+`_document_add()` had already shown it walks *every* child branch at
+each tree level and links the document into *all* branches whose
+conditions independently evaluate true — not just the first match.
+P5-2's verification script (upload a Government ID document, attach
+`applicant_identifier`+`application_id`+`category` metadata, rebuild,
+confirm it's filed under `<application_id>/Government ID`; then attach
+`customer_id` to the *same* document, rebuild again, and confirm it now
+*also* appears under `<applicant_identifier>/id_photo`, same document
+id in both leaves' `documents_url` listings) reproduced exactly this —
+one document, two leaf memberships, confirmed via
+`GET /index_instances/<id>/nodes/.../documents/` on a live
+`docker compose`-run Mayan instance, not inferred. `promote_government_id_to_customer_photo`
+(P5-5, P6-3) can be built as a pure re-tag (attach `customer_id`
+metadata to the existing document) with no fallback-to-copy path
+needed. **Cabinets were evaluated as an alternative and rejected as the
+hierarchy's backbone** — they also support true multi-membership and
+are synchronous (no Celery, unlike Index Templates), but the project's
+actual usage pattern is automatic, upload-time classification via API,
+which is Index Templates' idiomatic niche, not Cabinets' (a third-party
+source describes Cabinets as manual, file-manager-style curation).
 
 **A sharper, previously-implicit consequence of gotcha #2 (async
 reindex)**: `document.service.check_completeness()` and
