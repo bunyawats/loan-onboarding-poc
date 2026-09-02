@@ -2202,6 +2202,39 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-02** — Closed the in-batch half of the active-account
+  race window itself (the previous fix only made the *outcome* of
+  losing it clean -- see the entry below this one). Added
+  `application.service.check_decision_allowed_bulk(application_ids,
+  decision) -> dict[str, list[str]]`, a batch-aware sibling of
+  `check_decision_allowed` that tracks `(applicant_identifier,
+  product_type)` pairs already claimed by an earlier, still-eligible
+  item in the *same* batch, blocking a later item for the same pair
+  before either signal is ever sent. Keyed on `applicant_identifier`,
+  not the resolved `customer_id` -- an early implementation attempt
+  keyed on `customer_id` and failed its own new test, since the more
+  common trigger is two applications for an applicant with *no*
+  customer row yet at all (both resolve `None` independently, so
+  keying there misses the case entirely). `bff_backoffice`'s
+  bulk-approve route now calls this instead of looping the single-item
+  function; the single-item route is unchanged. 7 new regression tests
+  (201 total unit tests), `lint-imports` clean. Rebuilt `app` and
+  re-verified live with a fresh repro of the exact same scenario as
+  the entry below: bulk-approving two sibling `personal_loan`
+  applications together now reports `"1 succeeded, 1 failed: customer
+  already has an active personal_loan account"` immediately in the
+  Bulk Approve Results dialog -- the blocked application is never
+  signaled at all, stays at `PENDING_UNDERWRITING`, and the worker
+  logs stay completely silent (confirmed via `psql` and `docker
+  compose logs`). **Deliberately not closed**: cross-request
+  concurrency (two separate requests, not the same bulk batch) --
+  `persist_decision`'s conflict-to-REJECTED handling remains the
+  backstop for that, and closing it fully would need a lock spanning
+  the check (web process) through the write (worker process,
+  arbitrarily later via Temporal) -- explained to the user as a much
+  larger, riskier change not undertaken here. Not committed/pushed yet
+  pending user confirmation.
+
 - **2026-09-02** — Fixed the active-account-race-window gap's "no
   graceful handling" half (the race window itself is deliberately
   still open -- see `CLAUDE.md`'s Known Gaps). Reproduced live first,

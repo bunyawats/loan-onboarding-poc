@@ -586,8 +586,17 @@ async def _bulk_decision_execute(
         # collecting workflow_ids (P6-5b/P10-3) -- reported in the same
         # per-item result shape bulk_signal_decision returns for any
         # other failure, rather than passed through to it at all.
+        # check_decision_allowed_bulk (not a plain per-item loop over
+        # check_decision_allowed) is what actually closes the in-batch
+        # active-account race (CLAUDE.md's Known Gaps): two applications
+        # for the same customer+product_type selected into this same
+        # bulk action would otherwise both pass an independent per-item
+        # check, since neither one's account exists yet.
+        blocking_by_id = await application_service.check_decision_allowed_bulk(
+            [application.application_id for application in applications], "APPROVE"
+        )
         for application in applications:
-            blocking = await application_service.check_decision_allowed(application.application_id, "APPROVE")
+            blocking = blocking_by_id[application.application_id]
             if blocking:
                 results.append({"label": application.application_id, "ok": False, "error": "; ".join(blocking)})
             else:

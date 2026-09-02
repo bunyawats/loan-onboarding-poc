@@ -153,33 +153,34 @@ async def resubmit_application(application_id: str, payload: dict[str, Any]) -> 
     return ApplicationSubmissionResult(application_id=application_id, application=application, missing_categories=[])
 
 
+async def _resolve_customer_id_for_conflict_check(record: asyncpg.Record) -> Optional[str]:
+    """Read-only resolution of the customer_id an APPROVE decision's
+    active-account check should use -- the row's own column if set,
+    otherwise a lookup by `applicant_identifier` (a since-approved
+    sibling application under the same identifier may have already
+    resolved one, even though this row's own column was never
+    backfilled -- see CLAUDE.md's Known Gaps, corrected after a real
+    bug found live in Phase 13's P13-7 verification sweep). `None`
+    means genuinely no resolved customer exists for this applicant
+    yet -- can't possibly conflict with an existing active account."""
+    if record["customer_id"] is not None:
+        return record["customer_id"]
+    customer = await customer_service.find_by_identifier(record["applicant_identifier"])
+    return customer.customer_id if customer is not None else None
+
+
 async def check_decision_allowed(application_id: str, decision: str) -> list[str]:
     """Blocking-reason strings, `[]` if `decision` may proceed -- a
     no-op unless `decision == "APPROVE"` (PRD §9.2's
     one-active-account-per-product-type rule; Reject/RequestMoreInfo/
     Cancel never create an account, so never conflict). Called by
-    `bff_backoffice` *before* signalling a decision -- never by
-    `application/activities.py`, which has no clean way to surface an
-    error back to a decision-maker from inside a running activity.
-
-    `record["customer_id"]` alone is NOT proof the applicant has no
-    existing customer -- corrected after a real bug found live in
-    Phase 13's P13-7 verification sweep (see CLAUDE.md's Known Gaps).
-    Two applications submitted under the same `applicant_identifier`
-    before either is decided both get `customer_id = NULL` at
-    submission; if one is later approved (provisioning a customer +
-    account) the *other*, older sibling's own row is never backfilled,
-    since it's a different row. Trusting its `NULL` `customer_id` as
-    "definitely no conflict" let a second Approve for the same
-    applicant+product_type reach `persist_decision` uncontested, which
-    then failed `ux_accounts_customer_active_product_type` on every
-    retry and left the application stuck at `PENDING_UNDERWRITING`
-    with a `FAILED` Temporal workflow underneath. Resolving via
-    `customer.service.find_by_identifier` when the column is `NULL` --
-    the same read-only lookup `create_application` already uses --
-    closes this: a genuinely new applicant still resolves to `None`
-    and short-circuits below, but a since-approved sibling application
-    is now found."""
+    `bff_backoffice`'s single-item decision route *before* signalling a
+    decision -- never by `application/activities.py`, which has no
+    clean way to surface an error back to a decision-maker from inside
+    a running activity. The bulk-approve route uses
+    `check_decision_allowed_bulk` instead, not this function directly
+    -- see that function's docstring for why a plain per-item loop over
+    this one isn't enough there."""
     if decision != "APPROVE":
         return []
 
@@ -187,19 +188,83 @@ async def check_decision_allowed(application_id: str, decision: str) -> list[str
     if record is None:
         return []
 
-    customer_id = record["customer_id"]
+    customer_id = await _resolve_customer_id_for_conflict_check(record)
     if customer_id is None:
-        customer = await customer_service.find_by_identifier(record["applicant_identifier"])
-        if customer is None:
-            # Genuinely no resolved customer for this applicant yet --
-            # can't possibly conflict with an existing active account.
-            return []
-        customer_id = customer.customer_id
+        return []
 
     has_active = await account_service.has_active_account_of_type(customer_id, record["product_type"])
     if has_active:
         return [f"customer already has an active {record['product_type']} account"]
     return []
+
+
+async def check_decision_allowed_bulk(application_ids: list[str], decision: str) -> dict[str, list[str]]:
+    """Batch-aware sibling of `check_decision_allowed`, for
+    `bff_backoffice`'s bulk-approve route only. Closes the in-batch
+    half of the active-account race window CLAUDE.md's Known Gaps
+    documents: two applications for the same customer+product_type,
+    both selected into the *same* bulk action, would otherwise both
+    pass an independent per-item `check_decision_allowed` call, since
+    neither one's account exists in the database yet -- provisioning
+    only happens later, asynchronously, once every selected item's
+    signal has already gone out via `bulk_signal_decision`'s
+    `asyncio.gather`. Reproduced live exactly this way before this fix:
+    both signals were sent, one application ended up cleanly REJECTED
+    only *after* reaching `persist_decision` and losing the real
+    database-level race (see that activity's own conflict handling,
+    the actual backstop this pre-check exists to make unnecessary in
+    the common case).
+
+    Processes `application_ids` in order, tracking which
+    `(applicant_identifier, product_type)` pairs an earlier,
+    still-eligible item in *this same batch* has already claimed -- a
+    later item for the same pair is blocked with the same message a
+    real conflict would produce, before either signal is ever sent,
+    giving the staff member accurate, synchronous bulk-result feedback
+    instead of a surprise REJECTED turning up moments later. Keyed on
+    `applicant_identifier`, deliberately, not the resolved
+    `customer_id`: the more common trigger for this race is two
+    applications from an applicant who has *no* customer row yet at
+    all (both would call the same idempotent
+    `customer.service.get_or_create` during provisioning and land on
+    the same customer either way) -- resolving `customer_id` first and
+    keying on that would miss exactly this case, since it's `None` for
+    both until one of them is actually provisioned.
+
+    **What this does not (and, without a much larger architectural
+    change, cannot) close**: two independent decisions -- a second bulk
+    action, or a single-item Approve -- submitted via *separate*
+    requests can still both pass this check, since nothing here spans
+    across requests. `persist_decision`'s conflict-to-REJECTED handling
+    remains the backstop for that case, and is expected to still fire
+    occasionally for genuinely concurrent, cross-request decisions."""
+    if decision != "APPROVE":
+        return {application_id: [] for application_id in application_ids}
+
+    results: dict[str, list[str]] = {}
+    claimed: set[tuple[str, str]] = set()
+    for application_id in application_ids:
+        record = await application_db.get(application_id)
+        if record is None:
+            results[application_id] = []
+            continue
+
+        key = (record["applicant_identifier"], record["product_type"])
+        if key in claimed:
+            results[application_id] = [f"customer already has an active {record['product_type']} account"]
+            continue
+
+        customer_id = await _resolve_customer_id_for_conflict_check(record)
+        if customer_id is not None:
+            has_active = await account_service.has_active_account_of_type(customer_id, record["product_type"])
+            if has_active:
+                results[application_id] = [f"customer already has an active {record['product_type']} account"]
+                continue
+
+        claimed.add(key)
+        results[application_id] = []
+
+    return results
 
 
 # ----------------------------------------------------------------------

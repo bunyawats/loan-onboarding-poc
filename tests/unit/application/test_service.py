@@ -456,6 +456,77 @@ async def test_check_decision_allowed_permits_when_no_conflicting_account_exists
 
 
 # ----------------------------------------------------------------------
+# check_decision_allowed_bulk -- closes the in-batch active-account race
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("decision", ["REJECT", "REQUEST_MORE_INFO", "CANCELLED"])
+async def test_check_decision_allowed_bulk_noop_for_non_approve_decisions(monkeypatch, decision):
+    application_id = await _seed_application()
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("account.service must not be called for a non-APPROVE decision")
+
+    monkeypatch.setattr(service.account_service, "has_active_account_of_type", fail_if_called)
+
+    result = await service.check_decision_allowed_bulk([application_id], decision)
+    assert result == {application_id: []}
+
+
+async def test_check_decision_allowed_bulk_blocks_second_sibling_in_same_batch():
+    """Reproduces the exact race found live via the underwriter's own
+    Bulk Approve action (CLAUDE.md's Known Gaps): two applications for
+    the same applicant_identifier + product_type, neither decided yet,
+    both selected into one bulk action. An independent per-item
+    check_decision_allowed call would pass both (neither's account
+    exists yet); check_decision_allowed_bulk must block the second one
+    in this same batch instead, before either signal is ever sent."""
+    identifier = "bulk-race@example.com"
+    application_id_1 = await _seed_application(applicant_identifier=identifier, product_type="personal_loan")
+    application_id_2 = await _seed_application(applicant_identifier=identifier, product_type="personal_loan")
+
+    result = await service.check_decision_allowed_bulk([application_id_1, application_id_2], "APPROVE")
+
+    assert result[application_id_1] == []
+    assert result[application_id_2] != []
+    assert "personal_loan" in result[application_id_2][0]
+
+
+async def test_check_decision_allowed_bulk_permits_different_product_types_for_same_applicant():
+    identifier = "bulk-different-products@example.com"
+    application_id_1 = await _seed_application(applicant_identifier=identifier, product_type="personal_loan")
+    application_id_2 = await _seed_application(applicant_identifier=identifier, product_type="auto_loan")
+
+    result = await service.check_decision_allowed_bulk([application_id_1, application_id_2], "APPROVE")
+
+    assert result[application_id_1] == []
+    assert result[application_id_2] == []
+
+
+async def test_check_decision_allowed_bulk_permits_different_applicants_same_product_type():
+    application_id_1 = await _seed_application(applicant_identifier="bulk-a@example.com", product_type="personal_loan")
+    application_id_2 = await _seed_application(applicant_identifier="bulk-b@example.com", product_type="personal_loan")
+
+    result = await service.check_decision_allowed_bulk([application_id_1, application_id_2], "APPROVE")
+
+    assert result[application_id_1] == []
+    assert result[application_id_2] == []
+
+
+async def test_check_decision_allowed_bulk_still_blocks_on_a_real_pre_existing_active_account():
+    customer = await customer_db.get_or_create("bulk-conflict@example.com")
+    customer_id = customer["customer_id"]
+    await account_db.create(customer_id, "personal_loan", _fake_application_id())
+    application_id = await _seed_application(
+        applicant_identifier="bulk-conflict@example.com", customer_id=customer_id, product_type="personal_loan"
+    )
+
+    result = await service.check_decision_allowed_bulk([application_id], "APPROVE")
+
+    assert result[application_id] != []
+    assert "personal_loan" in result[application_id][0]
+
+
+# ----------------------------------------------------------------------
 # list_for_applicant / list_by_status -- pagination + count cache
 # ----------------------------------------------------------------------
 

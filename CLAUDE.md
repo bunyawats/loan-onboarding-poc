@@ -449,18 +449,24 @@ System) is this module's working name.
   `APPROVED` — the dialog falls back to the application's own
   denormalized `applicant_name`/`applicant_email`/`applicant_phone`
   fields in that case rather than calling `customer.service.get(None)`).
-- **Every Approve action — single-item or bulk — calls
-  `application.service.check_decision_allowed(application_id,
-  "APPROVE")` before calling `workflow.service.signal_decision(...)`/
+- **Every Approve action — single-item or bulk — is pre-checked before
+  calling `workflow.service.signal_decision(...)`/
   `bulk_signal_decision(...)`** (PRD's active-account rule, "Applying
-  without being a customer yet"). A non-empty result blocks that
+  without being a customer yet") — the single-item route calls
+  `application.service.check_decision_allowed(application_id,
+  "APPROVE")`; bulk approve calls the batch-aware
+  `check_decision_allowed_bulk(application_ids, "APPROVE")` instead,
+  not a loop over the single-item function, since only the batch-aware
+  version can catch two selected applications claiming the same
+  applicant+product_type against *each other* (see that function's own
+  docstring and the Known Gaps entry). A non-empty result blocks that
   application: single-item shows the reason as an error instead of
   sending the signal; bulk approve filters blocked applications out of
   the batch *before* collecting `workflow_ids` and reports each one as
   a per-item failure in the same result shape as any other bulk
   partial-failure — it never reaches `bulk_signal_decision` at all.
-  Reject/RequestMoreInfo/Cancel skip this check entirely
-  (`check_decision_allowed` is a no-op unless `decision == "APPROVE"`).
+  Reject/RequestMoreInfo/Cancel skip this check entirely (both
+  functions are a no-op unless `decision == "APPROVE"`).
 - Owns the bulk-selection store — reuse the same Redis instance this
   module already needs for Keycloak sessions.
 
@@ -647,16 +653,33 @@ modules.
   list[str]` — blocking-reason strings, `[]` if the decision may
   proceed (same shape as `check_completeness`). A no-op (`[]`
   immediately) unless `decision == "APPROVE"`. **Called by
-  `bff_backoffice` before it calls `workflow.service.signal_decision(...)`**
-  — never by `application/activities.py`, which has no clean way to
-  surface an error back to a decision-maker from inside a running
-  activity. Resolves the application's `customer_id` (if still `NULL`,
-  a brand-new applicant can't conflict with anything — return `[]`
-  immediately) and calls the **read-only**
+  `bff_backoffice`'s single-item decision route before it calls
+  `workflow.service.signal_decision(...)`** — never by
+  `application/activities.py`, which has no clean way to surface an
+  error back to a decision-maker from inside a running activity.
+  Resolves the applicable `customer_id` via `find_by_identifier` when
+  the row's own column is `NULL` (a since-approved sibling application
+  under the same identifier may have already resolved one — trusting
+  `NULL` alone as "no customer exists" was a real bug, found live and
+  fixed) and calls the **read-only**
   `account.service.has_active_account_of_type(customer_id,
   product_type)`; if `True`, returns a message naming the conflicting
   product type. See "Applying without being a customer yet" for the
-  full active-account rule and its accepted race-window gap.
+  full active-account rule and its accepted, narrower (cross-request
+  only) race-window gap.
+- `service.check_decision_allowed_bulk(application_ids, decision) ->
+  dict[str, list[str]]` — the batch-aware sibling `bff_backoffice`'s
+  bulk-approve route calls instead of looping the single-item function
+  above. Tracks `(applicant_identifier, product_type)` pairs already
+  claimed by an earlier, still-eligible item *in the same batch*,
+  blocking a later item for the same pair before any signal for it is
+  ever sent — this is what actually closes the in-batch half of the
+  active-account race window (two applications for the same
+  applicant+product_type, both selected into one bulk action, would
+  otherwise both pass an independent per-item check, since neither
+  one's account exists yet). See "Applying without being a customer
+  yet" and the Known Gaps entry for the live repro and exactly what
+  this does and doesn't close.
 - `service.get(application_id)`,
   `service.list_for_applicant(applicant_identifier, page, ...)`,
   `service.list_by_status(status, page, ...)` (staff queues). **The
@@ -1384,17 +1407,48 @@ for `KEYCLOAK_ISSUER`.
   `REJECTED` with the auto-generated comment, its Temporal workflow
   ends `Status: COMPLETED` (not `FAILED`) with a query result that
   correctly reports `"status":"REJECTED"`, and the worker logs stay
-  silent — no retries, no traceback. **What's still an open,
-  deliberately-accepted gap**: the race window itself (two decisions
-  passing `check_decision_allowed` before either commits) is
-  unchanged — this fix only guarantees a clean *outcome* when the race
-  is lost, it doesn't prevent the race from happening. A real fix for
-  the window itself (e.g. a distributed lock keyed on
-  `customer_id`+`product_type`, held across the check-then-signal gap)
-  would be more invasive and wasn't the scope of this pass. See
-  `application/activities.py`'s `persist_decision` and
+  silent — no retries, no traceback. **The in-batch half of the window
+  itself is now also closed**, in a follow-up fix: `bff_backoffice`'s
+  bulk-approve route now calls a new
+  `application.service.check_decision_allowed_bulk(application_ids,
+  decision)` instead of looping the plain per-item
+  `check_decision_allowed` — it tracks which
+  `(applicant_identifier, product_type)` pairs an earlier, still-
+  eligible item *in the same batch* has already claimed, and blocks a
+  later item for the same pair before either signal is ever sent
+  (keyed on `applicant_identifier`, not the resolved `customer_id`,
+  since the more common trigger is two applications for an applicant
+  with *no* customer row yet at all — both would resolve the same
+  customer via the same idempotent `get_or_create` during provisioning
+  either way). Re-verified live against a fresh repro of the exact
+  same scenario: bulk-approving two sibling `personal_loan`
+  applications together now reports `"1 succeeded, 1 failed:
+  customer already has an active personal_loan account"` **immediately,
+  synchronously, in the Bulk Approve Results dialog** — the blocked
+  application is never signaled at all, stays at
+  `PENDING_UNDERWRITING` for a human to look at again later (rather
+  than being silently auto-rejected), and the worker logs stay
+  completely silent (no activity ever ran for it). **What's still a
+  deliberately-accepted gap**: only same-request concurrency is
+  closed. Two independent decisions — a second bulk action, or a
+  single-item Approve, submitted via *separate* HTTP requests close
+  enough in time — can still both pass their own checks, since nothing
+  tracks claims across requests. Closing that fully would need a lock
+  spanning from the check (in `bff_backoffice`, a web process) through
+  to the actual write (in a Temporal activity, a worker process,
+  arbitrarily later) — a much larger, riskier change (lock lifetime,
+  staleness, and deadlock handling across an async boundary with no
+  natural upper bound) that wasn't undertaken here.
+  `persist_decision`'s conflict-to-REJECTED handling (above) remains
+  the backstop for that cross-request case, and is expected to still
+  fire occasionally. See `application/service.py`'s
+  `check_decision_allowed_bulk` and
+  `tests/unit/application/test_service.py`'s
+  `test_check_decision_allowed_bulk_blocks_second_sibling_in_same_batch`,
+  and `application/activities.py`'s `persist_decision` plus
   `tests/unit/application/test_activities.py`'s
-  `test_persist_decision_approve_converts_to_rejected_on_active_account_conflict`.
+  `test_persist_decision_approve_converts_to_rejected_on_active_account_conflict`
+  for the still-needed backstop.
 - **Resolved, found live in Phase 13's P13-7 verification sweep, not
   just reasoned about.** `check_decision_allowed`'s short-circuit used
   to read `if record["customer_id"] is None: return []` — "a brand-new
