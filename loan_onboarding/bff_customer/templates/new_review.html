@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Review &amp; Submit -- Loan Onboarding{% endblock %}
+{% block content %}
+<a href="/apply/new/documents" class="text-sm text-gray-500 mb-3 inline-block">&larr; Back</a>
+<h1 class="text-xl font-semibold mb-1">Review &amp; submit</h1>
+<p class="text-sm text-gray-600 mb-6">Step 4 of 4</p>
+
+{% if error %}
+<div class="mb-4 px-3 py-2.5 rounded-md bg-red-50 text-red-700 text-sm border border-red-200">
+  {{ error }}
+  <a href="/apply/new/documents" class="block underline mt-1">Add documents</a>
+</div>
+{% endif %}
+
+<div class="rounded-lg border border-gray-200 bg-white p-4 mb-4">
+  <div class="text-sm font-medium text-gray-500 mb-2">{{ product_label(product_type) }}</div>
+  <dl class="text-sm space-y-1.5">
+    <div class="flex justify-between"><dt class="text-gray-500">Name</dt><dd>{{ values.applicant_name }}</dd></div>
+    <div class="flex justify-between"><dt class="text-gray-500">Email</dt><dd>{{ values.applicant_email }}</dd></div>
+    <div class="flex justify-between"><dt class="text-gray-500">Phone</dt><dd>{{ values.applicant_phone }}</dd></div>
+    <div class="flex justify-between"><dt class="text-gray-500">Amount</dt><dd>${{ values.amount }}</dd></div>
+    {% for name, label, _ in product_fields %}
+    <div class="flex justify-between"><dt class="text-gray-500">{{ label }}</dt><dd>{{ values.get(name, "") }}</dd></div>
+    {% endfor %}
+  </dl>
+</div>
+
+<div class="rounded-lg border border-gray-200 bg-white p-4 mb-6">
+  <div class="text-sm font-medium text-gray-500 mb-2">Documents</div>
+  <dl class="text-sm space-y-1">
+    {% for category, documents in by_category.items() %}
+    <div class="flex justify-between">
+      <dt class="text-gray-500">{{ category }}</dt>
+      <dd>{% if documents %}{{ documents | length }} file(s){% else %}<span class="text-red-600">missing</span>{% endif %}</dd>
+    </div>
+    {% endfor %}
+  </dl>
+</div>
+
+<form method="post" action="/apply/new/review">
+  <button type="submit"
+    class="w-full min-h-12 px-4 py-3 text-base font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+    Submit application
+  </button>
+</form>
+{% endblock %}

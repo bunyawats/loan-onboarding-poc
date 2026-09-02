@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}My Applications -- Loan Onboarding{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-1">
+  <h1 class="text-xl font-semibold">My Applications</h1>
+  <form method="post" action="/apply/switch-identity">
+    <button type="submit" class="text-xs text-gray-500 underline">Not {{ applicant_identifier }}?</button>
+  </form>
+</div>
+
+<a href="/apply/new"
+  class="mt-4 block text-center min-h-12 px-4 py-3 text-base font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+  Apply for a new loan
+</a>
+
+<div class="mt-6 space-y-3">
+  {% if not applications %}
+  <p class="text-sm text-gray-500 py-6 text-center">No applications yet.</p>
+  {% endif %}
+  {% for a in applications %}
+  <a href="/apply/applications/{{ a.application_id }}"
+    class="block rounded-lg border border-gray-200 bg-white p-4 hover:border-gray-300">
+    <div class="flex items-center justify-between">
+      <span class="font-medium">{{ product_label(a.product_type) }}</span>
+      <span class="text-xs font-medium px-2 py-1 rounded-full
+        {% if a.status == 'APPROVED' %}bg-green-100 text-green-800
+        {% elif a.status in ('REJECTED', 'CANCELLED') %}bg-gray-200 text-gray-700
+        {% elif a.status == 'MORE_INFO_REQUESTED' %}bg-amber-100 text-amber-800
+        {% else %}bg-blue-100 text-blue-800{% endif %}">
+        {{ status_label(a.status) }}
+      </span>
+    </div>
+    <div class="text-sm text-gray-500 mt-1">${{ "{:,.2f}".format(a.amount) }} &middot; submitted {{ a.created_at.strftime("%b %-d, %Y") }}</div>
+  </a>
+  {% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+<div class="mt-6 flex items-center justify-between text-sm">
+  {% if page > 1 %}
+  <a href="/apply/applications?page={{ page - 1 }}" class="px-3 py-2 rounded-md bg-white border border-gray-300">Prev</a>
+  {% else %}<span></span>{% endif %}
+  <span class="text-gray-500">Page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}
+  <a href="/apply/applications?page={{ page + 1 }}" class="px-3 py-2 rounded-md bg-white border border-gray-300">Next</a>
+  {% else %}<span></span>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

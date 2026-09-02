@@ -1,0 +1,39 @@
+{#
+  Rendered both inline (new_documents.html's initial page render, one
+  per required category) and standalone (the upload route's htmx
+  response, which swaps this exact fragment back into the same
+  #category-<slug> div -- see the htmx4 skill's "swapping fragments"
+  guidance: this is a plain <div>, not a <tr>, so no <table> wrapper is
+  needed for the swap to parse correctly).
+#}
+<div id="category-{{ category_slug(category) }}" class="rounded-lg border border-gray-200 bg-white p-4">
+  <div class="flex items-center justify-between mb-2">
+    <span class="font-medium text-sm">{{ category }}</span>
+    {% if documents %}
+    <span class="text-xs text-green-700 bg-green-50 px-2 py-0.5 rounded-full">{{ documents | length }} uploaded</span>
+    {% else %}
+    <span class="text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">Required</span>
+    {% endif %}
+  </div>
+
+  {% if documents %}
+  <ul class="text-sm text-gray-600 mb-3 space-y-1">
+    {% for d in documents %}
+    <li class="truncate">&#128196; {{ d.filename }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <form hx-post="{{ upload_url }}" hx-encoding="multipart/form-data"
+    hx-target="#category-{{ category_slug(category) }}" hx-swap="outerHTML"
+    class="flex items-center gap-2">
+    <input type="hidden" name="category" value="{{ category }}">
+    <input type="file" name="file" required
+      {% if capture %}capture="environment"{% endif %}
+      class="flex-1 text-sm file:mr-2 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-gray-100 file:text-sm">
+    <button type="submit"
+      class="min-h-10 px-3 py-2 text-sm font-medium rounded-md bg-gray-800 text-white hover:bg-gray-900 whitespace-nowrap">
+      Add
+    </button>
+  </form>
+</div>

@@ -88,11 +88,21 @@ against a real local Keycloak + Redis. **Phase 10 built `app.py` and
 `bff_backoffice/routes.py` — the first real, browser-usable screen in
 this whole project** — and walked its entire DoD checklist through an
 actual browser against the real stack (real Keycloak login, real
-Postgres/Temporal/Mayan), not curl simulation. Start here:
-[Phase 11](#phase-11--customer-bff-ui-self-service-mobile-flow)
-(Customer BFF UI) — depends on Phases 2, 3, 5, 7 (all done). **Load the
-`htmx4` skill before starting**, per that phase's own instruction — this
-is the most novel phase, no direct reference-project precedent.
+Postgres/Temporal/Mayan), not curl simulation. **Phase 11 built
+`bff_customer/` (`identity.py`, `routes.py`, and its templates) — the
+public-facing mobile self-service flow** — and walked its own DoD
+through a genuine 375×812 mobile-viewport-emulated browser session
+against the real stack, covering all three product types and every
+terminal outcome (approved directly, approved via manager escalation,
+rejected, cancelled), plus the visibility invariant and document
+preview. One real, corrected assumption from an earlier draft of
+`CLAUDE.md` along the way: the customer identity cookie is its own
+dedicated signed cookie (`itsdangerous`, `CUSTOMER_SESSION_SECRET_KEY`),
+not a slot inside `bff_backoffice`'s shared `SessionMiddleware` session
+— see P11-1's note. **Only Phase 12 (End-to-End Verification & Polish)
+remains.** Start here:
+[Phase 12](#phase-12--end-to-end-verification--polish) — depends on
+everything above (all done).
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1572,33 +1582,208 @@ and `htmx4` skills before starting this phase.**
 **Depends on:** Phases 2, 3, 5, 7. **Load the `htmx4` skill.** No direct
 precedent in either reference project — the most novel phase.
 
-- [ ] **P11-1** — `bff_customer/identity.py`: signed cookie session
+- [x] **P11-1** — `bff_customer/identity.py`: signed cookie session
       holding `applicant_identifier`, no password. `/apply` redirects
       to an identify screen if the cookie is missing.
-- [ ] **P11-2** — "My Applications" screen:
+      > DONE: Built as its own dedicated `itsdangerous`-signed cookie
+      > (`customer_session`, `CUSTOMER_SESSION_SECRET_KEY`), NOT a key
+      > inside `bff_backoffice`'s Starlette `SessionMiddleware` session
+      > as an earlier draft of `CLAUDE.md` assumed — `.env.example`
+      > already anticipated a separate `CUSTOMER_SESSION_SECRET_KEY`
+      > (present since P5-1), and Starlette only supports one
+      > `SessionMiddleware`/cookie per app, which `bff_backoffice`'s
+      > Keycloak session id already occupies. `identity.py` exposes
+      > `get_applicant_identifier(request)`,
+      > `set_applicant_identifier(response, id)`,
+      > `clear_applicant_identifier(response)` — the set/clear
+      > functions take the outgoing `Response` (not `request.session`)
+      > since there's no shared middleware to write through. `app.py`
+      > gained an `IdentifyRequired` exception handler (mirroring
+      > `bff_backoffice`'s `RequireLoginRedirect` pattern) redirecting
+      > to `/apply/identify`. CLAUDE.md's `bff_customer/` section
+      > corrected to match. Unit-tested (`tests/unit/bff_customer/
+      > test_identity.py`, no live services — round-trip, tamper
+      > rejection, garbage-token rejection, clear-expires-the-cookie)
+      > per the same "pure logic gets a unit test, routes.py doesn't"
+      > split Phase 9/10 already established for
+      > `bff_backoffice/keycloak_session.py` vs. `routes.py`.
+      >
+      > The new-application wizard's own multi-step draft state
+      > (product type, provisional `application_id`, in-progress field
+      > values, `routes.py`'s `_DRAFT_KEY`) deliberately does NOT get
+      > this treatment — it's ordinary UI flow state, not identity, so
+      > it rides on `bff_backoffice`'s existing shared
+      > `SessionMiddleware` session under its own key. `identity.
+      > clear_applicant_identifier` doesn't touch it (can't — it only
+      > has the `Response`, not the session); `routes.py`'s
+      > `switch_identity` route pops `_DRAFT_KEY` from
+      > `request.session` itself, right alongside clearing the identity
+      > cookie, so a half-finished draft never leaks into the next
+      > identity's session.
+- [x] **P11-2** — "My Applications" screen:
       `application.service.list_for_applicant(applicant_identifier,
       ...)`, status badges, "Apply for a new loan" CTA.
-- [ ] **P11-3** — New Application flow: product-type picker → common +
+      > DONE: `applications_list.html`, paginated (10/page, Prev/Next),
+      > color-coded status badges (`STATUS_LABELS` dict in
+      > `routes.py`), "Not <identifier>?" link (`switch-identity`) for
+      > testing/demoing a different applicant. Verified empty-state
+      > copy ("No applications yet.") renders correctly for a
+      > brand-new identifier.
+- [x] **P11-3** — New Application flow: product-type picker → common +
       product-specific fields → document upload (camera capture for ID
       via `<input type="file" capture>`, file picker for
       statements/reports) → review & submit, calling
       `application.service.create_application(...)`. Missing-documents
       error surfaces the specific categories, not a generic failure.
-- [ ] **P11-4** — Application detail/status screen: timeline, resubmit
+      > DONE: Four-step wizard (`/apply/new` → `/new/details` →
+      > `/new/documents` → `/new/review`), state threaded through a
+      > provisional `application_id` (`uuid4()`, minted at `/new/start`)
+      > stored in `request.session[_DRAFT_KEY]` alongside `product_type`
+      > and the entered field values — exactly the "bff_customer mints
+      > a provisional `application_id` at the start of its wizard"
+      > design `CLAUDE.md`'s `application/` section already specifies.
+      > `PRODUCT_FIELDS` (a plain dict in `routes.py`) is a deliberate
+      > UI-only mirror of `application.schemas.PRODUCT_TYPE_SCHEMAS`
+      > (same "duplicated on purpose, no import-time link" reasoning
+      > `document/service.py`'s `REQUIRED_CATEGORIES` already
+      > documents) — every submission still runs the real
+      > `application.schemas.validate_payload(...)` (via a new
+      > `_validate_product_fields` dry-run helper at the details step,
+      > and for real inside `create_application` at final submit), so a
+      > mismatch between the mirror and the real schema shows up as a
+      > validation error, never silently accepts bad data.
+      > `document.service.REQUIRED_CATEGORIES[product_type]` drives
+      > which upload widgets render — confirmed different sets per
+      > product type (4 categories for `personal_loan`, +Vehicle
+      > Title/Invoice for `auto_loan`, +Property Appraisal for
+      > `mortgage`) live against the real Mayan instance. Camera-capture
+      > hint (`capture="environment"`) applied only to the "Government
+      > ID" category's file input, per PRD §6.4. Document upload is the
+      > one place in this BFF using htmx (`_document_category.html`,
+      > `hx-post`/`hx-encoding="multipart/form-data"`, swapping just
+      > that category's own fragment) rather than a full page
+      > reload — everywhere else in this phase is plain `<form>`
+      > POST-redirect-GET, a deliberate simplification for a
+      > multi-page mobile wizard (see `routes.py`'s module docstring).
+      > Missing-documents error verified to show the exact missing
+      > category names (not a generic failure) with an "Add documents"
+      > link back to the upload step, both inline on `/new/review` and
+      > (post-submission, on resubmit) inline on the detail page.
+- [x] **P11-4** — Application detail/status screen: timeline, resubmit
       action when `MORE_INFO_REQUESTED` (calling
       `application.service.resubmit_application(...)`), Cancel action
       while non-terminal (calling
       `workflow.service.signal_decision(..., decision="CANCELLED")`
       directly — no `application.service` hop, per `CLAUDE.md`'s call
       graph).
-      DoD (integration-verify, whole phase): full flow driven from an
-      **actual 375×812 mobile viewport** (resize the browser preview
-      tool, not just a narrowed desktop window), for all three product
-      types, through every terminal outcome in PRD §6.2's state
-      diagram. Confirm a second identify-screen entry with a *different*
-      email/phone shows an empty application list (visibility invariant
-      actually filters, not just hides via CSS — PRD §10's success
-      criterion 2).
+      > DONE: `_build_timeline(application)` branches on the terminal
+      > case FIRST (checks `application.status in TERMINAL_STATUSES`
+      > before anything else), not last — a Cancel can happen from any
+      > non-terminal state (`PENDING_UNDERWRITING`,
+      > `PENDING_MANAGER_APPROVAL`, or `MORE_INFO_REQUESTED`), so
+      > branching on `status` in wizard order would miss it whenever
+      > cancellation didn't happen from the last step; verified by
+      > actually cancelling from `PENDING_UNDERWRITING` and confirming
+      > the timeline reads Submitted → Under Review → Cancelled (not a
+      > dead end mid-flow). `_owned_application()` re-checks
+      > `application.applicant_identifier == applicant_identifier`
+      > (never trusts the URL's `application_id` alone) before
+      > rendering detail, cancel, resubmit, document-upload, or
+      > document-preview — a mismatch is a genuine 404, confirmed live
+      > (see DoD note below), not a client-side hide. Resubmit re-runs
+      > `_validate_product_fields` (same dry-run as the wizard) before
+      > calling `resubmit_application`, and re-checks the document gate
+      > via that call's own `missing_categories` result, re-rendering
+      > the detail page with the specific missing categories on
+      > failure rather than a generic error. Document upload during
+      > `MORE_INFO_REQUESTED` reuses `_document_category.html` (the
+      > same htmx partial the wizard uses), gated so it only appears in
+      > that one status — every other status gets the plain read-only
+      > `by_category` listing instead (confirmed no upload widget, no
+      > resubmit form, and no Cancel button render once an application
+      > reaches a terminal state — the view-only invariant, PRD §6.2).
+      >
+      > DoD (integration-verify, whole phase) — walked against the real
+      > local stack (Postgres, Temporal, Keycloak, Redis, Mayan) via
+      > `chrome-devtools` MCP's `emulate` (`375x812x2,mobile,touch` —
+      > a genuine device viewport emulation, not a resized desktop
+      > window), through the full local native run (`uvicorn
+      > loan_onboarding.app:app --port 8001` + `worker_main.py`, both
+      > against the docker-compose stack):
+      > - **`personal_loan`**, below-threshold amount: full wizard →
+      >   `PENDING_UNDERWRITING` → Underwriter **Request More Info**
+      >   (real comment shown on the customer detail page) →
+      >   customer uploads a replacement Bank Statement + resubmits
+      >   updated `purpose` field → back to `PENDING_UNDERWRITING` →
+      >   Underwriter **Approve** → **APPROVED**. DB-confirmed: a new
+      >   `customers` row created (`get_or_create`, first approval for
+      >   this `applicant_identifier`) and a new `ACTIVE` `accounts`
+      >   row (`product_type=personal_loan`), `applications.customer_id`/
+      >   `account_id` both set.
+      > - **`auto_loan`**, same applicant: full wizard (confirmed the
+      >   auto_loan-specific "Vehicle Title/Invoice" category renders
+      >   and gates correctly) → submitted → customer **Cancel** while
+      >   `PENDING_UNDERWRITING` → **CANCELLED** (timeline shows
+      >   Submitted → Under Review → Cancelled, no dead end). DB-
+      >   confirmed `account_id` stayed `NULL` (no provisioning on
+      >   Cancel).
+      > - **`mortgage`**, same applicant, $75,000 (above the $50,000
+      >   escalation threshold): full wizard (confirmed the
+      >   mortgage-specific "Property Appraisal" category) → submitted →
+      >   Underwriter **Approve** → `PENDING_MANAGER_APPROVAL`
+      >   (customer timeline correctly shows "Escalated to Manager" as
+      >   the current step, not a 3-step timeline) → logged out,
+      >   logged back in as `manager1` → Manager **Approve** →
+      >   **APPROVED** (customer timeline now shows all 4 steps done:
+      >   Submitted → Under Review → Escalated to Manager → Approved).
+      >   DB-confirmed: the SAME `customer_id` as the first approval
+      >   (idempotent `get_or_create` correctly found the
+      >   already-created customer this time, via `find_by_identifier`
+      >   at submission time, since the customer already existed by
+      >   then) plus a SECOND new `ACTIVE` `accounts` row
+      >   (`product_type=mortgage`) — confirming one customer can hold
+      >   multiple `ACTIVE` accounts of *different* product types with
+      >   no conflict (PRD §9.2), and that `persist_decision`'s
+      >   idempotency guard correctly distinguishes "new customer" from
+      >   "existing customer, new account".
+      > - **`personal_loan`** (2nd), missing every required document at
+      >   submit time: confirmed `/new/review` shows "Missing required
+      >   documents: Government ID, Proof of Income, Bank Statements,
+      >   Credit Report" (the specific list, not a generic failure)
+      >   with a working "Add documents" link back to `/new/documents`;
+      >   uploaded all four, resubmitted successfully, then Underwriter
+      >   **Reject** → **REJECTED** (customer timeline: Submitted →
+      >   Under Review → Rejected).
+      > - **Visibility invariant** (PRD §10 success criterion 2):
+      >   switched identity (`switch-identity` → re-identify as
+      >   `someone-else@example.com`) and confirmed "My Applications"
+      >   shows the empty-state copy, not the first identifier's
+      >   applications. Directly navigated to the first identifier's
+      >   `application_id` URL while identified as the second — got a
+      >   genuine `{"detail":"Not Found"}` (FastAPI's default 404 body,
+      >   same as every other plain `HTTPException(404)` in this
+      >   codebase), confirming server-side filtering, not a
+      >   client-side hide.
+      > - **Document preview**: opened a customer-side preview link in
+      >   a new tab, confirmed the real uploaded PDF streams and
+      >   renders inline (same `StreamingResponse` + `aclose()` cleanup
+      >   pattern `bff_backoffice`'s equivalent route already uses).
+      >
+      > **One real tooling gotcha hit during this verification, not a
+      > code bug**: `chrome-devtools` MCP's `click` tool intermittently
+      > failed ("did not become interactive within timeout") against
+      > this project's staff screens and plain-form submit buttons —
+      > confirmed via network-request inspection that some of those
+      > "successful" clicks genuinely never fired a request at all,
+      > while others worked. Root cause not fully isolated (possibly an
+      > interaction between the 5s self-polling staff table and the
+      > tool's own interactability wait), but reliably worked around by
+      > dispatching the action directly (`element.click()` for buttons
+      > outside a form, `form.requestSubmit()` for `<form>` submits)
+      > via `evaluate_script` instead of the coordinate/uid-based click
+      > tool. Not a `loan_onboarding` bug — the same actions succeed
+      > from a real click in the earlier screenshots and via this
+      > workaround.
 
 ---
 
@@ -1634,6 +1819,50 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 11 (Customer BFF UI) complete, all four tasks
+  checked. Built `bff_customer/identity.py` (own `itsdangerous`-signed
+  cookie, corrected from `CLAUDE.md`'s earlier "slot inside
+  `SessionMiddleware`" assumption — see P11-1's note) and
+  `bff_customer/routes.py` + 9 templates: identify screen, "My
+  Applications" (paginated, status badges), a four-step new-application
+  wizard (product picker → details → document upload → review/submit),
+  and the detail/status screen (timeline, resubmit-on-`MORE_INFO_REQUESTED`,
+  Cancel-while-non-terminal, document preview). Deliberately mostly
+  plain `<form>` POST-redirect-GET rather than htmx fragment swaps
+  (fits a mobile step wizard better than SPA-style swaps) — htmx used
+  in exactly one place, the document-upload widget, reused identically
+  in both the wizard and the post-submission "add more docs while
+  `MORE_INFO_REQUESTED`" flow. `app.py` gained an `IdentifyRequired`
+  exception handler and now mounts both BFF routers.
+
+  Verified the entire DoD through a genuine 375×812 mobile-viewport
+  emulation (`chrome-devtools` MCP's `emulate`, not a resized desktop
+  window) against the full real local stack: all three product types
+  (confirmed each renders its own correct document-category set and
+  payload fields), and every terminal outcome — direct Approve
+  (`personal_loan`), Approve-then-escalate-then-Manager-Approve
+  (`mortgage`, $75,000 ≥ the $50,000 threshold — customer timeline
+  correctly showed the 4-step escalation path), Reject, and
+  customer-initiated Cancel from a non-terminal state. DB-confirmed
+  correct `customers`/`accounts` provisioning: one customer ended up
+  with two `ACTIVE` accounts of different product types (no conflict,
+  PRD §9.2) via two separate approvals, `get_or_create` correctly
+  reusing the same `customer_id` the second time. Verified the
+  visibility invariant with a real 404 (not a client-side hide) when a
+  second identity tried a first identity's `application_id` directly,
+  and confirmed real document preview streaming. Added
+  `tests/unit/bff_customer/test_identity.py` (round-trip, tamper
+  rejection, garbage rejection, clear-expires-cookie) — no test file
+  for `routes.py` itself, same precedent Phase 9/10 established for
+  `keycloak_session.py` vs. `routes.py` (pure logic gets a unit test, a
+  Temporal/Postgres/Mayan-dependent route handler doesn't). Full unit
+  suite (181 tests) and `import-linter` both still pass. One tooling
+  gotcha, not a code bug: `chrome-devtools` MCP's `click` intermittently
+  no-ops against this app's buttons (confirmed via network-request
+  inspection); worked around with `element.click()`/`form.requestSubmit()`
+  via `evaluate_script`. Next: Phase 12 (End-to-End Verification &
+  Polish) — the last phase.
 
 - **2026-09-02** — Confirmed Phase 10's CI run
   (`gh run list --branch main`, run id `33600965098`, commit `49eae82`)

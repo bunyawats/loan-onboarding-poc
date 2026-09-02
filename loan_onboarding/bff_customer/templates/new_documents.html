@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Upload Documents -- Loan Onboarding{% endblock %}
+{% block content %}
+<a href="/apply/new/details" class="text-sm text-gray-500 mb-3 inline-block">&larr; Back</a>
+<h1 class="text-xl font-semibold mb-1">Upload documents</h1>
+<p class="text-sm text-gray-600 mb-6">Step 3 of 4 &middot; take a photo or choose a file for each item below.</p>
+
+<div class="space-y-3">
+  {% for c in categories %}
+  {% with category=c.category, documents=c.documents, upload_url=c.upload_url, capture=c.capture %}
+  {% include "_document_category.html" %}
+  {% endwith %}
+  {% endfor %}
+</div>
+
+<a href="/apply/new/review"
+  class="mt-6 block text-center min-h-12 px-4 py-3 text-base font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+  Continue to review
+</a>
+{% endblock %}

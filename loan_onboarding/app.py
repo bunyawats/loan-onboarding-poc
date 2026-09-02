@@ -2,12 +2,22 @@
 other is `worker_main.py`), the only files allowed to import from every
 module (CLAUDE.md's "Breaking the application <-> workflow cycle").
 
-Mounts `bff_backoffice/routes.py`'s `/ui/*` routes (real Keycloak
-session auth, Authorization Code flow -- see
-`bff_backoffice/keycloak_session.py`). `bff_customer/`'s own router
-isn't mounted yet -- that's Phase 11; this file will `include_router()`
-it alongside `bff_backoffice`'s the same way this reference project's
-own `app.py` mounts two front doors from one process.
+Mounts both front doors from this one process: `bff_backoffice/routes.py`'s
+`/ui/*` routes (real Keycloak session auth, Authorization Code flow --
+see `bff_backoffice/keycloak_session.py`) and, as of Phase 11,
+`bff_customer/routes.py`'s `/apply/*` routes (no Keycloak -- see
+`bff_customer/identity.py`). The two sides do NOT share one cookie:
+`bff_backoffice` uses the `SessionMiddleware` below (an opaque Redis
+session id, plus the transient OAuth CSRF state); `bff_customer`'s own
+`applicant_identifier` cookie is hand-rolled in `identity.py` with its
+own `itsdangerous` serializer and its own secret
+(`CUSTOMER_SESSION_SECRET_KEY`), since Starlette allows only one
+`SessionMiddleware`/cookie per app and that one is already spoken for.
+The customer-side new-application wizard's own ephemeral draft state
+(`bff_customer/routes.py`'s `_DRAFT_KEY`) is the one piece of
+`bff_customer` state that *does* still ride on this shared
+`SessionMiddleware` -- see `identity.py`'s module docstring for why that
+split is deliberate, not an oversight.
 
 Run from anywhere on the Python path (project root, or installed as a
 package):
@@ -23,13 +33,18 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from loan_onboarding.bff_backoffice.keycloak_session import PermissionDenied, RequireLoginRedirect, RoleDenied
 from loan_onboarding.bff_backoffice.routes import router as backoffice_router
+from loan_onboarding.bff_customer.routes import IdentifyRequired
+from loan_onboarding.bff_customer.routes import router as customer_router
 
-app = FastAPI(title="Loan Onboarding Back Office")
+app = FastAPI(title="Loan Onboarding")
 
-# Session cookie for the /ui/* HTMX UI (real Keycloak login -- see
-# bff_backoffice/keycloak_session.py). Holds only an opaque session id
-# (and, transiently, the OAuth CSRF state) -- never the token set itself,
-# which lives server-side in session_store.py (Redis).
+# One session cookie for the whole app -- the /ui/* HTMX UI's opaque
+# Redis session id (bff_backoffice/keycloak_session.py) and the /apply/*
+# flow's plain applicant_identifier (bff_customer/identity.py) live
+# under different keys in the same signed cookie. Neither holds anything
+# token-shaped (the real Keycloak token set lives server-side, in
+# session_store.py's Redis), so one lightweight signed cookie covers
+# both sides.
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("BACKOFFICE_SESSION_SECRET_KEY", "dev-only-insecure-secret"),
@@ -51,7 +66,13 @@ async def _permission_denied(request, exc):
     return HTMLResponse(str(exc), status_code=403)
 
 
+@app.exception_handler(IdentifyRequired)
+async def _redirect_to_identify(request, exc):
+    return RedirectResponse(url="/apply/identify", status_code=303)
+
+
 app.include_router(backoffice_router)
+app.include_router(customer_router)
 
 
 @app.get("/")

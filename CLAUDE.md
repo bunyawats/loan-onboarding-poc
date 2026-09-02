@@ -362,13 +362,27 @@ Public-facing, mobile-first HTMX (PRD §8.1). No business logic or data
 of its own — pure orchestration + presentation, calling straight into
 the domain modules' `service.py` functions.
 
-- Owns the customer self-identify session cookie (PRD §7.1) — signed
-  Starlette `SessionMiddleware` cookie holding `applicant_identifier`,
-  no password, no Redis (nothing token-shaped to store). **Setting this
+- Owns the customer self-identify session cookie (PRD §7.1) — signed,
+  holding `applicant_identifier`, no password, no Redis (nothing
+  token-shaped to store). **Corrected from an earlier draft of this
+  file**, which said this was a slot inside `bff_backoffice`'s
+  Starlette `SessionMiddleware` session; built instead (Phase 11) as
+  its own dedicated cookie, hand-rolled with `itsdangerous` directly in
+  `bff_customer/identity.py` (the same library `SessionMiddleware` uses
+  internally) — `.env.example`'s `CUSTOMER_SESSION_SECRET_KEY`, present
+  since P5-1, already anticipated this as a value distinct from
+  `BACKOFFICE_SESSION_SECRET_KEY`, and Starlette supports only one
+  `SessionMiddleware`/cookie per app, which `bff_backoffice`'s Keycloak
+  session id already occupies. **Setting this
   cookie is a pure client-side write — no database call at all**;
   `customer/`'s row doesn't get created until (and unless) an
   application under this identifier is approved (see "Applying without
-  being a customer yet").
+  being a customer yet"). The new-application wizard's own multi-step
+  draft state (product type, provisional `application_id`, in-progress
+  field values) is a separate, lower-stakes concern that *does* still
+  ride on `bff_backoffice`'s shared `SessionMiddleware` session, under
+  its own key — ordinary UI flow state, not identity, so it doesn't
+  need its own signing mechanism.
 - Calls, all as direct in-process function calls:
   `customer.service.find_by_identifier(...)` (read-only, optional —
   e.g. for "welcome back" copy),

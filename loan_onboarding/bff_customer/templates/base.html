@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Loan Onboarding{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@4.0.0-beta6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+<body class="bg-gray-50 text-slate-800 min-h-screen">
+  <header class="bg-white border-b border-gray-200 px-4 py-3.5">
+    <div class="font-semibold">Loan Onboarding</div>
+  </header>
+  <main class="max-w-md mx-auto px-4 py-5 pb-16">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
