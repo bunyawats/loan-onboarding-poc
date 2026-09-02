@@ -105,12 +105,33 @@ provision the account an approval produces — see "Applying without
 being a customer yet" below. Left off the diagram to keep it readable;
 the rule is stated explicitly in the bullet list below instead.
 
+**Also not drawn**: `idgen/`, a fifth leaf module (`customer/`,
+`account/`, `document/`, `workflow/`'s siblings) that every other
+module imports for `generate_id(prefix, length) -> str` — the
+human-readable primary keys described in "Data storage" below. Omitted
+from the diagram because it fans out to literally everything (every
+arrow above would grow a second, parallel arrow to `idgen/`), not
+because the edge is unusual; it's the plainest possible leaf
+dependency, a pure function with zero I/O and zero state.
+
 Rules, in order of how often a shortcut will tempt someone to break
 them:
 
 - **`customer/` and `account/` never import anything else in this
-  codebase.** They're pure data modules — profile, account — with no
-  business logic that reaches outside themselves.
+  codebase, with one exception: `idgen/`, for primary-key generation.**
+  Corrected from an earlier draft of this rule, written before either
+  module needed to generate its own id (Postgres did it via a `DEFAULT`
+  — see "Data storage"). `idgen/` is deliberately minimal enough (no
+  I/O, no other module's types, see next bullet) that depending on it
+  doesn't compromise the "pure data module" claim this rule otherwise
+  makes about these two — they still have zero business logic reaching
+  outside themselves.
+- **`idgen/` never imports anything else in this codebase either** —
+  the plainest leaf in the graph, one pure function
+  (`generate_id(prefix, length) -> str`, `secrets.choice` over the
+  digit alphabet, no DB, no other module's types). Every module that
+  assigns a primary key (`customer/`, `account/`, `application/`)
+  imports it; it imports nothing back.
 - **`document/` never imports `application/` or `workflow/`.** It knows
   nothing about loan applications or Temporal — just Mayan, categories,
   and completeness checks against a category list it's handed.
@@ -242,73 +263,78 @@ the *outcome* of an approved loan, not something that pre-exists it.**
   existing customer, the application is linked immediately; if not,
   `customer_id` stays `NULL` until (and unless) the application is
   approved.
-- **`applications.account_id` is nullable**, and stays `NULL` for the
-  entire non-terminal lifetime of an application — there is no
-  "auto-opened account" anymore. `account.service.find_or_create_for_customer(...)`
-  is gone; `account/` no longer enforces one-account-per-customer at
-  all (see `account/`'s module section).
+- **`accounts.application_id` is `NOT NULL` and `UNIQUE`** — the
+  account points at the application that produced it, not the other
+  way around. **Corrected from an earlier draft of this file**, which
+  had `applications.account_id` (nullable, set once at approval)
+  instead; flipped because (a) there was previously no way, given an
+  account, to find which application produced it, and (b) the reversed
+  direction lets the `UNIQUE` constraint on `accounts.application_id`
+  serve as `persist_decision`'s idempotency guard directly (see step 2
+  below), instead of a separately-written, easy-to-get-wrong nullable
+  column on `applications`. There is still no "auto-opened account" —
+  `account.service.find_or_create_for_customer(...)` is gone, and
+  `account/` still doesn't enforce one-account-per-customer (see
+  `account/`'s module section).
 - **Provisioning happens inside `application/activities.py`'s
   `persist_decision`, only on the transition to terminal `APPROVED`**
   (either the Underwriter's below-threshold approve, or the Manager's
   approve after escalation — *not* the intermediate
-  `PENDING_MANAGER_APPROVAL` step, which isn't a terminal approval):
+  `PENDING_MANAGER_APPROVAL` step, which isn't a terminal approval).
+  **Idempotency check first, before anything else**: call
+  `account.service.get_by_application_id(application_id)`. A non-`None`
+  result means this activity execution is a Temporal retry of an
+  already-provisioned application (successful-but-unacknowledged, or a
+  genuine partial failure partway through a prior attempt) — skip
+  straight to the final decision-column write below, using
+  `existing_account.customer_id` in place of step 1. Otherwise:
   1. If `applications.customer_id` is still `NULL`, call
      `customer.service.get_or_create(applicant_identifier) ->
      Customer` (idempotent find-or-create — this is the *only* caller
      of this function left; `bff_customer`'s identify step no longer
      calls it, see `customer/`'s module section below).
-  2. Call `account.service.create_account(customer_id, product_type) ->
-     Account` — **always creates a new row**, no find-or-create
-     semantics, since accounts are 1:1 with approved applications now,
-     not 1:1 with customers (a customer can hold many accounts, one per
-     approved loan — a plain, non-unique index on
-     `accounts.customer_id`). `product_type` is a required column now
-     too — see the active-account rule immediately below.
-  3. **Write `customer_id`/`account_id` to the `applications` row
-     immediately after step 2 succeeds — before step 4 below, not
-     folded into the same `UPDATE` as the decision columns.** Corrected
-     from an earlier draft of this file, which had this write happen
-     only once, combined with the decision columns, at the very end
-     (see the old step 4, now folded into step 5) — that ordering has a
-     real bug, found by actually running P7-3's end-to-end integration
-     test against a live stack: if step 4 (below) raises (a real Mayan
-     hiccup, not just a theoretical one — this is exactly what happened
-     during that test run), Temporal retries the whole activity, and the
-     retry re-reads `applications.account_id`, finds it still `NULL`
-     (because the only write that would have set it never ran), and
-     calls `account.service.create_account(...)` a second time for the
-     same `customer_id`/`product_type` — hitting
-     `ux_accounts_customer_active_product_type`. Writing `account_id`
-     here, right after the row is created, is what actually makes the
-     idempotency guard below do what it already claimed to do.
-  4. Call `document.service.promote_government_id_to_customer_photo(application_id,
+  2. Call `account.service.create_account(customer_id, product_type,
+     application_id) -> Account` — **always creates a new row**, no
+     find-or-create semantics, since accounts are 1:1 with approved
+     applications now, not 1:1 with customers (a customer can hold
+     many accounts, one per approved loan — a plain, non-unique index
+     on `accounts.customer_id`). `product_type` is a required column
+     too — see the active-account rule immediately below. **This
+     INSERT, once committed, is itself the durable idempotency
+     marker** — no separate write back onto `applications` is needed
+     the way the old `account_id`-on-`applications` design required
+     (that write's entire reason to exist was giving a retry something
+     to check; `accounts.application_id`'s own `UNIQUE` constraint does
+     that job now, one step earlier and with nothing to get out of
+     order).
+  3. Call `document.service.promote_government_id_to_customer_photo(application_id,
      customer_id)` and `document.service.generate_welcome_letter(account_id,
      customer_id, applicant_name, product_type, amount)` — see
      `document/`'s module section for what each does. **A retry that
-     finds `account_id` already set (step 3 committed, but this step
-     failed) skips both of these calls entirely, permanently** — a
-     smaller, manually-recoverable gap (a missing Welcome Letter) than
-     the double-account bug this ordering fixes, and consistent with
-     this project's existing rare-enough-to-accept-for-a-POC stance
-     elsewhere in this section.
-  5. Write `status` and the underwriter/manager decision columns —
-     `customer_id`/`account_id` travel along in this same `UPDATE` too
-     (harmless: already set to the same values by step 3, `COALESCE`
-     preserves them either way), but the column that actually matters
-     for provisioning is already durable by the time this runs.
+     finds an account already provisioned (the check above) skips both
+     of these calls entirely, permanently** — a smaller,
+     manually-recoverable gap (a missing Welcome Letter) than a
+     duplicated account, and consistent with this project's existing
+     rare-enough-to-accept-for-a-POC stance elsewhere in this section.
+     (This is the same tradeoff an earlier draft of this file already
+     accepted; only the mechanism that makes the retry recognize
+     "already provisioned" has moved, from a column on `applications`
+     to the `accounts` row itself.)
+  4. Write `status` and the underwriter/manager decision columns on
+     `applications` — `customer_id` travels along in this same
+     `UPDATE` (harmless if it's already set: `COALESCE` preserves it
+     either way). There is no `account_id` column on `applications`
+     to write here anymore.
   - **This makes provisioning the one place in the whole codebase where
     a Temporal activity's idempotency actually matters in a way that
     can silently misbehave**: activities can be retried by Temporal
     after a successful-but-unacknowledged execution, *or* after a
-    genuine partial failure partway through (the case step 3's ordering
-    now protects against). Creating a new `account` row (or a second
-    Welcome Letter, or re-promoting an already-promoted `id_photo`)
-    unconditionally on every call would duplicate state on a retry.
-    `persist_decision` **must** check `applications.account_id IS NOT
-    NULL` **first, before step 1**, and if already set, skip the entire
-    provisioning block (steps 1-4) and just re-apply the (idempotent)
-    status/decision-column write — the activity as a whole must be safe
-    to run twice.
+    genuine partial failure partway through. Creating a new `account`
+    row (or a second Welcome Letter, or re-promoting an
+    already-promoted `id_photo`) unconditionally on every call would
+    duplicate state on a retry — the `get_by_application_id` check
+    above, backed by `accounts.application_id`'s `UNIQUE` constraint,
+    is what makes the whole activity safe to run twice.
 - **One customer, one active account per product type — enforced
   *before* the decision is signaled, not just inside provisioning.**
   `accounts.product_type` (new column) plus a partial unique index
@@ -438,12 +464,29 @@ System) is this module's working name.
 
 ### 3. `customer/` — Customer module
 
-Owns the customer profile: `customer_id` (UUID), `applicant_identifier`
+Owns the customer profile: `customer_id`, `applicant_identifier`
 (the email/phone the customer self-entered), `name`, `email`, `phone`,
 `created_at`. Owns the `customers` table — the only module whose code
 touches it. **A customer row no longer gets created on first visit** —
 see "Applying without being a customer yet" above; this module's
 create path only fires from inside an approval.
+
+**`customer_id` is `cus-` followed by a random 9-digit number
+(`idgen.service.generate_id("cus", 9)`), assigned by `db.get_or_create`
+at insert time — not a database default.** Corrected from an earlier
+draft of this file, which had Postgres generate a `UUID` via
+`DEFAULT gen_random_uuid()`; every domain module's primary key moved to
+this application-assigned, human-readable scheme at once (see "Data
+storage" for the full rationale and the shared `idgen/` module). Because
+`get_or_create` is already a find-or-create keyed on
+`applicant_identifier` (its own unique index), it now has *two*
+independent conflict paths to handle on insert: the existing
+`ON CONFLICT (applicant_identifier) DO NOTHING` (a real concurrent
+caller for the same identifier — unchanged), and a fresh
+`UniqueViolationError` on the `customer_id` primary key itself (the
+generated id happened to collide with an unrelated row's) — the second
+one is handled by regenerating the id and retrying the insert, bounded
+at 10 attempts.
 
 - `service.find_by_identifier(applicant_identifier) -> Customer |
   None` — **read-only**, no side effects. Called by
@@ -465,7 +508,8 @@ create path only fires from inside an approval.
 Owns the account entity: `account_id`, `customer_id` (stored as a plain
 column, **not** a database foreign key across module boundaries — see
 "Data storage" below for why even a same-database FK is deliberately
-avoided here), `product_type`, `opened_at`, `status`. Owns the
+avoided here), `application_id` (same treatment — opaque, not a real FK
+— see below), `product_type`, `opened_at`, `status`. Owns the
 `accounts` table exclusively. **An account is the outcome of an
 approved loan, not something a customer has going into one** — see
 "Applying without being a customer yet" above. One customer can hold
@@ -477,18 +521,39 @@ constraint — **but a customer's `ACTIVE` accounts may never repeat a
 `db/schema.sql`'s partial unique index on `(customer_id, product_type)
 WHERE status = 'ACTIVE'`.
 
-- `service.create_account(customer_id, product_type) -> Account` —
-  always creates a new row, no find-or-create semantics (an account
-  isn't a singleton per customer anymore). **Called only from
+**`account_id` is `acc-` + a random 9-digit number
+(`idgen.service.generate_id("acc", 9)`), assigned by `db.create` at
+insert time**, same scheme and same PK-collision-retry handling as
+`customer/`'s — see that module's section and "Data storage" below.
+
+**`accounts.application_id` (`NOT NULL`, `UNIQUE`) points at the
+application that produced this account — corrected from an earlier
+draft of this file, which had the pointer the other way
+(`applications.account_id`, nullable).** See "Applying without being a
+customer yet" for the full reasoning (finding an application from its
+account was previously impossible; the `UNIQUE` constraint here now
+doubles as `persist_decision`'s idempotency guard).
+
+- `service.create_account(customer_id, product_type, application_id) ->
+  Account` — always creates a new row, no find-or-create semantics (an
+  account isn't a singleton per customer anymore). **Called only from
   `application/activities.py`'s `persist_decision`**, exactly once per
   application that reaches terminal `APPROVED` — see that section's
-  idempotency note on why `persist_decision` must check
-  `applications.account_id` before calling this, not call it
-  unconditionally on every activity execution. Not itself
-  conflict-safe — relies on `check_decision_allowed` (below) having
+  idempotency note on why `persist_decision` calls
+  `get_by_application_id` before calling this, not unconditionally on
+  every activity execution. Not itself conflict-safe against the
+  *business* rule — relies on `check_decision_allowed` (below) having
   already blocked the decision if this would violate the active-account
-  rule; the partial unique index is the last-resort backstop, not the
-  primary defense.
+  rule; the partial unique index is the last-resort backstop for that,
+  not the primary defense. (Separately, and unconditionally, this
+  function *does* retry on its own generated `account_id` colliding
+  with an unrelated row — an engineering concern, not a business one.)
+- `service.get_by_application_id(application_id) -> Account | None` —
+  **read-only**, new. The reverse lookup the direction flip above
+  exists to make possible; also what `persist_decision` calls first, as
+  its idempotency check. Called by `bff_backoffice`'s review dialog to
+  render an application's resulting account (replacing the old
+  `application.account_id`-gated `account.service.get(...)` call).
 - `service.has_active_account_of_type(customer_id, product_type) ->
   bool` — **read-only**, the one function that makes the active-account
   rule enforceable *before* a decision is signaled. Called by
@@ -510,10 +575,11 @@ modules.
   payload, applicant_name, applicant_email, applicant_phone, amount,
   application_id=None)` — **no `customer_id`/`account_id` params** —
   neither is guaranteed to exist yet (see "Applying without being a
-  customer yet" above). **`application_id` is optional, corrected from
-  an earlier draft of this file that gave this function no such
-  parameter at all** — that draft said this function "generates
-  `application_id` (UUID) first," full stop, which quietly conflicts
+  customer yet" above; there is no `account_id` column on `applications`
+  at all anymore, see that section). **`application_id` is optional,
+  corrected from an earlier draft of this file that gave this function
+  no such parameter at all** — that draft said this function "generates
+  `application_id` (a `UUID`) first," full stop, which quietly conflicts
   with the customer-facing flow it's paired with elsewhere in this same
   file: `document.service.upload(applicant_identifier, application_id,
   category, file)` needs an `application_id` to tag uploads with, and
@@ -521,13 +587,15 @@ modules.
   → review & submit, calling `application.service.create_application(...)`"
   — uploads happening *before* this call, against an id this function
   alone was supposed to mint, is not satisfiable. The fix: `bff_customer`
-  mints a provisional `application_id` (a plain `uuid4()`, no domain
-  module needed for that) at the *start* of its wizard, threads it
+  mints a provisional `application_id` (`idgen.service.generate_id("app",
+  9)` — corrected from an earlier draft that used a plain `uuid4()`,
+  before every id in this codebase moved to the shared human-readable
+  scheme, see "Data storage") at the *start* of its wizard, threads it
   through every `document.service.upload(...)` call during the flow,
   and passes that same id to `create_application(...)` at final submit
   — this function uses it verbatim instead of minting its own. If
   omitted (a caller with no upload-first flow), this function generates
-  a fresh one itself, same as the original draft. Either way, the
+  a fresh one itself the same way, same as the original draft. Either way, the
   returned result always carries `application_id` (even in the
   missing-categories branch, which persists no row) so a caller that
   *didn't* pre-mint one can still learn what id its just-checked
@@ -971,7 +1039,7 @@ the **same Postgres container**. This is exactly
 one.
 
 **No foreign keys between `accounts.customer_id` /
-`applications.customer_id` / `applications.account_id` and the tables
+`accounts.application_id` / `applications.customer_id` and the tables
 they reference**, even though they're physically in the same database
 now — deliberately, to keep the module boundary meaningful. A same-
 database FK would make it trivially easy (and someday tempting, under
@@ -980,7 +1048,47 @@ boundaries directly, silently reintroducing exactly the coupling the
 module split exists to prevent. Treat the three tables as if they were
 in separate databases even though they aren't; the only sanctioned way
 to resolve a `customer_id` into a name is a call to
-`customer.service.get(...)`.
+`customer.service.get(...)`. (`accounts.application_id` still gets a
+plain `UNIQUE` index — enforcing "at most one account per application"
+is a within-table constraint, not a cross-module join, so it doesn't
+raise the same concern a real FK would.)
+
+**Primary keys are short, human-readable, application-assigned
+strings — not database-generated `UUID`s.** Corrected from an earlier
+draft of this file, which had every table's primary key as
+`UUID PRIMARY KEY DEFAULT gen_random_uuid()`. Each of the three entity
+types gets its own prefix plus a random 9-digit number, generated by a
+new shared leaf module, `idgen/` (see "Module dependency graph"):
+
+| Entity | Prefix | Example |
+|---|---|---|
+| `customers.customer_id` | `cus-` | `cus-483920174` |
+| `accounts.account_id` | `acc-` | `acc-019283746` |
+| `applications.application_id` | `app-` | `app-573920184` |
+
+`idgen.service.generate_id(prefix, length) -> str` is a pure function
+(`secrets.choice` over `0-9`, no I/O) — every module that assigns one
+of these ids (`customer/db.py`, `account/db.py`, `application/service.py`,
+and `bff_customer/routes.py` for its provisional pre-mint) calls it
+directly and passes the result into its own `INSERT`; nothing reads a
+database default anymore. **Collision handling lives at each insert
+site, not inside `idgen`**: on a `UniqueViolationError` against the
+table's own primary key specifically (never a business-rule constraint
+like `ux_accounts_customer_active_product_type` or the
+`applicant_identifier` unique index), the caller regenerates the id and
+retries the insert, bounded at 10 attempts.
+
+**This is a real, deliberate entropy tradeoff, not an oversight**: pure
+digits at length 9 is `10^9` (1 billion) values per entity type —
+comfortably enough for a POC, but the birthday-paradox collision
+probability becomes non-trivial (not merely theoretical) somewhere in
+the tens-of-thousands-of-rows range for a single table, which is why
+the retry-on-collision behavior above is load-bearing rather than
+defensive icing. A longer or alphanumeric id would close this gap
+entirely; kept at 9 digits specifically so ids read like a familiar
+account-number format. Worth revisiting under the same "if this ever
+needs to scale past one team/one deploy cadence" framing this file
+already applies to its other POC-scale tradeoffs (see "Known gaps").
 
 Mayan has its own fully separate `mayan-db`/`mayan-redis` (third-party
 app boundary — see `mayan-edms-customer-archive`'s own `CLAUDE.md`,
@@ -1067,12 +1175,17 @@ loan-onboarding-poc/
     ├── document/
     │   ├── mayan_client.py
     │   └── service.py
-    └── workflow/
-        ├── workflows.py
-        ├── worker.py            # bootstrap fn taking an activities list --
-        │                        # imports nothing from application/
-        ├── task_queues.py
-        └── service.py
+    ├── workflow/
+    │   ├── workflows.py
+    │   ├── worker.py            # bootstrap fn taking an activities list --
+    │   │                        # imports nothing from application/
+    │   ├── task_queues.py
+    │   └── service.py
+    └── idgen/
+        └── service.py           # generate_id(prefix, length) -- the only
+                                  # function in this module, zero I/O, zero
+                                  # state; every module that assigns a
+                                  # primary key imports this one
 ```
 
 Every module imports every other module it's allowed to by its full
@@ -1135,6 +1248,29 @@ for `KEYCLOAK_ISSUER`.
 
 ## Known gaps to state explicitly once built
 
+- **`applications`'s `chk_approved_has_account` DB-level check
+  constraint is gone, not replaced.** An earlier draft of this file
+  (back when `applications.account_id` existed) relied on
+  `CHECK (status <> 'APPROVED' OR account_id IS NOT NULL)` as a
+  database-enforced backstop against a `persist_decision` idempotency
+  bug ever leaving an `APPROVED` application with no account. Once
+  `account_id` moved to `accounts.application_id` (see "Data storage"),
+  that invariant can no longer be expressed as a single-table `CHECK` —
+  enforcing "an APPROVED application has a matching account" across
+  two tables would need a trigger, which this POC deliberately doesn't
+  add. The invariant is still true in practice (`persist_decision`'s
+  logic guarantees it), but it moved from **DB-enforced** to
+  **code-enforced-only** — a real, if narrow, reduction in the safety
+  net, not a change with zero cost.
+- **The 9-digit-numeric primary key format (`cus-`/`acc-`/`app-` +
+  `idgen.service.generate_id(prefix, 9)`) trades away collision-safety
+  margin for a familiar, account-number-style look.** `10^9` values per
+  entity type is real headroom for a POC, but nowhere near a `UUID`'s;
+  see "Data storage" for the full entropy discussion and why the
+  retry-on-collision insert logic in each module's `db.py` is load-
+  bearing, not decorative. Revisit (longer id, or alphanumeric instead
+  of digits-only) if this project ever needs to scale past POC data
+  volumes.
 - **Resolved in P12-3**: `app`'s planned host port `8000` (per this
   file's own `app.py` docstring example) would have collided with
   `mayan`'s already-published host port `8000` (flagged as a risk since

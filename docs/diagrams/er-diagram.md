@@ -19,10 +19,10 @@ through the owning module's `service.py` — never a SQL join.
 erDiagram
     CUSTOMERS ||..o{ ACCOUNTS : "customer.service.get_or_create (approval-time only)"
     CUSTOMERS ||..o{ APPLICATIONS : "customer.service.find_by_identifier (submission) or get_or_create (approval)"
-    APPLICATIONS ||..o| ACCOUNTS : "account.service.create_account (exactly once, at terminal APPROVED)"
+    APPLICATIONS ||..o| ACCOUNTS : "ACCOUNTS.application_id (account.service.create_account, exactly once, at terminal APPROVED)"
 
     CUSTOMERS {
-        uuid customer_id PK
+        string customer_id PK "cus- + random 9-digit number, app-assigned via idgen"
         text applicant_identifier UK "unique; find-or-create key"
         text name
         text email
@@ -31,19 +31,19 @@ erDiagram
     }
 
     ACCOUNTS {
-        uuid account_id PK
-        uuid customer_id "opaque, NOT a FK -- not unique, one customer can hold many accounts"
+        string account_id PK "acc- + random 9-digit number, app-assigned via idgen"
+        string customer_id "opaque, NOT a FK -- not unique, one customer can hold many accounts"
+        string application_id UK "opaque, NOT a FK -- NOT NULL, unique; points at the owning application (corrected from an earlier draft, which had the pointer the other way)"
         text product_type "personal_loan | auto_loan | mortgage"
         timestamptz opened_at
         text status "ACTIVE | CLOSED"
     }
 
     APPLICATIONS {
-        uuid application_id PK
+        string application_id PK "app- + random 9-digit number, app-assigned via idgen"
         text applicant_identifier "NOT NULL -- durable key, always known at submission"
-        uuid customer_id "opaque, NOT a FK -- nullable"
-        uuid account_id "opaque, NOT a FK -- nullable until terminal APPROVED"
-        text workflow_id "nullable -- Temporal's id, cleared on admin delete"
+        string customer_id "opaque, NOT a FK -- nullable"
+        text workflow_id "nullable -- Temporal's id, never cleared afterward (see CLAUDE.md's Known gaps)"
         text product_type "personal_loan | auto_loan | mortgage"
         jsonb payload "product-specific fields only"
         text applicant_name
@@ -78,9 +78,21 @@ erDiagram
 - **`APPLICATIONS ||..o| ACCOUNTS`** — one application, zero or one
   account. Zero for every application that hasn't reached terminal
   `APPROVED` yet (the overwhelming majority at any given time); exactly
-  one once it has. The database enforces the "exactly one once
-  approved" half directly — see `applications`' `chk_approved_has_account`
-  `CHECK` constraint in `db/schema.sql`.
+  one once it has. **The pointer lives on `ACCOUNTS.application_id`
+  (`NOT NULL`, `UNIQUE`), not the other way around** — corrected from an
+  earlier draft of this diagram, which had a nullable `account_id` on
+  `APPLICATIONS` instead. Flipped because there was previously no way,
+  given an account, to find which application produced it, and because
+  the `UNIQUE` constraint on `ACCOUNTS.application_id` now doubles as
+  `persist_decision`'s own idempotency guard against a Temporal retry
+  double-provisioning (`CLAUDE.md`'s "Applying without being a customer
+  yet"). One consequence: the "exactly one once approved" half of this
+  relationship is **no longer enforced at the database level** — an
+  earlier draft's `chk_approved_has_account` `CHECK` constraint on
+  `applications` can't be re-expressed as a single-table check once the
+  column it referenced moved to the other table; see `CLAUDE.md`'s
+  Known Gaps for this as an explicit, accepted reduction in the safety
+  net.
 - **No relationship line for Mayan documents** — `id_photo` (customer),
   `Welcome Letter`/`Consent` (account), and the submission-gate
   categories (application) all live in Mayan, associated by metadata

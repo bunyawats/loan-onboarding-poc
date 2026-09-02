@@ -21,6 +21,7 @@ graph TD
     account["account/"]
     document["document/"]
     workflow["workflow/"]
+    idgen["idgen/"]
 
     appPy --> bffCustomer
     appPy --> bffBackoffice
@@ -32,6 +33,7 @@ graph TD
     bffCustomer --> document
     bffCustomer --> workflow
     bffCustomer -->|"read-only: find_by_identifier"| customer
+    bffCustomer -->|"provisional application_id"| idgen
 
     bffBackoffice --> application
     bffBackoffice --> document
@@ -41,17 +43,26 @@ graph TD
 
     application -->|"service.py + activities.py"| document
     application -->|"service.py + activities.py"| workflow
+    application --> idgen
     application -.->|"activities.py ONLY -- approval-time provisioning"| customer
     application -.->|"activities.py ONLY -- approval-time provisioning"| account
+    customer --> idgen
+    account --> idgen
 ```
 
 ## Reading this diagram
 
-- **`customer/`, `account/`, `document/`, `workflow/` have no outgoing
-  arrows** — they're leaves. `customer/` and `account/` import nothing
-  else in the codebase at all; `document/` and `workflow/` are leaves
-  with one external dependency each (Mayan, Temporal respectively) but
-  no internal one.
+- **`document/`, `workflow/`, `idgen/` have no outgoing arrows** —
+  they're leaves. `idgen/` is the plainest of all (one pure function,
+  zero I/O, zero state); `document/` and `workflow/` are leaves with
+  one external dependency each (Mayan, Temporal respectively) but no
+  internal one.
+- **`customer/` and `account/` have exactly one outgoing arrow each —
+  to `idgen/`, for primary-key generation — and nothing else.** That's
+  the one exception to "leaves import nothing" these two modules get:
+  `idgen/` is deliberately so minimal (no I/O, no other module's types)
+  that depending on it doesn't compromise the "pure data module" claim
+  `CLAUDE.md` makes about `customer/`/`account/` elsewhere.
 - **The dashed arrows are the whole point of this diagram.**
   `application/service.py` never imports `customer/` or `account/` —
   only `application/activities.py` does, and only for the

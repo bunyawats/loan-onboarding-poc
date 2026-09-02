@@ -117,10 +117,20 @@ the app), and a real mixed bulk-decision batch (one already-decided row
 success) — and corrected a second real documentation bug found in the
 same pass: `db/schema.sql`/`PRD.md` both claimed a workflow-reconciliation
 mechanism exists that a full-codebase grep confirmed was never built
-(P12-2's note). **Nothing left in this plan's own backlog** — remaining
-open items are the genuine, now-accurately-documented Known Gaps in
-`CLAUDE.md`, surfaced to the user in this session's final message per
-P12-4, not further implementation work this plan calls for.
+(P12-2's note). Phases 0–12 are complete; remaining Known Gaps in
+`CLAUDE.md` are genuine, accepted, and not further work this plan calls
+for.
+
+**Phase 13 (Human-readable primary keys + account-to-application
+direction flip) added after Phase 12 closed** — a design change
+requested and confirmed by the user, not part of the original build-out.
+`CLAUDE.md` and `PRD.md` have already been updated to describe the
+target design (every primary key moves from a Postgres `UUID` to an
+application-assigned `cus-`/`acc-`/`app-` + 9-digit string via a new
+shared `idgen/` leaf module; `accounts.application_id` replaces
+`applications.account_id`) — **none of Phase 13's own tasks (P13-1
+through P13-7) have been implemented yet.** Start here:
+[Phase 13](#phase-13--human-readable-primary-keys--account-to-application-direction-flip).
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1950,6 +1960,167 @@ precedent in either reference project — the most novel phase.
       > pass, surfaced to the user in this session's final message (see
       > that message for the actual list) rather than left implicit
       > here.
+
+---
+
+## Phase 13 — Human-readable primary keys + account-to-application direction flip
+
+**Depends on:** everything above (all 12 prior phases). **Not part of
+the original build-out** — a design change requested and confirmed
+after Phase 12 closed. `CLAUDE.md` and `PRD.md` were updated *before*
+this phase's own tasks below, per this project's own convention of
+writing the architecture doc first and the implementation second — see
+both files' "Data storage" / §9 sections and the module-by-module
+descriptions for the target design each task below implements.
+
+Two independent-but-related changes, confirmed with the user before any
+code was touched:
+1. Every primary key (`customers.customer_id`, `accounts.account_id`,
+   `applications.application_id`) moves from a Postgres-generated `UUID`
+   to an application-assigned, human-readable string — `cus-`/`acc-`/
+   `app-` followed by a random 9-digit number, via a new shared leaf
+   module, `idgen/`.
+2. `accounts.application_id` (new, `NOT NULL UNIQUE`) replaces
+   `applications.account_id` (removed) — the account now points at its
+   originating application, not the other way around, which also lets
+   this new `UNIQUE` constraint serve as `persist_decision`'s
+   provisioning-idempotency guard directly (see `CLAUDE.md`'s "Applying
+   without being a customer yet").
+
+**A real, accepted tradeoff, stated once here rather than repeated per
+task below**: pure digits at length 9 (`10^9` values per entity type)
+is meaningfully less collision-safe than the `UUID`s it replaces — see
+`CLAUDE.md`'s "Data storage" and Known Gaps for the full entropy
+discussion. This makes the retry-on-collision insert logic in P13-3/
+P13-4 below a required correctness mechanism, not defensive icing —
+don't skip it as "unlikely to matter for a POC" the way some other
+gaps in this file are deliberately left unaddressed.
+
+- [ ] **P13-1** — New leaf module `loan_onboarding/idgen/service.py`:
+      `generate_id(prefix: str, length: int) -> str`, `secrets.choice`
+      over `0123456789`. Add `idgen` to `pyproject.toml`'s
+      `[tool.importlinter]` layers contract (leaf layer, alongside
+      `customer | account | document | workflow`) and add a matching
+      `idgen/ never imports anything else in this codebase` forbidden
+      contract. Update the two existing `customer/`/`account/`
+      "never imports anything else" forbidden contracts' framing in
+      `CLAUDE.md` if not already done (they should now read "with one
+      exception: `idgen/`") — no `pyproject.toml` change needed there,
+      since `idgen` was never in those contracts' `forbidden_modules`
+      lists to begin with (it didn't exist yet); this is a documentation
+      consistency check, not a lint-config change.
+      DoD: unit tests confirm prefix/length/digits-only alphabet, plus a
+      uniqueness sanity check across a large sample (statistical, not a
+      proof). `lint-imports` passes with the new contracts in place.
+- [ ] **P13-2** — `db/schema.sql`: drop every `UUID PRIMARY KEY DEFAULT
+      gen_random_uuid()` in favor of `TEXT PRIMARY KEY` (no default) for
+      `customers.customer_id`, `accounts.account_id`,
+      `applications.application_id`; change `accounts.customer_id` and
+      `applications.customer_id` from `UUID` to `TEXT`; add
+      `accounts.application_id TEXT NOT NULL` with
+      `CREATE UNIQUE INDEX ux_accounts_application_id ON accounts
+      (application_id)`; remove `applications.account_id` entirely;
+      drop the `chk_approved_has_account` `CHECK` constraint (can no
+      longer be expressed as a single-table check once the column it
+      referenced lives on the other table — see `CLAUDE.md`'s Known
+      Gaps for this as an accepted, explicit reduction in the DB-level
+      safety net, not silently dropped).
+      DoD: `docker compose down -v && docker compose up -d db` applies
+      the new schema cleanly from empty; a manual `psql \d accounts` /
+      `\d applications` confirms the new column shapes and the dropped
+      constraint.
+- [ ] **P13-3** — `customer/` and `account/`: `models.py` field types
+      `UUID` → `str` (plus `Account.application_id: str`, new field);
+      `db.py`'s `get_or_create`/`create` generate an id via
+      `idgen.service.generate_id(prefix, 9)` before each insert attempt,
+      and on a `UniqueViolationError` against the table's own primary
+      key specifically (not a business-rule constraint — inspect
+      `exc.constraint_name` to tell them apart), regenerate and retry,
+      bounded at 10 attempts, raising a clear error if all 10 collide.
+      `account/db.py`'s `create` also takes and inserts `application_id`
+      now; add `account/db.py`'s `get_by_application_id` +
+      `account/service.py`'s wrapper. `customer/service.py` keeps its
+      existing `get_or_create`'s two independent conflict paths (the
+      pre-existing `applicant_identifier` race, now plus the new
+      id-collision retry) — both must keep working together, not just
+      whichever was tested last.
+      DoD: `tests/unit/account/test_service.py` and
+      `tests/unit/customer/test_service.py` updated (drop `uuid.uuid4()`
+      fabrication, use real ids or literal test strings for "unknown id"
+      cases) and passing against a real Postgres, per this project's
+      existing testing convention for these two modules.
+- [ ] **P13-4** — `application/`: `models.py` drops `Application.account_id`
+      entirely, `application_id`/`customer_id` become `str`. `db.py`'s
+      `insert` takes a pre-generated `application_id`; `update_decision`
+      drops its `account_id` parameter and column reference entirely;
+      remaining `UUID` type hints → `str`. `service.py`'s
+      `create_application` generates via
+      `idgen.service.generate_id("app", 9)` when `application_id` isn't
+      supplied (same optional-parameter shape as today, just a
+      different generator). `activities.py`'s `persist_decision`
+      provisioning block is rewritten per `CLAUDE.md`'s updated
+      "Applying without being a customer yet": check
+      `account_service.get_by_application_id(application_id)` **first**
+      (not `record["account_id"] is None`); if `None`, do the full
+      provisioning sequence (customer resolve/create,
+      `create_account(customer_id, product_type, application_id)`, then
+      the two `document_service` calls) with **no intermediate write
+      back onto `applications`** — the committed `accounts` row (unique
+      on `application_id`) is now the durable idempotency marker on its
+      own; if not `None` (a retry), skip provisioning and take
+      `customer_id` from `existing_account.customer_id`. Delete every
+      `UUID(inp.application_id)`/`UUID(inp.customer_id)` conversion —
+      `workflow/workflows.py`'s dataclasses already type these fields as
+      plain `str`, confirmed unchanged by this phase.
+      DoD: `tests/unit/application/test_activities.py`'s existing
+      idempotency tests
+      (`test_persist_decision_approve_is_idempotent_on_retry`,
+      `test_persist_decision_retry_after_document_service_failure_does_not_double_create_account`)
+      updated for the new id types and still pass — these are the direct
+      proof the new `get_by_application_id`-based guard preserves the
+      exact correctness property the old column-based one had, not just
+      that the code compiles.
+- [ ] **P13-5** — `bff_backoffice/routes.py` and `bff_customer/routes.py`:
+      every `application_id: UUID` route/function parameter → `str`;
+      drop now-unused `from uuid import UUID` imports.
+      `bff_backoffice`'s `_application_detail_context` replaces its
+      `application.account_id`-gated `account_service.get(...)` call
+      with a direct `account_service.get_by_application_id(application_id)`.
+      The two `UUID(raw_id)` conversions in `bff_backoffice`'s
+      bulk-decision paths are deleted. `bff_customer`'s wizard
+      provisional-id mint switches from `uuid.uuid4()` to
+      `idgen_service.generate_id("app", 9)`; drop the now-unused
+      `import uuid` and the `UUID(draft["application_id"])` conversion
+      in `new_application_submit`.
+      DoD (integration-verify): real browser walk of both BFFs against
+      the freshly-migrated stack — create an application via the
+      customer wizard (confirm its `app-` id appears correctly in the
+      URL and in Mayan's document metadata), approve it as underwriter
+      (confirm the backoffice review dialog renders the resulting
+      account via the new reverse lookup), and confirm the customer
+      detail page still resolves correctly by its new-format id.
+- [ ] **P13-6** — Full test-suite pass: every remaining `uuid.uuid4()`
+      fabrication for these three entity types across
+      `tests/unit/account/`, `tests/unit/customer/`,
+      `tests/unit/application/` (`test_db.py`, `test_service.py`,
+      `test_activities.py`) replaced. New
+      `tests/unit/idgen/test_service.py` (see P13-1's DoD).
+      DoD: `pytest tests/unit/` (full suite) and `lint-imports` both
+      pass with zero remaining `UUID`-typed usage of these three ids
+      anywhere in `loan_onboarding/` (a `grep -rn "UUID" loan_onboarding/`
+      confined to unrelated code, if any, is the check).
+- [ ] **P13-7** — Final full-stack verification and CI.
+      DoD (integration-verify, whole phase): `docker compose down -v &&
+      docker compose up -d --build` from genuinely empty volumes;
+      re-run this project's own standard live-verification sweep (all
+      three product types, direct approve, escalation-then-manager-
+      approve, reject, more-info-then-resubmit-then-approve, cancel) and
+      confirm via `psql` that every `customers`/`accounts`/`applications`
+      row uses the new prefixed id format and that
+      `accounts.application_id` correctly matches the approving
+      application in each case. Commit, push, confirm CI green — same
+      task-id-prefixed-commit-message and `gh run watch` convention
+      every prior phase in this file has used.
 
 ---
 
