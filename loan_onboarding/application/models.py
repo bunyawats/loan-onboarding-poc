@@ -56,3 +56,17 @@ class ApplicationSubmissionResult:
     application_id: UUID
     application: Application | None
     missing_categories: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationPage:
+    """One page of `list_for_applicant`/`list_by_status` -- `query_id`
+    echoes back a mint-once count cache key (the `list-pagination-bulk-
+    actions` skill's Part 1 pattern) so a caller paging through the same
+    filter, or polling it, can skip a fresh `COUNT(*)`."""
+
+    items: list[Application]
+    total: int
+    page: int
+    page_size: int
+    query_id: str

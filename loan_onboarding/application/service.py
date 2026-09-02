@@ -22,7 +22,12 @@ from temporalio.client import Client
 from loan_onboarding.account import service as account_service
 from loan_onboarding.application import db as application_db
 from loan_onboarding.application import schemas
-from loan_onboarding.application.models import Application, ApplicationNotFound, ApplicationSubmissionResult
+from loan_onboarding.application.models import (
+    Application,
+    ApplicationNotFound,
+    ApplicationPage,
+    ApplicationSubmissionResult,
+)
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.workflow import service as workflow_service
@@ -169,3 +174,104 @@ async def check_decision_allowed(application_id: UUID, decision: str) -> list[st
     if has_active:
         return [f"customer already has an active {record['product_type']} account"]
     return []
+
+
+# ----------------------------------------------------------------------
+# Paginated queries -- mint-once count cache, `list-pagination-bulk-
+# actions` skill's Part 1 pattern. In-process only, deliberately (same
+# reasoning review-approval-temporal's own workflow/service.py states
+# for its identical cache): a query_id minted on one replica is just a
+# cache miss on another, never a wrong answer, since every lookup path
+# below degrades to a fresh COUNT(*) on a miss.
+# ----------------------------------------------------------------------
+
+QUERY_CACHE_TTL_S = 30.0
+_DEFAULT_PAGE_SIZE = 20
+_MAX_PAGE_SIZE = 100
+
+# query_id -> (filter, total, expires_at)
+_query_cache: dict[str, tuple[dict[str, str], int, float]] = {}
+
+
+def _mint_query_id() -> str:
+    return f"q_{uuid.uuid4().hex[:12]}"
+
+
+def _cache_total(filter_key: dict[str, str], total: int) -> str:
+    query_id = _mint_query_id()
+    _query_cache[query_id] = (filter_key, total, time.monotonic() + QUERY_CACHE_TTL_S)
+    return query_id
+
+
+def _lookup_cached_total(query_id: Optional[str], filter_key: dict[str, str]) -> Optional[int]:
+    if query_id is None:
+        return None
+    cached = _query_cache.get(query_id)
+    if cached is None:
+        return None
+    cached_filter, total, expires_at = cached
+    if time.monotonic() >= expires_at:
+        del _query_cache[query_id]
+        return None
+    if cached_filter != filter_key:
+        # Visibility-invariant defense (the skill's Part 1, point 4): a
+        # query_id is only ever a shortcut for "the same query as last
+        # time" -- never trust it for a different filter, even one from
+        # the same caller a moment later. Recompute for real instead of
+        # silently reusing another filter's count.
+        return None
+    return total
+
+
+async def get(application_id: UUID) -> Application:
+    record = await application_db.get(application_id)
+    if record is None:
+        raise ApplicationNotFound(application_id)
+    return Application.from_record(record)
+
+
+async def list_for_applicant(
+    applicant_identifier: str,
+    page: int = 1,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    query_id: Optional[str] = None,
+) -> ApplicationPage:
+    """Keyed on `applicant_identifier`, NOT `customer_id` -- has to work
+    for an applicant with no approved application yet, whose
+    `customer_id` is still `NULL` on every row (CLAUDE.md's "Applying
+    without being a customer yet")."""
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), _MAX_PAGE_SIZE)
+    filter_key = {"applicant_identifier": applicant_identifier}
+
+    total = _lookup_cached_total(query_id, filter_key)
+    if total is None:
+        total = await application_db.count_for_applicant(applicant_identifier)
+        query_id = _cache_total(filter_key, total)
+
+    offset = (page - 1) * page_size
+    records = await application_db.list_for_applicant(applicant_identifier, page_size, offset)
+    items = [Application.from_record(r) for r in records]
+    return ApplicationPage(items=items, total=total, page=page, page_size=page_size, query_id=query_id)
+
+
+async def list_by_status(
+    status: str,
+    page: int = 1,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+    query_id: Optional[str] = None,
+) -> ApplicationPage:
+    """Staff queues (Underwriter/Manager, `bff_backoffice`)."""
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), _MAX_PAGE_SIZE)
+    filter_key = {"status": status}
+
+    total = _lookup_cached_total(query_id, filter_key)
+    if total is None:
+        total = await application_db.count_by_status(status)
+        query_id = _cache_total(filter_key, total)
+
+    offset = (page - 1) * page_size
+    records = await application_db.list_by_status(status, page_size, offset)
+    items = [Application.from_record(r) for r in records]
+    return ApplicationPage(items=items, total=total, page=page, page_size=page_size, query_id=query_id)

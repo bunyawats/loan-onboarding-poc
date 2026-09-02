@@ -74,10 +74,14 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 5 — done.** Start here:
-[P6-1](#phase-6--application-module) (Application Module) — all of its
-dependencies (Phases 1, 2, 3, 4, and 5 specifically through P5-5) are
-now satisfied.
+**Phases 0 through 6 — done.** Start here:
+[P7-1](#phase-7--worker-composition-root--end-to-end-workflow-verification)
+(Worker Composition Root & End-to-End Workflow Verification) — its
+dependencies (Phases 4 and 6) are now both satisfied. `worker_main.py`
+doesn't exist yet; every P6 task's own integration-verify used a
+throwaway ad-hoc worker wiring `workflow.worker.run_worker()` +
+`application/activities.py`'s three real activities directly (same
+shape P7-1 will make permanent).
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -975,7 +979,7 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > `test_service.py` tests (covering P6-4, P6-5, and P6-5b
       > together, since they share fixtures) verified against the same
       > temporary 5433 Postgres port remap as every other P6 task.
-- [ ] **P6-6** — `application/service.py`, part 3: `get(application_id)`,
+- [x] **P6-6** — `application/service.py`, part 3: `get(application_id)`,
       `list_for_applicant(applicant_identifier, page, ...)`,
       `list_by_status(status, page, ...)`. Paginated, `query_id`-cached
       per the `list-pagination-bulk-actions` skill's pattern (load that
@@ -991,6 +995,38 @@ being a customer yet"), so P6-3 can't be written until both exist.
       result set) and that a `query_id` minted for one
       `applicant_identifier` filter is rejected/ignored if reused with a
       different one (the visibility-invariant defense).
+      > DONE: loaded the `list-pagination-bulk-actions` skill first, per
+      > this task's own instruction — used Part 1's mint-once count-cache
+      > pattern exactly (`_query_cache: dict[query_id, (filter, total,
+      > expires_at)]`, in-process/module-level, `QUERY_CACHE_TTL_S = 30.0`
+      > matching `review-approval-temporal`'s own identical constant and
+      > reasoning: a `query_id` minted on one replica is just a cache miss
+      > on another, never a wrong answer, since every lookup path
+      > degrades to a fresh `COUNT(*)` on a miss). `_lookup_cached_total`
+      > checks the cached filter dict against the current call's filter
+      > and returns `None` (forcing a real recount) on any mismatch —
+      > this is the visibility-invariant defense the DoD asks for, and
+      > it's structural (the comparison is unconditional) rather than a
+      > special case for `applicant_identifier` specifically, so it also
+      > protects `list_by_status`'s `status` filter for free.
+      > `list_for_applicant`/`list_by_status`/`get` add zero new imports
+      > (`application/` still never imports `customer/` for this path,
+      > confirmed by inspection). 10 new unit tests: pagination math
+      > across page boundaries (a 5-row set split 2/2/1), an empty result
+      > set, a genuinely-reused `query_id` (insert a 4th row between two
+      > calls and confirm the cached `total` stays at the stale-but-
+      > consistent 3, proving the cache path — not just the recompute
+      > path — actually executes), the query_id-from-a-different-filter
+      > case explicitly (alice's `query_id` reused for bob's applicant
+      > filter recomputes for real rather than returning alice's count),
+      > an unknown/expired `query_id` recomputing rather than erroring,
+      > `list_by_status` filtering correctly across two different
+      > statuses, and page/page_size clamping (`page < 1` → `1`,
+      > `page_size` over `_MAX_PAGE_SIZE` → clamped). All 129
+      > `tests/unit/` tests (the full suite, not just this package) pass
+      > together, verified via the same temporary 5433 Postgres port
+      > remap as every other P6 task (reverted before committing, zero
+      > diff). **This completes Phase 6.**
 
 ---
 
@@ -1213,6 +1249,47 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 6 (Application Module) complete, all six tasks
+  checked (P6-1 through P6-6). `application/models.py`/`db.py` (P6-1) is
+  a thin data-access layer; `schemas.py` (P6-2) is the per-product-type
+  Pydantic registry with the `workflow.task_queues.KNOWN_PRODUCT_TYPES`
+  import-time assert; `activities.py` (P6-3) is the one file in this
+  module allowed to import `customer/`/`account/`, provisioning a
+  customer+account on terminal `APPROVED`, idempotency-guarded by
+  `account_id IS NOT NULL`; `service.py` (P6-4/P6-5/P6-5b/P6-6) is
+  `create_application`/`resubmit_application`/`check_decision_allowed`/
+  `get`/`list_for_applicant`/`list_by_status`. Two real gaps caught and
+  fixed *before* or *while* implementing, not after: (1)
+  `application/db.py`'s `insert()` had no protection against a Temporal
+  retry of an already-succeeded `persist_application` — fixed with
+  `ON CONFLICT DO NOTHING` (P6-1, surfaced again while building P6-3);
+  (2) **a real architectural gap in `CLAUDE.md` itself**:
+  `create_application`'s original spec gave it no way to accept a
+  pre-existing `application_id`, which conflicts with
+  `document.service.upload(...)` needing one to tag uploads with
+  *before* the final submit call (Phase 11's own stated flow order) --
+  fixed by making `application_id` an optional parameter, `CLAUDE.md`
+  updated in place with the full reasoning (P6-4). Every P6 task with an
+  "integration-verify" DoD got one for real, against the complete local
+  stack (`db`, `temporal`, `mayan`) plus a throwaway ad-hoc worker
+  (scratchpad scripts, not committed) standing in for `worker_main.py`
+  (Phase 7, doesn't exist yet) — P6-4 proved both the missing-documents
+  short-circuit (zero Temporal executions created, confirmed via a real
+  `handle.describe()` call) and the complete-application path (a real
+  `PENDING_UNDERWRITING` row, `customer_id`/`account_id` both `NULL`,
+  documents uploaded first under a pre-minted `application_id` -- the
+  exact flow that motivated the fix above); P6-5 drove a real application
+  to `MORE_INFO_REQUESTED` via a direct `workflow.service.signal_decision`
+  call and confirmed resubmission landed back at `PENDING_UNDERWRITING`
+  on the identical `workflow_id`. 129 `tests/unit/` tests pass together
+  (up from 36 at the start of this session), verified locally via the
+  same temporary 5433 Postgres port remap every phase since Phase 2 has
+  needed (this machine's native Postgres holds 5432) -- reverted before
+  every commit, zero diff each time. Next: Phase 7 (Worker Composition
+  Root & End-to-End Workflow Verification) — P7-1 (`worker_main.py`)
+  should be a fairly mechanical extraction of the ad-hoc wiring this
+  session's own verification scripts already used repeatedly.
 
 - **2026-09-02** — Phase 5 (Document Module) complete, all five tasks
   checked. Brought up `mayan`/`mayan-db`/`mayan-redis` for real (P5-1),

@@ -419,3 +419,112 @@ async def test_check_decision_allowed_permits_when_no_conflicting_account_exists
 
     result = await service.check_decision_allowed(application_id, "APPROVE")
     assert result == []
+
+
+# ----------------------------------------------------------------------
+# list_for_applicant / list_by_status -- pagination + count cache
+# ----------------------------------------------------------------------
+
+async def test_list_for_applicant_pagination_math():
+    for _ in range(5):
+        await _seed_application(applicant_identifier="paged@example.com")
+
+    page1 = await service.list_for_applicant("paged@example.com", page=1, page_size=2)
+    page2 = await service.list_for_applicant("paged@example.com", page=2, page_size=2)
+    page3 = await service.list_for_applicant("paged@example.com", page=3, page_size=2)
+
+    assert len(page1.items) == 2
+    assert len(page2.items) == 2
+    assert len(page3.items) == 1
+    assert page1.total == page2.total == page3.total == 5
+
+
+async def test_list_for_applicant_empty_result_set():
+    result = await service.list_for_applicant("nobody-here@example.com", page=1, page_size=20)
+    assert result.items == []
+    assert result.total == 0
+    assert result.query_id is not None
+
+
+async def test_list_for_applicant_reuses_cached_total_via_query_id():
+    for _ in range(3):
+        await _seed_application(applicant_identifier="cached@example.com")
+
+    first = await service.list_for_applicant("cached@example.com", page=1, page_size=2)
+    # A second application appears after the first page mint -- if the
+    # cache is genuinely reused (not recomputed), `total` stays at the
+    # stale-but-consistent value from the first call.
+    await _seed_application(applicant_identifier="cached@example.com")
+
+    second = await service.list_for_applicant(
+        "cached@example.com", page=2, page_size=2, query_id=first.query_id
+    )
+    assert second.total == first.total == 3
+    assert second.query_id == first.query_id
+
+
+async def test_list_for_applicant_query_id_from_different_filter_is_ignored():
+    """The visibility-invariant defense: a query_id minted for one
+    applicant_identifier must never be trusted for a different one, even
+    if it's still within its TTL."""
+    for _ in range(2):
+        await _seed_application(applicant_identifier="alice-list@example.com")
+    for _ in range(5):
+        await _seed_application(applicant_identifier="bob-list@example.com")
+
+    alice_page = await service.list_for_applicant("alice-list@example.com", page=1, page_size=20)
+    assert alice_page.total == 2
+
+    # Reuse alice's query_id while asking for bob's applications.
+    bob_page = await service.list_for_applicant(
+        "bob-list@example.com", page=1, page_size=20, query_id=alice_page.query_id
+    )
+    assert bob_page.total == 5  # recomputed for real, not alice's stale 2
+    assert bob_page.query_id != alice_page.query_id
+
+
+async def test_list_for_applicant_unknown_query_id_recomputes_instead_of_failing():
+    await _seed_application(applicant_identifier="fresh@example.com")
+
+    result = await service.list_for_applicant(
+        "fresh@example.com", page=1, page_size=20, query_id="q_does_not_exist"
+    )
+    assert result.total == 1
+    assert result.query_id != "q_does_not_exist"
+
+
+async def test_list_by_status_pagination_and_filtering():
+    for _ in range(3):
+        await _seed_application()
+    approved_id = await _seed_application()
+    await application_db.update_decision(approved_id, status="APPROVED", account_id=uuid.uuid4())
+
+    pending = await service.list_by_status("PENDING_UNDERWRITING", page=1, page_size=20)
+    approved = await service.list_by_status("APPROVED", page=1, page_size=20)
+
+    assert pending.total == 3
+    assert approved.total == 1
+    assert all(a.status == "PENDING_UNDERWRITING" for a in pending.items)
+
+
+async def test_page_size_clamped_to_max_and_page_clamped_to_minimum():
+    await _seed_application(applicant_identifier="clamp@example.com")
+
+    result = await service.list_for_applicant("clamp@example.com", page=0, page_size=10_000)
+    assert result.page == 1
+    assert result.page_size == service._MAX_PAGE_SIZE
+
+
+# ----------------------------------------------------------------------
+# get
+# ----------------------------------------------------------------------
+
+async def test_get_returns_application():
+    application_id = await _seed_application()
+    application = await service.get(application_id)
+    assert application.application_id == application_id
+
+
+async def test_get_raises_application_not_found_for_unknown_id():
+    with pytest.raises(ApplicationNotFound):
+        await service.get(uuid.uuid4())
