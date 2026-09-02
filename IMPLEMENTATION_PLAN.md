@@ -1034,12 +1034,27 @@ being a customer yet"), so P6-3 can't be written until both exist.
 
 **Depends on:** Phases 4, 6. **Unblocks:** Phases 9, 10, 11.
 
-- [ ] **P7-1** — `worker_main.py`: imports `workflow/`'s `run_worker()`
+- [x] **P7-1** — `worker_main.py`: imports `workflow/`'s `run_worker()`
       bootstrap and `application/activities.py`'s three concrete
       functions, wires them together, reads the same `WORKER_MODE`/
       `LOAN_PRODUCT_TYPE` env vars.
       DoD: `python -m loan_onboarding.worker_main` starts cleanly
       against the real local Temporal server.
+      > DONE: mechanical, as expected — this is exactly the ad-hoc
+      > wiring every P6 integration-verify script already built by hand
+      > (`workflow.worker.run_worker([persist_application,
+      > persist_decision, persist_resubmit], ...)`), now the permanent
+      > composition root. Verified for real: `python -m
+      > loan_onboarding.worker_main` against the real local `temporal`
+      > container prints "Worker process started (mode=both), serving
+      > product types: ['personal_loan', 'auto_loan', 'mortgage']" and
+      > stays running (no crash) — confirmed the process was still alive
+      > several seconds later, then killed it cleanly. (Needed
+      > `python -u` / unbuffered stdout to actually see the startup
+      > print when redirected to a log file for this check — Python
+      > buffers stdout by default when it isn't a TTY, not a bug in the
+      > module itself, just a manual-verification gotcha worth noting so
+      > a future check doesn't mistake buffering for a hang.)
 - [ ] **P7-2** — Add `worker-workflow`/`worker-activity` (or one
       `worker` service, per `CLAUDE.md`'s Deployment section) to
       `docker-compose.yml`.
