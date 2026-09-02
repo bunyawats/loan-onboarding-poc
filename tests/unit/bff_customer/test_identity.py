@@ -35,10 +35,17 @@ def test_set_then_get_round_trips_the_identifier():
 
 
 def test_get_rejects_a_tampered_cookie():
+    """Flips the last 4 base64url characters (a full 3-byte group) of
+    the signature, not just the last one -- flipping a single character
+    right at the end is flaky: base64's last character in a group can
+    carry unused padding bits, so some single-character substitutions
+    decode to the exact same underlying bytes and the "tampered"
+    signature still verifies. A full group is guaranteed to change at
+    least one underlying byte."""
     response = Response()
     identity.set_applicant_identifier(response, "someone@example.com")
     token = _cookie_value_from(response)
-    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    tampered = token[:-4] + ("aaaa" if token[-4:] != "aaaa" else "bbbb")
 
     assert identity.get_applicant_identifier(_request_with_cookie(tampered)) is None
 
