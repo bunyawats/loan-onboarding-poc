@@ -1,0 +1,93 @@
+name: loan-onboarding-poc
+
+# Phase 0 skeleton (IMPLEMENTATION_PLAN.md P0-4): db, temporal,
+# temporal-ui, keycloak, backoffice-redis only. No app/worker services
+# yet -- those come once there's code to run (Phase 7/10/11).
+#
+# mayan-db/mayan-redis/mayan are DELIBERATELY NOT here yet -- P5-1
+# copies them "wholesale" from mayan-edms-customer-archive/docker-compose.yml,
+# but that file's actual service names are db/redis/app, not
+# mayan-db/mayan-redis/mayan, and its `db`/`redis` names collide with
+# this file's own `db` (Postgres) and `backoffice-redis` -- P5-1 needs
+# a rename pass (db -> mayan-db, redis -> mayan-redis, app -> mayan),
+# not a literal copy-paste. Its `webapp` service (a demo front end) has
+# no equivalent need here, since document/ talks to Mayan's API
+# directly.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-loan_onboarding}
+    ports:
+      - "5432:5432"
+    volumes:
+      # This script runs from here (official postgres image behavior).
+      - ./db/init:/docker-entrypoint-initdb.d
+      # schema.sql is read from here, NOT placed directly under
+      # db/init/ -- see db/init/01-init.sh's own header comment for
+      # why (the postgres image would auto-run it a second time).
+      - ./db:/db-source:ro
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-loan_onboarding}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_SEEDS: db
+    ports:
+      - "7233:7233"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: "http://localhost:8233"
+    ports:
+      - "8233:8080"
+    depends_on:
+      - temporal
+    # Deliberately NOT gated behind Keycloak -- CLAUDE.md's "Identity"
+    # scopes Keycloak auth to the back-office *application*, not
+    # Temporal's own operational tooling (see "Deliberately not built").
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
+    volumes:
+      # Empty until Phase 9 (P9-1) adds loanrealm-realm.json here --
+      # --import-realm is a no-op against an empty directory, so
+      # Keycloak still starts cleanly with no realm imported yet.
+      - ./keycloak/import:/opt/keycloak/data/import:ro
+    ports:
+      - "8080:8080"
+
+  backoffice-redis:
+    image: redis:7-alpine
+    # Named distinctly from mayan-redis (Phase 5) -- CLAUDE.md's
+    # "Data storage": Keycloak sessions + bulk-selection for
+    # bff_backoffice only, never shared with Mayan's own cache.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:

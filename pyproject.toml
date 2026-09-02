@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loan-onboarding-poc"
+version = "0.1.0"
+description = "Loan onboarding POC -- modular monolith (customer/back-office BFFs, Temporal workflow, Mayan EDMS documents, Keycloak-gated back office)."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "temporalio",
+    "fastapi",
+    "uvicorn[standard]",
+    "asyncpg",
+    "pydantic",
+    "pydantic-settings",
+    "pyjwt[crypto]",
+    "jinja2",
+    "python-multipart",
+    "itsdangerous",
+    "httpx",
+    "redis",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+]
+
+[tool.setuptools.packages.find]
+include = ["loan_onboarding*"]

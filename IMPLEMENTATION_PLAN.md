@@ -74,7 +74,11 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phase 0 — not started.** Start here: [P0-1](#phase-0--repo--infra-scaffolding).
+**Phase 0 — P0-1 through P0-5 done and verified. P0-6 written and
+locally verified, box stays unchecked until pushed and confirmed green
+on GitHub Actions** (its own DoD says "on the first push"). Next: push,
+confirm the Actions run is green, check P0-6, then start
+[P1-1](#phase-1--data-layer).
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -92,37 +96,83 @@ assumption; until then treat it as provisional, not settled.)*
 
 **Depends on:** nothing. **Unblocks:** everything.
 
-- [ ] **P0-1** — `pyproject.toml` at the repo root: `temporalio`,
+- [x] **P0-1** — `pyproject.toml` at the repo root: `temporalio`,
       `fastapi`, `uvicorn[standard]`, `asyncpg`, `pydantic`,
       `pydantic-settings`, `pyjwt[crypto]`, `jinja2`,
       `python-multipart`, `itsdangerous`, `httpx`, `redis`; dev extras
       `pytest`, `pytest-asyncio`, `respx`. One package,
       `loan_onboarding`, per `CLAUDE.md`'s repo layout.
       DoD: `pip install -e .` succeeds in a clean venv.
-- [ ] **P0-2** — Empty package skeleton: every directory in `CLAUDE.md`'s
+      > DONE: setuptools backend (matches `review-approval-temporal`'s
+      > own choice, confirmed against its actual `pyproject.toml`).
+      > Verified in a throwaway venv, not just written.
+- [x] **P0-2** — Empty package skeleton: every directory in `CLAUDE.md`'s
       "Repo layout" tree exists with an `__init__.py`, no logic yet.
       DoD: `python -c "import loan_onboarding"` succeeds.
-- [ ] **P0-3** — `Dockerfile` (one image, used by every process — see
+      > DONE: all 7 module dirs + `bff_customer`/`bff_backoffice`'s
+      > `templates/` (`.gitkeep`, not `__init__.py` — not Python
+      > packages) + `tests/unit`, `tests/integration`. Verified both in
+      > a venv and inside the built Docker image.
+- [x] **P0-3** — `Dockerfile` (one image, used by every process — see
       `CLAUDE.md`'s "Deployment").
       DoD: `docker build .` succeeds.
-- [ ] **P0-4** — `docker-compose.yml` skeleton: `mayan-db`, `mayan-redis`,
-      `mayan`, `db`, `temporal`, `temporal-ui`, `keycloak`,
-      `backoffice-redis` services per `CLAUDE.md`'s "Docker Compose
-      topology" — **no `app`/`worker` services yet**, those come once
-      there's code to run.
+      > DONE: single-stage `python:3.12-slim`, `pip install .`, no
+      > `CMD` (compose sets the command per service) — matches
+      > `review-approval-temporal`'s own Dockerfile pattern exactly,
+      > confirmed by fetching it. `docker build .` run for real, plus a
+      > sanity `docker run ... python -c "import loan_onboarding"`
+      > against the built image.
+- [x] **P0-4** — `docker-compose.yml` skeleton: `db`, `temporal`,
+      `temporal-ui`, `keycloak`, `backoffice-redis` services per
+      `CLAUDE.md`'s "Docker Compose topology" — **no `app`/`worker`
+      services yet**, those come once there's code to run.
+      **`mayan-db`/`mayan-redis`/`mayan` deliberately NOT added here** —
+      fetching `mayan-edms-customer-archive/docker-compose.yml` for
+      real showed its actual service names are `db`/`redis`/`app`, not
+      `mayan-db`/`mayan-redis`/`mayan`, and they'd collide with this
+      file's own `db`. P5-1's "copy wholesale" needs a rename pass
+      (`db`→`mayan-db`, `redis`→`mayan-redis`, `app`→`mayan`, drop the
+      `webapp` demo service), documented directly in
+      `docker-compose.yml`'s own top comment so P5-1 doesn't have to
+      rediscover it.
       DoD: `docker compose up -d db temporal keycloak backoffice-redis`
       brings up four healthy containers (Mayan brought up separately in
       Phase 5, once `document/` needs it).
-- [ ] **P0-5** — `.env.example` (every env var referenced anywhere in
+      > DONE: all 4 brought up for real. `db`/`backoffice-redis` report
+      > `(healthy)` via their own healthchecks; `keycloak` confirmed
+      > functional via `curl` (HTTP 200 on `/realms/master`) and its
+      > startup log; `temporal` confirmed via its auto-setup log
+      > completing cleanly. Also verified `db/init/01-init.sh` for
+      > real: both `loan_onboarding` and `temporal` databases exist,
+      > and `loan_onboarding` has all 3 tables plus the
+      > `ux_accounts_customer_active_product_type` partial unique
+      > index from `db/schema.sql`. Port 8080 collided with this
+      > machine's already-running `mayan-edms-customer-archive` stack —
+      > verified with a temporary local port remap, reverted to the
+      > standard `8080:8080` before committing (correct for a real
+      > environment without that local collision).
+- [x] **P0-5** — `.env.example` (every env var referenced anywhere in
       `CLAUDE.md`, even ones not wired up yet) + `.gitignore` (`.env`,
       `__pycache__`, `.venv`, etc.).
       DoD: `.env` copied from example, no secrets committed.
+      > DONE: includes `WORKER_MODE`/`LOAN_PRODUCT_TYPE` even though
+      > `review-approval-temporal` sets its sibling vars directly in
+      > compose instead of `.env.example` — this task's own wording
+      > ("every env var ... even ones not wired up yet") calls for it
+      > regardless. `.env` copied and confirmed `git check-ignore`'d.
 - [ ] **P0-6** — CI skeleton (GitHub Actions or equivalent): a workflow
       that at minimum runs `pytest tests/unit` on push. Leave a
       commented-out step for `tests/contract`-equivalent /
       import-linter — those get filled in Phase 8, this just reserves
       the slot so Phase 8 isn't inventing CI structure from scratch.
       DoD: workflow runs (even trivially green) on the first push.
+      > IN PROGRESS: `.github/workflows/ci.yml` written, plus
+      > `tests/unit/test_smoke.py` (a real package-import test, not a
+      > no-op) so `pytest tests/unit` doesn't fail on zero collected
+      > tests before Phase 2+ adds real coverage. Verified locally in a
+      > fresh venv (2 passed) — box stays unchecked until this is
+      > actually pushed and confirmed green on GitHub, per this DoD's
+      > own wording ("on the first push").
 
 ---
 
@@ -710,4 +760,32 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- *(no sessions yet — the first session should add its entry here)*
+- **2026-09-02** — Phase 0, P0-1 through P0-5 done, P0-6 written but
+  unchecked (pending push + green Actions run). Fetched
+  `review-approval-temporal` and `mayan-edms-customer-archive`'s actual
+  `Dockerfile`/`docker-compose.yml`/`.env.example` for real before
+  writing this project's own, rather than inventing conventions —
+  confirmed `pyproject.toml` uses setuptools (not poetry/hatchling),
+  the Dockerfile pattern (single-stage, no `CMD`, compose sets command
+  per service), and `WORKER_MODE`'s sibling var is set directly in
+  compose rather than `.env.example` in that project (this project's
+  own `.env.example` still includes `WORKER_MODE`/`LOAN_PRODUCT_TYPE`
+  anyway per P0-5's literal wording). Found `mayan-edms-customer-archive`'s
+  compose service names are `db`/`redis`/`app`, not
+  `mayan-db`/`mayan-redis`/`mayan` as CLAUDE.md's topology assumed —
+  P5-1 needs a rename pass, documented in `docker-compose.yml`'s own
+  comment so that session doesn't have to re-discover it. Every DoD
+  verified for real against this machine's actual Docker (build, up,
+  `pg_isready`/`redis-cli ping` healthchecks, a `curl` against
+  Keycloak, `psql` confirming both databases and `db/schema.sql`'s
+  `ux_accounts_customer_active_product_type` index landed correctly),
+  not just written and assumed. One local-environment-only snag: port
+  8080 collided with this machine's already-running
+  `mayan-edms-customer-archive` stack — verified with a temporary port
+  remap, reverted to the standard `8080:8080` before committing (not a
+  real issue in a fresh environment). Next session: push, confirm CI is
+  green, check P0-6, start Phase 1 (`db/schema.sql` and
+  `db/init/01-init.sh` already exist from an earlier design session and
+  were reused as-is here — Phase 1 may turn out to already be
+  effectively done; verify against P1-1/P1-2's exact DoD before
+  assuming so).
