@@ -74,11 +74,13 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phase 0 — P0-1 through P0-5 done and verified. P0-6 written and
-locally verified, box stays unchecked until pushed and confirmed green
-on GitHub Actions** (its own DoD says "on the first push"). Next: push,
-confirm the Actions run is green, check P0-6, then start
-[P1-1](#phase-1--data-layer).
+**Phase 0 — done, all six tasks checked and verified, including CI
+confirmed green on GitHub Actions after the actual push.** Start here:
+[P1-1](#phase-1--data-layer) — note `db/schema.sql` and
+`db/init/01-init.sh` already exist and were exercised for real during
+Phase 0's P0-4 verification, so Phase 1 may already be effectively
+done; confirm against P1-1/P1-2's exact DoD before assuming so rather
+than re-doing the work.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -160,19 +162,18 @@ assumption; until then treat it as provisional, not settled.)*
       > compose instead of `.env.example` — this task's own wording
       > ("every env var ... even ones not wired up yet") calls for it
       > regardless. `.env` copied and confirmed `git check-ignore`'d.
-- [ ] **P0-6** — CI skeleton (GitHub Actions or equivalent): a workflow
+- [x] **P0-6** — CI skeleton (GitHub Actions or equivalent): a workflow
       that at minimum runs `pytest tests/unit` on push. Leave a
       commented-out step for `tests/contract`-equivalent /
       import-linter — those get filled in Phase 8, this just reserves
       the slot so Phase 8 isn't inventing CI structure from scratch.
       DoD: workflow runs (even trivially green) on the first push.
-      > IN PROGRESS: `.github/workflows/ci.yml` written, plus
-      > `tests/unit/test_smoke.py` (a real package-import test, not a
-      > no-op) so `pytest tests/unit` doesn't fail on zero collected
-      > tests before Phase 2+ adds real coverage. Verified locally in a
-      > fresh venv (2 passed) — box stays unchecked until this is
-      > actually pushed and confirmed green on GitHub, per this DoD's
-      > own wording ("on the first push").
+      > DONE: `.github/workflows/ci.yml`, plus `tests/unit/test_smoke.py`
+      > (a real package-import test, not a no-op) so `pytest tests/unit`
+      > doesn't fail on zero collected tests before Phase 2+ adds real
+      > coverage. Pushed as commit `bad9ef9`, confirmed green on GitHub
+      > Actions via `gh run watch` (run `33580557909`, `unit-tests` job
+      > passed in 17s) — not just verified locally.
 
 ---
 
@@ -760,8 +761,11 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- **2026-09-02** — Phase 0, P0-1 through P0-5 done, P0-6 written but
-  unchecked (pending push + green Actions run). Fetched
+- **2026-09-02** — Phase 0 complete, all six tasks checked. Committed
+  (`bad9ef9`) and pushed; confirmed P0-6's CI workflow actually ran
+  green on GitHub Actions (`gh run watch`, run `33580557909`,
+  `unit-tests` passed in 17s) before checking that box, rather than
+  trusting the local test run alone. Fetched
   `review-approval-temporal` and `mayan-edms-customer-archive`'s actual
   `Dockerfile`/`docker-compose.yml`/`.env.example` for real before
   writing this project's own, rather than inventing conventions —
@@ -783,9 +787,9 @@ is.)*
   8080 collided with this machine's already-running
   `mayan-edms-customer-archive` stack — verified with a temporary port
   remap, reverted to the standard `8080:8080` before committing (not a
-  real issue in a fresh environment). Next session: push, confirm CI is
-  green, check P0-6, start Phase 1 (`db/schema.sql` and
-  `db/init/01-init.sh` already exist from an earlier design session and
-  were reused as-is here — Phase 1 may turn out to already be
-  effectively done; verify against P1-1/P1-2's exact DoD before
+  real issue in a fresh environment). Next session: start Phase 1
+  (`db/schema.sql` and `db/init/01-init.sh` already exist from an
+  earlier design session and were reused as-is here — Phase 1 may turn
+  out to already be effectively done; verify against P1-1/P1-2's exact
+  DoD before
   assuming so).
