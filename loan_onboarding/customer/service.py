@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from uuid import UUID
-
 from loan_onboarding.customer import db
 from loan_onboarding.customer.models import Customer, CustomerNotFound
 
@@ -21,7 +19,7 @@ async def get_or_create(applicant_identifier: str) -> Customer:
     return Customer.from_record(record)
 
 
-async def get(customer_id: UUID) -> Customer:
+async def get(customer_id: str) -> Customer:
     record = await db.get(customer_id)
     if record is None:
         raise CustomerNotFound(customer_id)

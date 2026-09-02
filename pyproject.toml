@@ -54,6 +54,7 @@ layers = [
     "bff_customer | bff_backoffice",
     "application",
     "customer | account | document | workflow",
+    "idgen",
 ]
 containers = ["loan_onboarding"]
 
@@ -77,6 +78,21 @@ type = "forbidden"
 source_modules = ["loan_onboarding.account"]
 forbidden_modules = [
     "loan_onboarding.customer",
+    "loan_onboarding.document",
+    "loan_onboarding.workflow",
+    "loan_onboarding.application",
+    "loan_onboarding.bff_customer",
+    "loan_onboarding.bff_backoffice",
+    "loan_onboarding.worker_main",
+]
+
+[[tool.importlinter.contracts]]
+name = "idgen/ never imports anything else in this codebase"
+type = "forbidden"
+source_modules = ["loan_onboarding.idgen"]
+forbidden_modules = [
+    "loan_onboarding.customer",
+    "loan_onboarding.account",
     "loan_onboarding.document",
     "loan_onboarding.workflow",
     "loan_onboarding.application",

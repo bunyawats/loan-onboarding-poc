@@ -1,4 +1,4 @@
-import uuid
+import itertools
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -8,9 +8,16 @@ from loan_onboarding.application import db
 
 pytestmark = pytest.mark.usefixtures("_clean_applications_table")
 
+_application_id_counter = itertools.count()
+_customer_id_counter = itertools.count()
+
 
 def _new_application_id():
-    return uuid.uuid4()
+    return f"app-{next(_application_id_counter):09d}"
+
+
+def _fake_customer_id():
+    return f"cus-{next(_customer_id_counter):09d}"
 
 
 async def _insert_sample(application_id=None, **overrides):
@@ -46,7 +53,6 @@ async def test_insert_defaults_status_and_nullable_columns():
     record = await _insert_sample()
     assert record["status"] == "PENDING_UNDERWRITING"
     assert record["customer_id"] is None
-    assert record["account_id"] is None
 
 
 async def test_insert_is_idempotent_on_retry_same_application_id():
@@ -69,7 +75,7 @@ async def test_insert_is_idempotent_on_retry_same_application_id():
 
 
 async def test_get_returns_none_for_unknown_id():
-    assert await db.get(uuid.uuid4()) is None
+    assert await db.get("app-999999999") is None
 
 
 async def test_get_by_workflow_id():
@@ -116,16 +122,12 @@ async def test_update_decision_preserves_columns_not_passed():
 
     # A later manager decision must not clobber the underwriter columns
     # already written -- only the columns actually passed here change.
-    # account_id must accompany the terminal APPROVED transition --
-    # chk_approved_has_account (db/schema.sql) rejects APPROVED without
-    # one, exactly as designed.
     record = await db.update_decision(
         application_id,
         status="APPROVED",
         manager_name="m1",
         manager_comment="approved",
         manager_decided_at=datetime.now(timezone.utc),
-        account_id=uuid.uuid4(),
     )
 
     assert record["status"] == "APPROVED"
@@ -135,11 +137,10 @@ async def test_update_decision_preserves_columns_not_passed():
     assert record["manager_comment"] == "approved"
 
 
-async def test_update_decision_sets_customer_id_and_account_id_on_provisioning():
+async def test_update_decision_sets_customer_id_on_provisioning():
     application_id = _new_application_id()
     await _insert_sample(application_id=application_id)
-    customer_id = uuid.uuid4()
-    account_id = uuid.uuid4()
+    customer_id = _fake_customer_id()
 
     record = await db.update_decision(
         application_id,
@@ -148,11 +149,9 @@ async def test_update_decision_sets_customer_id_and_account_id_on_provisioning()
         underwriter_comment="ok",
         underwriter_decided_at=datetime.now(timezone.utc),
         customer_id=customer_id,
-        account_id=account_id,
     )
 
     assert record["customer_id"] == customer_id
-    assert record["account_id"] == account_id
 
 
 async def test_update_decision_cancelled_writes_neither_underwriter_nor_manager_columns():
@@ -216,7 +215,7 @@ async def test_list_by_status_filters_and_counts():
     await _insert_sample()
     application_id = _new_application_id()
     await _insert_sample(application_id=application_id)
-    await db.update_decision(application_id, status="APPROVED", account_id=uuid.uuid4())
+    await db.update_decision(application_id, status="APPROVED")
 
     pending = await db.list_by_status("PENDING_UNDERWRITING", limit=10, offset=0)
     approved = await db.list_by_status("APPROVED", limit=10, offset=0)

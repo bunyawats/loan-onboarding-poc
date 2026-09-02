@@ -4,13 +4,13 @@ import asyncpg
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
-from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
 class Account:
-    account_id: UUID
-    customer_id: UUID
+    account_id: str
+    customer_id: str
+    application_id: str
     product_type: str
     opened_at: datetime
     status: Literal["ACTIVE", "CLOSED"]
@@ -20,6 +20,7 @@ class Account:
         return cls(
             account_id=record["account_id"],
             customer_id=record["customer_id"],
+            application_id=record["application_id"],
             product_type=record["product_type"],
             opened_at=record["opened_at"],
             status=record["status"],

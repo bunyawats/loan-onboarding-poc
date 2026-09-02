@@ -1,5 +1,4 @@
 import asyncio
-import uuid
 
 import pytest
 
@@ -67,4 +66,10 @@ async def test_get_returns_customer_by_id():
 
 async def test_get_raises_customer_not_found_for_unknown_id():
     with pytest.raises(CustomerNotFound):
-        await service.get(uuid.uuid4())
+        await service.get("cus-000000000")
+
+
+async def test_get_or_create_customer_id_has_expected_format():
+    customer = await service.get_or_create("frank@example.com")
+    assert customer.customer_id.startswith("cus-")
+    assert len(customer.customer_id.removeprefix("cus-")) == 9

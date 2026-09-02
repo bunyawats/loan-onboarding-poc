@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from uuid import UUID
 
 from temporalio import activity
 
@@ -36,9 +35,9 @@ from loan_onboarding.workflow.workflows import (
 @activity.defn
 async def persist_application(inp: PersistApplicationInput) -> None:
     await application_db.insert(
-        application_id=UUID(inp.application_id),
+        application_id=inp.application_id,
         applicant_identifier=inp.applicant_identifier,
-        customer_id=UUID(inp.customer_id) if inp.customer_id else None,
+        customer_id=inp.customer_id,
         workflow_id=inp.workflow_id,
         product_type=inp.product_type,
         payload=inp.payload,
@@ -55,7 +54,7 @@ async def persist_application(inp: PersistApplicationInput) -> None:
 
 @activity.defn
 async def persist_decision(inp: PersistDecisionInput) -> None:
-    application_id = UUID(inp.application_id)
+    application_id = inp.application_id
     record = await application_db.get(application_id)
     assert record is not None, f"application {application_id} not found"
 
@@ -81,63 +80,51 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
     # actor_role == "customer" (CANCELLED, by the applicant or forced by
     # a native Temporal cancel) touches neither column set.
 
-    customer_id: UUID | None = None
-    account_id: UUID | None = None
+    customer_id: str | None = None
 
     # Idempotency guard: a Temporal retry of an already-completed
     # APPROVED execution must not create a second account, a second
-    # Welcome Letter, or re-promote an already-promoted Government ID --
-    # `account_id IS NOT NULL` is proof this whole block already ran.
-    #
-    # **`account_id` must be persisted to Postgres immediately after
-    # `create_account` succeeds, before the two `document.service` calls
-    # below -- not deferred to the single write at the bottom.** Found by
-    # actually running this against a real stack (P7-3): if either
-    # `document.service` call raises (a real Mayan hiccup, not just a
-    # theoretical one), Temporal retries this whole activity; without an
-    # early write, the retry still sees `account_id IS NULL` and creates
-    # a SECOND account for the same customer+product_type, hitting
-    # `ux_accounts_customer_active_product_type`. Writing it here first
-    # is what actually makes the guard above do what its own comment
-    # already claimed. The tradeoff this accepts (already implied by
-    # CLAUDE.md's "skip the entire provisioning block" wording, just not
-    # correctly implemented before this fix): a retry that finds
-    # `account_id` already set skips the `document.service` calls too,
-    # even if one of them is what failed the first time -- a missing
-    # Welcome Letter is a smaller, manually-recoverable gap than a
-    # duplicated account, and matches this project's own
-    # rare-enough-to-accept-for-a-POC stance elsewhere.
-    if inp.resulting_status == "APPROVED" and record["account_id"] is None:
+    # Welcome Letter, or re-promote an already-promoted Government ID.
+    # account_service.get_by_application_id(application_id) is proof
+    # this whole block already ran -- the committed accounts row (its
+    # application_id column is NOT NULL UNIQUE) is now the durable
+    # idempotency marker on its own; there's no intermediate write back
+    # onto applications the way an account_id column on this table used
+    # to require.
+    existing_account = None
+    if inp.resulting_status == "APPROVED":
+        existing_account = await account_service.get_by_application_id(application_id)
+
+    if inp.resulting_status == "APPROVED" and existing_account is None:
         if record["customer_id"] is not None:
             customer_id = record["customer_id"]
         else:
             customer = await customer_service.get_or_create(record["applicant_identifier"])
             customer_id = customer.customer_id
 
-        account = await account_service.create_account(customer_id, record["product_type"])
-        account_id = account.account_id
+        account = await account_service.create_account(customer_id, record["product_type"], application_id)
 
-        await application_db.update_decision(
-            application_id, status=inp.resulting_status, customer_id=customer_id, account_id=account_id
-        )
-
-        await document_service.promote_government_id_to_customer_photo(
-            str(application_id), str(customer_id)
-        )
+        await document_service.promote_government_id_to_customer_photo(application_id, customer_id)
         await document_service.generate_welcome_letter(
-            str(account_id),
-            str(customer_id),
+            account.account_id,
+            customer_id,
             record["applicant_name"],
             record["product_type"],
             str(record["amount"]),
         )
-    elif record["account_id"] is not None:
-        # A retry that reaches here (resulting_status == "APPROVED", or
-        # any other status if this activity is ever re-run for a
-        # different reason) -- carry the already-resolved ids forward so
-        # the final write below doesn't clobber them with NULL.
+    elif existing_account is not None:
+        # A retry that finds the account already provisioned -- carry
+        # the already-resolved customer_id forward so the final write
+        # below doesn't clobber it with NULL. Both document.service
+        # calls above are skipped entirely, permanently -- see
+        # CLAUDE.md's "Applying without being a customer yet" for the
+        # accepted tradeoff (a missing Welcome Letter is smaller and
+        # more recoverable than a duplicated account).
+        customer_id = existing_account.customer_id
+    elif record["customer_id"] is not None:
+        # Any other status (or a non-APPROVED re-run) -- carry the
+        # already-resolved customer_id forward, same reasoning.
         customer_id = record["customer_id"]
-        account_id = record["account_id"]
 
     await application_db.update_decision(
         application_id,
@@ -149,11 +136,10 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
         manager_comment=manager_comment,
         manager_decided_at=manager_decided_at,
         customer_id=customer_id,
-        account_id=account_id,
         updated_at=inp.decided_at,
     )
 
 
 @activity.defn
 async def persist_resubmit(inp: PersistResubmitInput) -> None:
-    await application_db.update_resubmission(UUID(inp.application_id), inp.payload)
+    await application_db.update_resubmission(inp.application_id, inp.payload)

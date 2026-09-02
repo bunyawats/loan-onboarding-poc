@@ -10,9 +10,9 @@
 -- foreign keys between them, even though they live in one database:
 -- a same-database FK would make it trivial to join across module
 -- boundaries directly, which is exactly the coupling the module split
--- exists to prevent. Treat accounts.customer_id and
--- applications.customer_id/account_id as opaque strings resolved only
--- through the owning module's service.py -- never joined here.
+-- exists to prevent. Treat accounts.customer_id/application_id and
+-- applications.customer_id as opaque strings resolved only through the
+-- owning module's service.py -- never joined here.
 --
 -- Account-on-approval model (see CLAUDE.md "Applying without being a
 -- customer yet"): most applicants aren't customers yet when they
@@ -20,18 +20,29 @@
 -- precondition of filing one. So:
 --   * applications.applicant_identifier is the durable, always-known
 --     identity key (used for the customer-facing visibility filter).
---   * applications.customer_id/account_id are both nullable -- set at
---     submission only if an existing customer is recognized
---     (customer_id), and only ever set for account_id once the
---     application reaches terminal APPROVED.
+--   * applications.customer_id is nullable -- set at submission only
+--     if an existing customer is recognized.
+--   * accounts.application_id (NOT NULL, UNIQUE) points at the
+--     application that produced this account -- there is no
+--     applications.account_id column; see CLAUDE.md's "Applying
+--     without being a customer yet" for why the pointer runs this
+--     direction (it also doubles as persist_decision's provisioning
+--     idempotency guard).
 --   * accounts.customer_id is NOT unique -- one customer can hold many
 --     accounts (one per approved application over time).
+--
+-- Primary keys are short, human-readable, application-assigned strings
+-- (`cus-`/`acc-`/`app-` + a random 9-digit number, minted by the shared
+-- `idgen` module -- see CLAUDE.md's "Data storage") -- NOT
+-- database-generated UUIDs. Every PRIMARY KEY column below is plain
+-- TEXT with no DEFAULT; the inserting module's db.py always supplies
+-- the value, retrying on a PK collision (see each module's db.py).
 
 -- ---------------------------------------------------------------
 -- customers -- owned exclusively by loan_onboarding.customer.db
 -- ---------------------------------------------------------------
 CREATE TABLE customers (
-    customer_id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id             TEXT PRIMARY KEY,
     applicant_identifier    TEXT NOT NULL,
     name                    TEXT,
     email                   TEXT,
@@ -51,8 +62,9 @@ CREATE UNIQUE INDEX ix_customers_applicant_identifier
 -- accounts -- owned exclusively by loan_onboarding.account.db
 -- ---------------------------------------------------------------
 CREATE TABLE accounts (
-    account_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    customer_id     UUID NOT NULL,   -- opaque string, NOT a FK -- see header
+    account_id      TEXT PRIMARY KEY,
+    customer_id     TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
+    application_id  TEXT NOT NULL,   -- opaque string, NOT a FK -- the application that produced this account
     product_type    TEXT NOT NULL
                         CHECK (product_type IN ('personal_loan', 'auto_loan', 'mortgage')),
     opened_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -67,6 +79,15 @@ CREATE TABLE accounts (
 -- "this customer's other accounts" lookup.
 CREATE INDEX ix_accounts_customer_id
     ON accounts (customer_id);
+
+-- An account can be produced by at most one application, and this is
+-- also persist_decision's idempotency guard: the INSERT into accounts,
+-- once committed, IS the durable "already provisioned" marker for a
+-- Temporal retry (account.service.get_by_application_id checks this
+-- before provisioning again) -- see CLAUDE.md's "Applying without
+-- being a customer yet".
+CREATE UNIQUE INDEX ux_accounts_application_id
+    ON accounts (application_id);
 
 -- The actual business rule: a customer's ACTIVE accounts must never
 -- share a product_type (two closed personal_loan accounts are fine;
@@ -84,7 +105,7 @@ CREATE UNIQUE INDEX ux_accounts_customer_active_product_type
 -- applications -- owned exclusively by loan_onboarding.application.db
 -- ---------------------------------------------------------------
 CREATE TABLE applications (
-    application_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    application_id          TEXT PRIMARY KEY,
 
     -- The durable identity key -- always known at submission time,
     -- whether or not the applicant is a recognized customer yet. This
@@ -93,19 +114,15 @@ CREATE TABLE applications (
     -- work identically for a first-time applicant and a returning one.
     applicant_identifier      TEXT NOT NULL,
 
-    -- Opaque references, NOT FKs -- see header. Both nullable:
-    --   customer_id  -- set at submission IF an existing customer is
-    --                   recognized via customer.service.find_by_identifier;
-    --                   otherwise NULL until (and unless) this
-    --                   application is later approved.
-    --   account_id   -- NULL for the entire non-terminal lifetime of
-    --                   an application; set exactly once, when
-    --                   persist_decision provisions a new account on
-    --                   a terminal APPROVED transition.
-    -- Resolved only via customer.service.get()/account.service.get()
-    -- when a name/detail is needed -- never joined here.
-    customer_id               UUID,
-    account_id                UUID,
+    -- Opaque reference, NOT a FK -- see header. Nullable: set at
+    -- submission IF an existing customer is recognized via
+    -- customer.service.find_by_identifier; otherwise NULL until (and
+    -- unless) this application is later approved. Resolved only via
+    -- customer.service.get() when a name/detail is needed -- never
+    -- joined here. There is no account_id column here -- see
+    -- accounts.application_id above for why the pointer runs the other
+    -- direction.
+    customer_id               TEXT,
 
     -- Nullable: unset until persist_application (the workflow's first
     -- activity) commits. **Never cleared afterward by any code in this
@@ -155,14 +172,14 @@ CREATE TABLE applications (
     manager_decided_at         TIMESTAMPTZ,
 
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 
-    -- account_id must be set once (and only once) an application
-    -- reaches terminal APPROVED -- catches a persist_decision bug
-    -- (e.g. the idempotency check in CLAUDE.md's provisioning section
-    -- being skipped) at the database level rather than silently.
-    CONSTRAINT chk_approved_has_account
-        CHECK (status <> 'APPROVED' OR account_id IS NOT NULL)
+    -- No chk_approved_has_account CHECK anymore -- that invariant
+    -- ("an APPROVED application has a matching account") now spans two
+    -- tables (applications.status, accounts.application_id) once the
+    -- account pointer moved to accounts, and can no longer be expressed
+    -- as a single-table CHECK. This is a real, accepted reduction in
+    -- the DB-level safety net -- see CLAUDE.md's "Known gaps".
 );
 
 -- list_for_applicant(applicant_identifier, page, ...) -- the

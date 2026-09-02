@@ -14,7 +14,6 @@ import time
 import uuid
 from decimal import Decimal
 from typing import Any, Callable, Optional
-from uuid import UUID
 
 import asyncpg
 from temporalio.client import Client
@@ -30,6 +29,7 @@ from loan_onboarding.application.models import (
 )
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
+from loan_onboarding.idgen import service as idgen_service
 from loan_onboarding.workflow import service as workflow_service
 
 # start_workflow()/handle.signal() only confirm Temporal *accepted* the
@@ -59,7 +59,7 @@ async def _get_temporal_client() -> Client:
 
 
 async def _wait_until(
-    application_id: UUID, predicate: Callable[[asyncpg.Record], bool]
+    application_id: str, predicate: Callable[[asyncpg.Record], bool]
 ) -> Optional[asyncpg.Record]:
     """Poll `application/db.py`'s own read until `predicate(record)` is
     true or we time out. Always returns whatever the last-read record
@@ -83,7 +83,7 @@ async def create_application(
     applicant_email: str,
     applicant_phone: str,
     amount: Decimal,
-    application_id: Optional[UUID] = None,
+    application_id: Optional[str] = None,
 ) -> ApplicationSubmissionResult:
     """No `customer_id`/`account_id` params -- neither is guaranteed to
     exist yet (CLAUDE.md's "Applying without being a customer yet").
@@ -92,15 +92,15 @@ async def create_application(
     parameter (corrected from an earlier draft that gave this function
     no way to accept a pre-minted id, which conflicted with
     `bff_customer`'s document-upload-before-submit flow). Generates a
-    fresh one if not given."""
-    application_id = application_id or uuid.uuid4()
+    fresh one via `idgen` if not given."""
+    application_id = application_id or idgen_service.generate_id("app", 9)
 
     validated_payload = schemas.validate_payload(product_type, payload)
 
     customer = await customer_service.find_by_identifier(applicant_identifier)
     customer_id = customer.customer_id if customer is not None else None
 
-    missing = await document_service.check_completeness(str(application_id), product_type)
+    missing = await document_service.check_completeness(application_id, product_type)
     if missing:
         return ApplicationSubmissionResult(
             application_id=application_id, application=None, missing_categories=missing
@@ -109,7 +109,7 @@ async def create_application(
     client = await _get_temporal_client()
     await workflow_service.start_workflow(
         client,
-        str(application_id),
+        application_id,
         product_type,
         validated_payload,
         float(amount),
@@ -117,7 +117,7 @@ async def create_application(
         applicant_name,
         applicant_email,
         applicant_phone,
-        str(customer_id) if customer_id is not None else None,
+        customer_id,
     )
 
     # start_workflow only confirms Temporal accepted the start -- wait
@@ -128,7 +128,7 @@ async def create_application(
     return ApplicationSubmissionResult(application_id=application_id, application=application, missing_categories=[])
 
 
-async def resubmit_application(application_id: UUID, payload: dict[str, Any]) -> ApplicationSubmissionResult:
+async def resubmit_application(application_id: str, payload: dict[str, Any]) -> ApplicationSubmissionResult:
     """Same document gate re-check as `create_application`, then
     `workflow.service.signal_resubmit()` against the *existing*
     `workflow_id` -- the same running execution, still waiting from
@@ -139,7 +139,7 @@ async def resubmit_application(application_id: UUID, payload: dict[str, Any]) ->
 
     validated_payload = schemas.validate_payload(record["product_type"], payload)
 
-    missing = await document_service.check_completeness(str(application_id), record["product_type"])
+    missing = await document_service.check_completeness(application_id, record["product_type"])
     if missing:
         return ApplicationSubmissionResult(
             application_id=application_id, application=None, missing_categories=missing
@@ -153,7 +153,7 @@ async def resubmit_application(application_id: UUID, payload: dict[str, Any]) ->
     return ApplicationSubmissionResult(application_id=application_id, application=application, missing_categories=[])
 
 
-async def check_decision_allowed(application_id: UUID, decision: str) -> list[str]:
+async def check_decision_allowed(application_id: str, decision: str) -> list[str]:
     """Blocking-reason strings, `[]` if `decision` may proceed -- a
     no-op unless `decision == "APPROVE"` (PRD §9.2's
     one-active-account-per-product-type rule; Reject/RequestMoreInfo/
@@ -223,7 +223,7 @@ def _lookup_cached_total(query_id: Optional[str], filter_key: dict[str, str]) ->
     return total
 
 
-async def get(application_id: UUID) -> Application:
+async def get(application_id: str) -> Application:
     record = await application_db.get(application_id)
     if record is None:
         raise ApplicationNotFound(application_id)
@@ -277,7 +277,7 @@ async def list_by_status(
     return ApplicationPage(items=items, total=total, page=page, page_size=page_size, query_id=query_id)
 
 
-async def wait_for_status_change(application_id: UUID, previous_status: str) -> Application:
+async def wait_for_status_change(application_id: str, previous_status: str) -> Application:
     """Poll until `status` no longer equals `previous_status` or we time
     out (same bounded `_wait_until()` this module already uses for
     `create_application`/`resubmit_application`) -- `bff_backoffice`

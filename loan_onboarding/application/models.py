@@ -4,17 +4,15 @@ from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 
 
 @dataclass(frozen=True, slots=True)
 class Application:
-    application_id: UUID
+    application_id: str
     applicant_identifier: str
-    customer_id: UUID | None
-    account_id: UUID | None
+    customer_id: str | None
     workflow_id: str | None
     product_type: str
     payload: dict[str, Any]
@@ -53,7 +51,7 @@ class ApplicationSubmissionResult:
     one can still learn what id its just-checked documents should be
     tagged under, then retry once they're uploaded."""
 
-    application_id: UUID
+    application_id: str
     application: Application | None
     missing_categories: list[str]
 

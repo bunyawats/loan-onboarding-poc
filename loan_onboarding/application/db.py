@@ -18,7 +18,6 @@ import os
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 
@@ -45,9 +44,9 @@ async def _get_pool() -> asyncpg.Pool:
 
 
 async def insert(
-    application_id: UUID,
+    application_id: str,
     applicant_identifier: str,
-    customer_id: UUID | None,
+    customer_id: str | None,
     workflow_id: str,
     product_type: str,
     payload: dict[str, Any],
@@ -67,7 +66,15 @@ async def insert(
     key would otherwise surface as an unhandled
     `UniqueViolationError` on a retried-but-already-succeeded first
     attempt, same idempotency concern `review-approval-temporal`'s own
-    `persist_request` activity already handles this exact way."""
+    `persist_request` activity already handles this exact way.
+
+    `application_id` is caller-supplied (application/service.py's
+    create_application generates it via idgen, not a database default),
+    so there's no PK-collision retry loop here the way customer/db.py
+    and account/db.py need -- a collision on this id would mean two
+    different workflow executions somehow picked the same id, which
+    `create_application`'s own idgen call already handles at its own
+    generation site, not here."""
     pool = await _get_pool()
     record = await pool.fetchrow(
         """
@@ -101,7 +108,7 @@ async def insert(
 
 
 async def update_decision(
-    application_id: UUID,
+    application_id: str,
     *,
     status: str,
     underwriter_name: str | None = None,
@@ -110,8 +117,7 @@ async def update_decision(
     manager_name: str | None = None,
     manager_comment: str | None = None,
     manager_decided_at: datetime | None = None,
-    customer_id: UUID | None = None,
-    account_id: UUID | None = None,
+    customer_id: str | None = None,
     updated_at: datetime | None = None,
 ) -> asyncpg.Record:
     """Generic decision-outcome writer. Every column here is optional
@@ -121,11 +127,14 @@ async def update_decision(
     persisted (e.g. a CANCELLED decision passes neither
     underwriter_*/manager_* set; an underwriter REQUEST_MORE_INFO
     passes only the underwriter_* set; a terminal APPROVED decision
-    additionally passes `customer_id`/`account_id` from the
-    provisioning step). `updated_at` defaults to `now()` but can be
-    overridden (native-Temporal-cancel path) to reflect the moment
-    Temporal actually delivered the cancellation rather than whenever
-    the (possibly retried) activity happens to execute."""
+    additionally passes `customer_id` from the provisioning step). No
+    `account_id` parameter -- there is no such column on `applications`
+    anymore; `accounts.application_id` is the pointer now (see
+    CLAUDE.md's "Applying without being a customer yet"). `updated_at`
+    defaults to `now()` but can be overridden (native-Temporal-cancel
+    path) to reflect the moment Temporal actually delivered the
+    cancellation rather than whenever the (possibly retried) activity
+    happens to execute."""
     pool = await _get_pool()
     return await pool.fetchrow(
         """
@@ -138,8 +147,7 @@ async def update_decision(
             manager_comment = COALESCE($7, manager_comment),
             manager_decided_at = COALESCE($8, manager_decided_at),
             customer_id = COALESCE($9, customer_id),
-            account_id = COALESCE($10, account_id),
-            updated_at = COALESCE($11, now())
+            updated_at = COALESCE($10, now())
         WHERE application_id = $1
         RETURNING *
         """,
@@ -152,12 +160,11 @@ async def update_decision(
         manager_comment,
         manager_decided_at,
         customer_id,
-        account_id,
         updated_at,
     )
 
 
-async def update_resubmission(application_id: UUID, payload: dict[str, Any]) -> asyncpg.Record:
+async def update_resubmission(application_id: str, payload: dict[str, Any]) -> asyncpg.Record:
     pool = await _get_pool()
     return await pool.fetchrow(
         """
@@ -171,7 +178,7 @@ async def update_resubmission(application_id: UUID, payload: dict[str, Any]) -> 
     )
 
 
-async def get(application_id: UUID) -> asyncpg.Record | None:
+async def get(application_id: str) -> asyncpg.Record | None:
     pool = await _get_pool()
     return await pool.fetchrow(
         "SELECT * FROM applications WHERE application_id = $1",

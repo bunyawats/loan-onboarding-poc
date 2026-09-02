@@ -6,7 +6,7 @@ db-backed test in this package) since resolving an existing customer_id
 and the active-account-per-product-type rule are exactly the
 integration points worth exercising for real."""
 
-import uuid
+import itertools
 from decimal import Decimal
 
 import pytest
@@ -16,6 +16,12 @@ from loan_onboarding.account import db as account_db
 from loan_onboarding.application import db as application_db, service
 from loan_onboarding.application.models import ApplicationNotFound
 from loan_onboarding.customer import db as customer_db
+
+_application_id_counter = itertools.count()
+
+
+def _fake_application_id() -> str:
+    return f"app-{next(_application_id_counter):09d}"
 
 
 @pytest.fixture(autouse=True)
@@ -125,9 +131,9 @@ async def test_complete_application_starts_workflow_and_waits_for_persisted_row(
         applicant_identifier, applicant_name, applicant_email, applicant_phone, customer_id,
     ):
         await application_db.insert(
-            application_id=uuid.UUID(application_id),
+            application_id=application_id,
             applicant_identifier=applicant_identifier,
-            customer_id=uuid.UUID(customer_id) if customer_id else None,
+            customer_id=customer_id,
             workflow_id=f"loan-application-{application_id}",
             product_type=product_type,
             payload=payload,
@@ -155,7 +161,6 @@ async def test_complete_application_starts_workflow_and_waits_for_persisted_row(
     assert result.application is not None
     assert result.application.status == "PENDING_UNDERWRITING"
     assert result.application.customer_id is None
-    assert result.application.account_id is None
     assert len(start_workflow_calls) == 1
 
 
@@ -173,7 +178,7 @@ async def test_resolves_existing_customer_id_and_passes_it_to_start_workflow(mon
         amount=Decimal("10000"),
     )
 
-    assert start_workflow_calls[0]["customer_id"] == str(existing["customer_id"])
+    assert start_workflow_calls[0]["customer_id"] == existing["customer_id"]
 
 
 async def test_new_applicant_passes_none_customer_id(monkeypatch, start_workflow_calls):
@@ -194,7 +199,7 @@ async def test_new_applicant_passes_none_customer_id(monkeypatch, start_workflow
 
 async def test_uses_provided_application_id_when_given(monkeypatch, start_workflow_calls):
     _mock_completeness(monkeypatch, missing=[])
-    provided_id = uuid.uuid4()
+    provided_id = _fake_application_id()
 
     result = await service.create_application(
         applicant_identifier="alice@example.com",
@@ -208,7 +213,7 @@ async def test_uses_provided_application_id_when_given(monkeypatch, start_workfl
     )
 
     assert result.application_id == provided_id
-    assert start_workflow_calls[0]["application_id"] == str(provided_id)
+    assert start_workflow_calls[0]["application_id"] == provided_id
 
 
 async def test_generates_application_id_when_not_given(monkeypatch, start_workflow_calls):
@@ -224,7 +229,7 @@ async def test_generates_application_id_when_not_given(monkeypatch, start_workfl
         amount=Decimal("10000"),
     )
 
-    assert isinstance(result.application_id, uuid.UUID)
+    assert result.application_id.startswith("app-")
 
 
 async def test_invalid_payload_raises_and_never_starts_workflow(monkeypatch, start_workflow_calls):
@@ -272,8 +277,8 @@ async def test_wait_until_timeout_returns_none_application_even_though_workflow_
 # resubmit_application
 # ----------------------------------------------------------------------
 
-async def _seed_application(**overrides) -> uuid.UUID:
-    application_id = overrides.pop("application_id", uuid.uuid4())
+async def _seed_application(**overrides) -> str:
+    application_id = overrides.pop("application_id", _fake_application_id())
     defaults = dict(
         application_id=application_id,
         applicant_identifier="alice@example.com",
@@ -293,7 +298,7 @@ async def _seed_application(**overrides) -> uuid.UUID:
 
 async def test_resubmit_raises_application_not_found_for_unknown_id():
     with pytest.raises(ApplicationNotFound):
-        await service.resubmit_application(uuid.uuid4(), _personal_loan_payload())
+        await service.resubmit_application(_fake_application_id(), _personal_loan_payload())
 
 
 async def test_resubmit_missing_documents_returns_missing_categories_without_signaling(monkeypatch):
@@ -385,10 +390,10 @@ async def test_check_decision_allowed_short_circuits_when_customer_id_null(monke
 async def test_check_decision_allowed_blocks_when_active_account_of_same_type_exists():
     customer = await customer_db.get_or_create("conflict@example.com")
     customer_id = customer["customer_id"]
-    await account_db.create(customer_id, "personal_loan")
     application_id = await _seed_application(
         applicant_identifier="conflict@example.com", customer_id=customer_id, product_type="personal_loan"
     )
+    await account_db.create(customer_id, "personal_loan", _fake_application_id())
 
     result = await service.check_decision_allowed(application_id, "APPROVE")
     assert result != []
@@ -398,7 +403,7 @@ async def test_check_decision_allowed_blocks_when_active_account_of_same_type_ex
 async def test_check_decision_allowed_permits_when_only_closed_account_of_same_type_exists():
     customer = await customer_db.get_or_create("closed-ok@example.com")
     customer_id = customer["customer_id"]
-    account = await account_db.create(customer_id, "personal_loan")
+    account = await account_db.create(customer_id, "personal_loan", _fake_application_id())
     acct_pool = await account_db._get_pool()
     await acct_pool.execute("UPDATE accounts SET status = 'CLOSED' WHERE account_id = $1", account["account_id"])
 
@@ -497,7 +502,7 @@ async def test_list_by_status_pagination_and_filtering():
     for _ in range(3):
         await _seed_application()
     approved_id = await _seed_application()
-    await application_db.update_decision(approved_id, status="APPROVED", account_id=uuid.uuid4())
+    await application_db.update_decision(approved_id, status="APPROVED")
 
     pending = await service.list_by_status("PENDING_UNDERWRITING", page=1, page_size=20)
     approved = await service.list_by_status("APPROVED", page=1, page_size=20)
@@ -527,4 +532,4 @@ async def test_get_returns_application():
 
 async def test_get_raises_application_not_found_for_unknown_id():
     with pytest.raises(ApplicationNotFound):
-        await service.get(uuid.uuid4())
+        await service.get(_fake_application_id())

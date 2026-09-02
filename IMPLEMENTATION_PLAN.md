@@ -124,12 +124,34 @@ for.
 **Phase 13 (Human-readable primary keys + account-to-application
 direction flip) added after Phase 12 closed** — a design change
 requested and confirmed by the user, not part of the original build-out.
-`CLAUDE.md` and `PRD.md` have already been updated to describe the
-target design (every primary key moves from a Postgres `UUID` to an
-application-assigned `cus-`/`acc-`/`app-` + 9-digit string via a new
-shared `idgen/` leaf module; `accounts.application_id` replaces
-`applications.account_id`) — **none of Phase 13's own tasks (P13-1
-through P13-7) have been implemented yet.** Start here:
+`CLAUDE.md` and `PRD.md` were updated first to describe the target
+design, then **P13-1 through P13-6 are now done**: the new `idgen/` leaf
+module exists and is wired into `pyproject.toml`'s import-linter
+contracts; `db/schema.sql` moved every primary key to `TEXT` with no
+default, added `accounts.application_id` (`NOT NULL UNIQUE`), dropped
+`applications.account_id` and `chk_approved_has_account`; `customer/`,
+`account/`, and `application/` (`models.py`/`db.py`/`service.py`/
+`activities.py`) all moved off `UUID` onto plain `str` ids with
+insert-time PK-collision retry in `customer/db.py`/`account/db.py`;
+`bff_backoffice/routes.py` and `bff_customer/routes.py` dropped every
+`UUID`/`uuid.uuid4()` use for these three entity types. Full unit suite
+(`pytest tests/unit`, 191 tests) and `lint-imports` both pass against a
+real local Postgres with the new schema applied. **Verified live, not
+just via unit tests**: rebuilt the `app`/`worker-workflow`/
+`worker-activity` images and walked a full personal_loan application
+through a real browser — customer wizard submission (id minted as
+`app-628882567`), all four document uploads, underwriter Keycloak login
+and Approve — then confirmed via `psql` that `customers`/`accounts`/
+`applications` all used the new prefixed-id format and
+`accounts.application_id` correctly pointed back at the approving
+application. **What's left is P13-7 only**: a full `docker compose
+down -v && docker compose up -d --build` from genuinely empty volumes,
+the complete standard live-verification sweep (all three product
+types, escalation, reject, more-info-then-resubmit, cancel), and the
+commit/push/confirm-CI-green step — none of that has been done yet,
+and the down -v / push steps are disruptive/visible enough that they
+should be confirmed with whoever picks this up rather than run
+unilaterally. Start here:
 [Phase 13](#phase-13--human-readable-primary-keys--account-to-application-direction-flip).
 
 *(A session should overwrite this line, not append to it — it always
@@ -1996,7 +2018,7 @@ P13-4 below a required correctness mechanism, not defensive icing —
 don't skip it as "unlikely to matter for a POC" the way some other
 gaps in this file are deliberately left unaddressed.
 
-- [ ] **P13-1** — New leaf module `loan_onboarding/idgen/service.py`:
+- [x] **P13-1** — New leaf module `loan_onboarding/idgen/service.py`:
       `generate_id(prefix: str, length: int) -> str`, `secrets.choice`
       over `0123456789`. Add `idgen` to `pyproject.toml`'s
       `[tool.importlinter]` layers contract (leaf layer, alongside
@@ -2012,7 +2034,7 @@ gaps in this file are deliberately left unaddressed.
       DoD: unit tests confirm prefix/length/digits-only alphabet, plus a
       uniqueness sanity check across a large sample (statistical, not a
       proof). `lint-imports` passes with the new contracts in place.
-- [ ] **P13-2** — `db/schema.sql`: drop every `UUID PRIMARY KEY DEFAULT
+- [x] **P13-2** — `db/schema.sql`: drop every `UUID PRIMARY KEY DEFAULT
       gen_random_uuid()` in favor of `TEXT PRIMARY KEY` (no default) for
       `customers.customer_id`, `accounts.account_id`,
       `applications.application_id`; change `accounts.customer_id` and
@@ -2029,7 +2051,7 @@ gaps in this file are deliberately left unaddressed.
       the new schema cleanly from empty; a manual `psql \d accounts` /
       `\d applications` confirms the new column shapes and the dropped
       constraint.
-- [ ] **P13-3** — `customer/` and `account/`: `models.py` field types
+- [x] **P13-3** — `customer/` and `account/`: `models.py` field types
       `UUID` → `str` (plus `Account.application_id: str`, new field);
       `db.py`'s `get_or_create`/`create` generate an id via
       `idgen.service.generate_id(prefix, 9)` before each insert attempt,
@@ -2049,7 +2071,7 @@ gaps in this file are deliberately left unaddressed.
       fabrication, use real ids or literal test strings for "unknown id"
       cases) and passing against a real Postgres, per this project's
       existing testing convention for these two modules.
-- [ ] **P13-4** — `application/`: `models.py` drops `Application.account_id`
+- [x] **P13-4** — `application/`: `models.py` drops `Application.account_id`
       entirely, `application_id`/`customer_id` become `str`. `db.py`'s
       `insert` takes a pre-generated `application_id`; `update_decision`
       drops its `account_id` parameter and column reference entirely;
@@ -2080,7 +2102,7 @@ gaps in this file are deliberately left unaddressed.
       proof the new `get_by_application_id`-based guard preserves the
       exact correctness property the old column-based one had, not just
       that the code compiles.
-- [ ] **P13-5** — `bff_backoffice/routes.py` and `bff_customer/routes.py`:
+- [x] **P13-5** — `bff_backoffice/routes.py` and `bff_customer/routes.py`:
       every `application_id: UUID` route/function parameter → `str`;
       drop now-unused `from uuid import UUID` imports.
       `bff_backoffice`'s `_application_detail_context` replaces its
@@ -2099,7 +2121,7 @@ gaps in this file are deliberately left unaddressed.
       (confirm the backoffice review dialog renders the resulting
       account via the new reverse lookup), and confirm the customer
       detail page still resolves correctly by its new-format id.
-- [ ] **P13-6** — Full test-suite pass: every remaining `uuid.uuid4()`
+- [x] **P13-6** — Full test-suite pass: every remaining `uuid.uuid4()`
       fabrication for these three entity types across
       `tests/unit/account/`, `tests/unit/customer/`,
       `tests/unit/application/` (`test_db.py`, `test_service.py`,
@@ -2132,6 +2154,26 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — P13-1 through P13-6 done (idgen module,
+  db/schema.sql's TEXT-id + accounts.application_id migration,
+  customer/account/application's models/db/service/activities moved off
+  UUID onto application-assigned string ids, both BFFs' routes updated).
+  Full unit suite (191 tests) and lint-imports pass against a real
+  Postgres with the migrated schema applied (schema was reset via
+  `DROP TABLE ... CASCADE` + reapply on the existing `db` container, not
+  a full `docker compose down -v`, to avoid wiping Mayan/Keycloak/
+  Temporal volumes just to test app-table changes). Rebuilt `app`/
+  `worker-workflow`/`worker-activity` images and verified live via a
+  real browser: full personal_loan submission through the customer
+  wizard (id minted as `app-628882567`), all four document uploads,
+  underwriter Keycloak login + Approve, confirmed via `psql` that
+  `customers`/`accounts`/`applications` all show the new prefixed-id
+  format and `accounts.application_id` correctly points at the
+  approving application. **P13-7 (full `down -v` rebuild, the complete
+  three-product-type verification sweep, and commit/push/confirm-CI)
+  not done this session** — left for explicit confirmation given how
+  disruptive/visible those steps are.
 
 - **2026-09-02** — Confirmed Phase 12's CI run
   (`gh run list --branch main`, run id `33611609674`, commit `a3d4b2c`)

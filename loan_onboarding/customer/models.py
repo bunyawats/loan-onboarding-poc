@@ -3,12 +3,11 @@ from __future__ import annotations
 import asyncpg
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
 class Customer:
-    customer_id: UUID
+    customer_id: str
     applicant_identifier: str
     name: str | None
     email: str | None

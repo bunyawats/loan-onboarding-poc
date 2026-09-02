@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import os
 from typing import Any, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
@@ -200,23 +199,18 @@ def _bulk_result_response(
     return HTMLResponse(dialog_html + list_html + toolbar_html)
 
 
-async def _application_detail_context(application_id: UUID, role: str, user: dict[str, Any]) -> dict[str, Any]:
+async def _application_detail_context(application_id: str, role: str, user: dict[str, Any]) -> dict[str, Any]:
     application = await application_service.get(application_id)
 
     customer = None
-    account = None
     if application.customer_id is not None:
         try:
             customer = await customer_service.get(application.customer_id)
         except Exception:
             customer = None
-    if application.account_id is not None:
-        try:
-            account = await account_service.get(application.account_id)
-        except Exception:
-            account = None
+    account = await account_service.get_by_application_id(application_id)
 
-    documents = await document_service.list_documents(str(application_id))
+    documents = await document_service.list_documents(application_id)
     permissions = await _user_permissions(user)
     return {
         "application": application,
@@ -364,7 +358,7 @@ async def _staff_bulk_select(
     # repeated form fields -- htmx's hx-vals hands an array straight to
     # FormData.set(), which stringifies via Array.prototype.toString()
     # (comma-joined), not one field per element (htmx4 skill). ids are
-    # UUIDs, never containing a literal comma, so splitting is safe.
+    # app-<digits> ids, never containing a literal comma, so splitting is safe.
     ids = [i for i in application_ids.split(",") if i]
     # Gated by role only, not a permission check -- marking a row
     # "selected" has no side effect beyond what's rendered back to this
@@ -406,7 +400,7 @@ async def manager_bulk_select(
 
 # --------------------------------------------------------- detail dialog ----
 
-async def _staff_detail(request: Request, application_id: UUID, role: str, user: dict[str, Any]) -> HTMLResponse:
+async def _staff_detail(request: Request, application_id: str, role: str, user: dict[str, Any]) -> HTMLResponse:
     try:
         ctx = await _application_detail_context(application_id, role, user)
     except ApplicationNotFound:
@@ -416,19 +410,19 @@ async def _staff_detail(request: Request, application_id: UUID, role: str, user:
 
 @router.get("/underwriter/{application_id}/detail", response_class=HTMLResponse)
 async def underwriter_detail(
-    request: Request, application_id: UUID, user: dict = Depends(_role_dependency("underwriter"))
+    request: Request, application_id: str, user: dict = Depends(_role_dependency("underwriter"))
 ):
     return await _staff_detail(request, application_id, "underwriter", user)
 
 
 @router.get("/manager/{application_id}/detail", response_class=HTMLResponse)
-async def manager_detail(request: Request, application_id: UUID, user: dict = Depends(_role_dependency("manager"))):
+async def manager_detail(request: Request, application_id: str, user: dict = Depends(_role_dependency("manager"))):
     return await _staff_detail(request, application_id, "manager", user)
 
 
-async def _document_preview(application_id: UUID, document_id: int) -> StreamingResponse:
+async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
     try:
-        stream = await document_service.preview(str(application_id), document_id)
+        stream = await document_service.preview(application_id, document_id)
     except document_service.DocumentNotFound:
         raise HTTPException(status_code=404)
 
@@ -448,14 +442,14 @@ async def _document_preview(application_id: UUID, document_id: int) -> Streaming
 
 @router.get("/underwriter/{application_id}/documents/{document_id}/preview")
 async def underwriter_document_preview(
-    application_id: UUID, document_id: int, user: dict = Depends(_role_dependency("underwriter"))
+    application_id: str, document_id: int, user: dict = Depends(_role_dependency("underwriter"))
 ):
     return await _document_preview(application_id, document_id)
 
 
 @router.get("/manager/{application_id}/documents/{document_id}/preview")
 async def manager_document_preview(
-    application_id: UUID, document_id: int, user: dict = Depends(_role_dependency("manager"))
+    application_id: str, document_id: int, user: dict = Depends(_role_dependency("manager"))
 ):
     return await _document_preview(application_id, document_id)
 
@@ -463,7 +457,7 @@ async def manager_document_preview(
 # --------------------------------------------------------- single decision ----
 
 async def _staff_decision(
-    request: Request, application_id: UUID, role: str, decision: str, comment: str, user: dict[str, Any]
+    request: Request, application_id: str, role: str, decision: str, comment: str, user: dict[str, Any]
 ) -> HTMLResponse:
     if decision not in ROLE_DECISIONS.get(role, ()):
         raise HTTPException(status_code=400, detail=f"invalid decision {decision!r} for role {role!r}")
@@ -493,7 +487,7 @@ async def _staff_decision(
 @router.post("/underwriter/{application_id}/decision", response_class=HTMLResponse)
 async def underwriter_decision(
     request: Request,
-    application_id: UUID,
+    application_id: str,
     decision: str = Form(...),
     comment: str = Form(""),
     user: dict = Depends(_session_user_dependency),
@@ -504,7 +498,7 @@ async def underwriter_decision(
 @router.post("/manager/{application_id}/decision", response_class=HTMLResponse)
 async def manager_decision(
     request: Request,
-    application_id: UUID,
+    application_id: str,
     decision: str = Form(...),
     comment: str = Form(""),
     user: dict = Depends(_session_user_dependency),
@@ -525,7 +519,7 @@ async def _bulk_decision_form(
     items = []
     for raw_id in ids:
         try:
-            items.append(await application_service.get(UUID(raw_id)))
+            items.append(await application_service.get(raw_id))
         except (ApplicationNotFound, ValueError):
             continue  # stale/foreign id -- dropped from the preview, same as the reference project
 
@@ -579,7 +573,7 @@ async def _bulk_decision_execute(
     applications = []
     for raw_id in ids:
         try:
-            applications.append(await application_service.get(UUID(raw_id)))
+            applications.append(await application_service.get(raw_id))
         except (ApplicationNotFound, ValueError):
             continue
 

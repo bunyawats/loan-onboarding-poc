@@ -20,10 +20,8 @@ from __future__ import annotations
 
 import os
 import re
-import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Optional
-from uuid import UUID
 
 import pydantic
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -37,6 +35,7 @@ from loan_onboarding.application.models import Application, ApplicationNotFound
 from loan_onboarding.bff_customer import identity
 from loan_onboarding.document import service as document_service
 from loan_onboarding.document.models import UploadedFile
+from loan_onboarding.idgen import service as idgen_service
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.workflows import TERMINAL_STATUSES
 
@@ -200,7 +199,7 @@ async def my_applications(
     )
 
 
-async def _owned_application(application_id: UUID, applicant_identifier: str) -> Application:
+async def _owned_application(application_id: str, applicant_identifier: str) -> Application:
     """The customer-facing visibility invariant (PRD §7.1, §10 success
     criterion 2): filters by `applicant_identifier`, not by whether the
     id merely parses -- a customer who guesses another applicant's
@@ -222,7 +221,7 @@ async def _detail_context(application: Application) -> dict[str, Any]:
     still take an upload" logic in one place rather than copy-pasted at
     each call site."""
     application_id = application.application_id
-    documents = await document_service.list_documents(str(application_id))
+    documents = await document_service.list_documents(application_id)
     required = document_service.REQUIRED_CATEGORIES[application.product_type]
     by_category = {category: [d for d in documents if d.category == category] for category in required}
     categories = None
@@ -252,7 +251,7 @@ async def _detail_context(application: Application) -> dict[str, Any]:
 
 @router.get("/applications/{application_id}", response_class=HTMLResponse)
 async def application_detail(
-    request: Request, application_id: UUID, applicant_identifier: str = Depends(_require_applicant)
+    request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     application = await _owned_application(application_id, applicant_identifier)
     return templates.TemplateResponse(request, "application_detail.html", await _detail_context(application))
@@ -260,7 +259,7 @@ async def application_detail(
 
 @router.post("/applications/{application_id}/cancel", response_class=RedirectResponse)
 async def cancel_application(
-    request: Request, application_id: UUID, applicant_identifier: str = Depends(_require_applicant)
+    request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     application = await _owned_application(application_id, applicant_identifier)
     if application.status in TERMINAL_STATUSES:
@@ -275,7 +274,7 @@ async def cancel_application(
 
 @router.post("/applications/{application_id}/resubmit", response_class=HTMLResponse)
 async def resubmit_application(
-    request: Request, application_id: UUID, applicant_identifier: str = Depends(_require_applicant)
+    request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     application = await _owned_application(application_id, applicant_identifier)
     if application.status != "MORE_INFO_REQUESTED":
@@ -306,7 +305,7 @@ async def resubmit_application(
 @router.post("/applications/{application_id}/documents/upload", response_class=HTMLResponse)
 async def upload_more_info_document(
     request: Request,
-    application_id: UUID,
+    application_id: str,
     category: str = Form(...),
     file: UploadFile = File(...),
     applicant_identifier: str = Depends(_require_applicant),
@@ -319,9 +318,9 @@ async def upload_more_info_document(
         raise HTTPException(status_code=400, detail=f"unknown category {category!r} for this product type")
 
     content = await file.read()
-    await document_service.upload(applicant_identifier, str(application_id), category, UploadedFile(file.filename, content))
+    await document_service.upload(applicant_identifier, application_id, category, UploadedFile(file.filename, content))
 
-    documents = await document_service.list_documents(str(application_id))
+    documents = await document_service.list_documents(application_id)
     category_documents = [d for d in documents if d.category == category]
     return templates.TemplateResponse(
         request,
@@ -334,9 +333,9 @@ async def upload_more_info_document(
     )
 
 
-async def _document_preview(application_id: UUID, document_id: int) -> StreamingResponse:
+async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
     try:
-        stream = await document_service.preview(str(application_id), document_id)
+        stream = await document_service.preview(application_id, document_id)
     except document_service.DocumentNotFound:
         raise HTTPException(status_code=404)
 
@@ -356,7 +355,7 @@ async def _document_preview(application_id: UUID, document_id: int) -> Streaming
 
 @router.get("/applications/{application_id}/documents/{document_id}/preview")
 async def application_document_preview(
-    application_id: UUID, document_id: int, applicant_identifier: str = Depends(_require_applicant)
+    application_id: str, document_id: int, applicant_identifier: str = Depends(_require_applicant)
 ):
     await _owned_application(application_id, applicant_identifier)
     return await _document_preview(application_id, document_id)
@@ -398,7 +397,7 @@ async def new_application_start(
         raise HTTPException(status_code=400, detail=f"unknown product_type {product_type!r}")
     request.session[_DRAFT_KEY] = {
         "product_type": product_type,
-        "application_id": str(uuid.uuid4()),
+        "application_id": idgen_service.generate_id("app", 9),
         "fields": {},
     }
     return RedirectResponse(url="/apply/new/details", status_code=303)
@@ -544,7 +543,7 @@ async def new_application_submit(request: Request, applicant_identifier: str = D
     if draft is None:
         return RedirectResponse(url="/apply/new", status_code=303)
     product_type = draft["product_type"]
-    application_id = UUID(draft["application_id"])
+    application_id = draft["application_id"]
     values = draft["fields"]
     product_field_names = [name for name, _, _ in PRODUCT_FIELDS[product_type]]
     payload = {name: values[name] for name in product_field_names}
