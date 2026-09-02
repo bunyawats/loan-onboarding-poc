@@ -88,6 +88,25 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
     # APPROVED execution must not create a second account, a second
     # Welcome Letter, or re-promote an already-promoted Government ID --
     # `account_id IS NOT NULL` is proof this whole block already ran.
+    #
+    # **`account_id` must be persisted to Postgres immediately after
+    # `create_account` succeeds, before the two `document.service` calls
+    # below -- not deferred to the single write at the bottom.** Found by
+    # actually running this against a real stack (P7-3): if either
+    # `document.service` call raises (a real Mayan hiccup, not just a
+    # theoretical one), Temporal retries this whole activity; without an
+    # early write, the retry still sees `account_id IS NULL` and creates
+    # a SECOND account for the same customer+product_type, hitting
+    # `ux_accounts_customer_active_product_type`. Writing it here first
+    # is what actually makes the guard above do what its own comment
+    # already claimed. The tradeoff this accepts (already implied by
+    # CLAUDE.md's "skip the entire provisioning block" wording, just not
+    # correctly implemented before this fix): a retry that finds
+    # `account_id` already set skips the `document.service` calls too,
+    # even if one of them is what failed the first time -- a missing
+    # Welcome Letter is a smaller, manually-recoverable gap than a
+    # duplicated account, and matches this project's own
+    # rare-enough-to-accept-for-a-POC stance elsewhere.
     if inp.resulting_status == "APPROVED" and record["account_id"] is None:
         if record["customer_id"] is not None:
             customer_id = record["customer_id"]
@@ -97,6 +116,10 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
 
         account = await account_service.create_account(customer_id, record["product_type"])
         account_id = account.account_id
+
+        await application_db.update_decision(
+            application_id, status=inp.resulting_status, customer_id=customer_id, account_id=account_id
+        )
 
         await document_service.promote_government_id_to_customer_photo(
             str(application_id), str(customer_id)
@@ -108,6 +131,13 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
             record["product_type"],
             str(record["amount"]),
         )
+    elif record["account_id"] is not None:
+        # A retry that reaches here (resulting_status == "APPROVED", or
+        # any other status if this activity is ever re-run for a
+        # different reason) -- carry the already-resolved ids forward so
+        # the final write below doesn't clobber them with NULL.
+        customer_id = record["customer_id"]
+        account_id = record["account_id"]
 
     await application_db.update_decision(
         application_id,

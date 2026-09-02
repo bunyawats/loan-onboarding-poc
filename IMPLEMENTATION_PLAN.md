@@ -74,14 +74,18 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 6 — done.** Start here:
-[P7-1](#phase-7--worker-composition-root--end-to-end-workflow-verification)
-(Worker Composition Root & End-to-End Workflow Verification) — its
-dependencies (Phases 4 and 6) are now both satisfied. `worker_main.py`
-doesn't exist yet; every P6 task's own integration-verify used a
-throwaway ad-hoc worker wiring `workflow.worker.run_worker()` +
-`application/activities.py`'s three real activities directly (same
-shape P7-1 will make permanent).
+**Phases 0 through 7 — done.** Phase 7 was a real milestone: everything
+below the two BFFs (customer/account/application/document/workflow,
+the worker processes, the full approve/reject/escalate/resubmit/cancel
+lifecycle) now works end to end against the real local stack, with a
+real bug found and fixed along the way (see P7-3's note and `CLAUDE.md`'s
+updated provisioning-sequence section). Phase 7's own text calls this a
+natural point for a human to spot-check before continuing into
+Keycloak/UI work (Phases 9/10/11) — flagging that rather than
+proceeding unprompted. If continuing in phase order regardless:
+[Phase 8](#phase-8--import-linter--ci) (Import-Linter & CI) is next,
+depending on Phases 2-7 (all now satisfied); Phase 9 (Keycloak Realm)
+only depends on Phase 0 and could run first/in parallel instead.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1081,7 +1085,7 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > temporary 5433 Postgres port remap as every other Phase 6/7
       > task (reverted before committing, zero diff beyond P7-2's own
       > intended additions).
-- [ ] **P7-3** — **First true end-to-end run**, no UI yet — drive it
+- [x] **P7-3** — **First true end-to-end run**, no UI yet — drive it
       entirely through `application.service` + `workflow.service` calls
       from a script or `pytest` integration test: create a
       `personal_loan` application below the escalation threshold →
@@ -1098,6 +1102,50 @@ being a customer yet"), so P6-3 can't be written until both exist.
       `document.service.check_completeness` to return `[]` for this
       test only), **and** each execution is visually confirmed at least
       once in Temporal Web UI, not just asserted in code.
+      > DONE: `tests/integration/test_end_to_end_workflow.py`, a
+      > module-scoped in-process worker fixture (same
+      > `workflow.worker.run_worker()` + `application/activities.py`
+      > wiring `worker_main.py`/P7-2 made permanent, just started
+      > in-process for this test module's lifetime instead of via
+      > separate containers) plus all 5 required scenarios. **Found a
+      > real, genuine bug on the first run, not a test artifact**: this
+      > test's first draft only stubbed
+      > `document.service.check_completeness`, not
+      > `promote_government_id_to_customer_photo`/`generate_welcome_letter`
+      > — those hit the real (not-running-for-this-phase) Mayan, failed,
+      > and Temporal retried `persist_decision`. The retry then created
+      > a **second** `accounts` row for the same customer+product_type,
+      > hitting `ux_accounts_customer_active_product_type` — because
+      > `activities.py`'s `persist_decision` only wrote `account_id`
+      > back to the `applications` row in the *final* combined `UPDATE`,
+      > after the document.service calls, so a retry couldn't see that
+      > provisioning had already partially happened. Root-caused and
+      > fixed in `application/activities.py`: `account_id` is now
+      > persisted immediately after `account.service.create_account(...)`
+      > succeeds, before the two `document.service` calls — `CLAUDE.md`'s
+      > provisioning-sequence section updated in place with the full
+      > reasoning (marked "corrected from an earlier draft," per this
+      > file's convention). Added a dedicated unit test in
+      > `test_activities.py` reproducing this exact failure mode
+      > (`document.service.promote_government_id_to_customer_photo`
+      > raises after account creation, confirm `account_id` already
+      > landed despite the raised exception, then confirm a retry
+      > reuses that same account rather than creating a second one) —
+      > 133 `tests/unit/` tests pass with the fix in place. Then fixed
+      > the integration test itself to properly stub all three
+      > `document.service` calls (matching the DoD's own "Mayan not
+      > required for this phase" instruction correctly), re-ran: all 5
+      > scenarios pass against the real stack. **Visually confirmed in
+      > Temporal Web UI**, same technique as this project's own P4-4
+      > precedent (the UI's own backing API, not just asserted in
+      > code): `GET /api/v1/namespaces/default/workflows?query=...ExecutionStatus='Completed'`
+      > listed all 5 just-run executions as
+      > `WORKFLOW_EXECUTION_STATUS_COMPLETED`, and a `describe` on one
+      > confirmed a real, non-trivial event history (21 events).
+      > Verified via the same temporary 5433 Postgres port remap as
+      > every other Phase 6/7 task (reverted before committing, zero
+      > diff). **This completes Phase 7 — everything below the two BFFs
+      > now works, end to end, against the real stack.**
 
 This phase is a real milestone: everything below the two BFFs works.
 Treat it as a natural point to pause and let a human spot-check the
@@ -1287,6 +1335,48 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 7 (Worker Composition Root & End-to-End
+  Workflow Verification) complete, all three tasks checked. `worker_main.py`
+  (P7-1) is a mechanical extraction of the ad-hoc worker wiring every
+  Phase 6 verification script already used. Added `worker-workflow`/
+  `worker-activity` to `docker-compose.yml` (P7-2), verified the *real*
+  Docker Compose containers (not an in-process stand-in) processed a
+  `create_application` call end to end. **P7-3 (the first true
+  end-to-end run, `tests/integration/test_end_to_end_workflow.py`)
+  found a real bug, not a test artifact**: the first draft of that test
+  only stubbed `document.service.check_completeness`, so
+  `persist_decision`'s calls to `promote_government_id_to_customer_photo`/
+  `generate_welcome_letter` hit the real (not running for this phase)
+  Mayan, failed, and Temporal retried the activity — the retry then
+  created a *second* `accounts` row for the same customer+product_type,
+  hitting `ux_accounts_customer_active_product_type`, because
+  `application/activities.py` only wrote `account_id` back to the
+  `applications` row in the final combined `UPDATE`, *after* the
+  document.service calls, so the retry's idempotency guard
+  (`account_id IS NOT NULL`) couldn't see that provisioning had already
+  partially happened. Fixed by writing `account_id` immediately after
+  `account.service.create_account(...)` succeeds, before the
+  document.service calls — `CLAUDE.md`'s provisioning-sequence section
+  updated in place with the full reasoning. Added a dedicated
+  regression test in `tests/unit/application/test_activities.py`
+  reproducing the exact failure mode (a document.service call raises
+  after account creation; confirm `account_id` still lands; confirm a
+  retry reuses it rather than double-creating). Then fixed the
+  integration test's own stubbing gap (all three `document.service`
+  calls, not just one) per the DoD's own "Mayan not required" note —
+  all 5 end-to-end scenarios (below-threshold approve, escalation to
+  manager, reject, request-more-info→resubmit→approve, cancel) pass
+  against the real stack, each confirmed `WORKFLOW_EXECUTION_STATUS_COMPLETED`
+  via Temporal Web UI's own backing API (same technique as this
+  project's own P4-4 precedent). 133 `tests/unit/` tests pass (up from
+  129 at the start of this stretch). Verified locally via the same
+  temporary 5433 Postgres port remap every phase since Phase 2 has
+  needed, reverted before every commit, zero diff each time. **Phase
+  7's own text flags this as a natural pause point for a human to
+  spot-check before Keycloak/UI work (Phases 9-11) begins** — the next
+  session should read that note in Current Status before just picking
+  the next unchecked box.
 
 - **2026-09-02** — Phase 6 (Application Module) complete, all six tasks
   checked (P6-1 through P6-6). `application/models.py`/`db.py` (P6-1) is

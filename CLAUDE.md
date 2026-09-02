@@ -264,29 +264,51 @@ the *outcome* of an approved loan, not something that pre-exists it.**
      approved loan — a plain, non-unique index on
      `accounts.customer_id`). `product_type` is a required column now
      too — see the active-account rule immediately below.
-  3. Call `document.service.promote_government_id_to_customer_photo(application_id,
+  3. **Write `customer_id`/`account_id` to the `applications` row
+     immediately after step 2 succeeds — before step 4 below, not
+     folded into the same `UPDATE` as the decision columns.** Corrected
+     from an earlier draft of this file, which had this write happen
+     only once, combined with the decision columns, at the very end
+     (see the old step 4, now folded into step 5) — that ordering has a
+     real bug, found by actually running P7-3's end-to-end integration
+     test against a live stack: if step 4 (below) raises (a real Mayan
+     hiccup, not just a theoretical one — this is exactly what happened
+     during that test run), Temporal retries the whole activity, and the
+     retry re-reads `applications.account_id`, finds it still `NULL`
+     (because the only write that would have set it never ran), and
+     calls `account.service.create_account(...)` a second time for the
+     same `customer_id`/`product_type` — hitting
+     `ux_accounts_customer_active_product_type`. Writing `account_id`
+     here, right after the row is created, is what actually makes the
+     idempotency guard below do what it already claimed to do.
+  4. Call `document.service.promote_government_id_to_customer_photo(application_id,
      customer_id)` and `document.service.generate_welcome_letter(account_id,
      customer_id, applicant_name, product_type, amount)` — see
-     `document/`'s module section for what each does. Both are part of
-     this same provisioning block, guarded by the same idempotency check
-     below (step 4), not separate activities.
-  4. Write `status`, the underwriter/manager decision columns,
-     `customer_id` (if newly resolved), and `account_id` (newly
-     created) in the **same** `UPDATE`, inside the same activity
-     execution as the rest of `persist_decision`'s work — deliberately
-     not a separate activity, to avoid a partial-provisioning state if
-     the process crashes between two activities.
+     `document/`'s module section for what each does. **A retry that
+     finds `account_id` already set (step 3 committed, but this step
+     failed) skips both of these calls entirely, permanently** — a
+     smaller, manually-recoverable gap (a missing Welcome Letter) than
+     the double-account bug this ordering fixes, and consistent with
+     this project's existing rare-enough-to-accept-for-a-POC stance
+     elsewhere in this section.
+  5. Write `status` and the underwriter/manager decision columns —
+     `customer_id`/`account_id` travel along in this same `UPDATE` too
+     (harmless: already set to the same values by step 3, `COALESCE`
+     preserves them either way), but the column that actually matters
+     for provisioning is already durable by the time this runs.
   - **This makes provisioning the one place in the whole codebase where
     a Temporal activity's idempotency actually matters in a way that
     can silently misbehave**: activities can be retried by Temporal
-    after a successful-but-unacknowledged execution. Creating a new
-    `account` row (or a second Welcome Letter, or re-promoting an
-    already-promoted `id_photo`) unconditionally on every call would
-    duplicate state on a retry. `persist_decision` **must** check
-    `applications.account_id IS NOT NULL` **first, before step 1**, and
-    if already set, skip the entire provisioning block (steps 1-3) and
-    just re-apply the (idempotent) status/decision-column write — the
-    activity as a whole must be safe to run twice.
+    after a successful-but-unacknowledged execution, *or* after a
+    genuine partial failure partway through (the case step 3's ordering
+    now protects against). Creating a new `account` row (or a second
+    Welcome Letter, or re-promoting an already-promoted `id_photo`)
+    unconditionally on every call would duplicate state on a retry.
+    `persist_decision` **must** check `applications.account_id IS NOT
+    NULL` **first, before step 1**, and if already set, skip the entire
+    provisioning block (steps 1-4) and just re-apply the (idempotent)
+    status/decision-column write — the activity as a whole must be safe
+    to run twice.
 - **One customer, one active account per product type — enforced
   *before* the decision is signaled, not just inside provisioning.**
   `accounts.product_type` (new column) plus a partial unique index

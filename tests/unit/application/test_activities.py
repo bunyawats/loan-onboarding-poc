@@ -211,6 +211,61 @@ async def test_persist_decision_approve_is_idempotent_on_retry(_mock_document_se
     assert len(_mock_document_service["welcome_letter"]) == 1
 
 
+async def test_persist_decision_retry_after_document_service_failure_does_not_double_create_account(
+    monkeypatch, _mock_document_service
+):
+    """Reproduces a real bug found in P7-3's integration run: if a
+    document.service call raises (a real Mayan hiccup) after
+    account_service.create_account has already succeeded, a Temporal
+    retry of the whole activity must NOT try to create a second account
+    for the same customer+product_type -- account_id has to be
+    persisted to Postgres before the document.service calls, not only
+    in the final write at the bottom."""
+    application_id = await _seed_application()
+    decision_input = PersistDecisionInput(
+        application_id=application_id,
+        actor_role="underwriter",
+        decision="APPROVE",
+        actor_name="u1",
+        comment="approved",
+        resulting_status="APPROVED",
+    )
+
+    async def failing_promote(application_id, customer_id):
+        raise RuntimeError("simulated Mayan outage")
+
+    monkeypatch.setattr(activities.document_service, "promote_government_id_to_customer_photo", failing_promote)
+
+    with pytest.raises(RuntimeError, match="simulated Mayan outage"):
+        await activities.persist_decision(decision_input)
+
+    # The account must exist and be recorded on the application row even
+    # though the activity as a whole raised.
+    record_after_failure = await application_db.get(uuid.UUID(application_id))
+    assert record_after_failure["account_id"] is not None
+
+    acct_pool = await account_db._get_pool()
+    account_count_after_failure = await acct_pool.fetchval(
+        "SELECT count(*) FROM accounts WHERE customer_id = $1", record_after_failure["customer_id"]
+    )
+    assert account_count_after_failure == 1
+
+    # Now simulate Temporal retrying with document.service healthy again
+    # -- restore the working fake (the fixture's, minus the failure).
+    async def working_promote(application_id, customer_id):
+        _mock_document_service["promote"].append((application_id, customer_id))
+
+    monkeypatch.setattr(activities.document_service, "promote_government_id_to_customer_photo", working_promote)
+    await activities.persist_decision(decision_input)
+
+    final_record = await application_db.get(uuid.UUID(application_id))
+    account_count_final = await acct_pool.fetchval(
+        "SELECT count(*) FROM accounts WHERE customer_id = $1", final_record["customer_id"]
+    )
+    assert account_count_final == 1, "retry must not create a second account"
+    assert final_record["account_id"] == record_after_failure["account_id"]
+
+
 async def test_persist_decision_cancelled_touches_no_decision_columns_or_provisioning(_mock_document_service):
     application_id = await _seed_application()
 
