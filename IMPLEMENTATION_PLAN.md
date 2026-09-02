@@ -2228,7 +2228,9 @@ is.)*
   auto-generated comment, its Temporal workflow ends `Status: COMPLETED`
   (not `FAILED`) with a query result correctly reporting
   `"status":"REJECTED"`, and the worker logs stay silent -- no retries,
-  no traceback. Not committed/pushed yet pending user confirmation.
+  no traceback. Committed and pushed (commit `aa66a0f`); CI run
+  (`gh run list --branch main`, run id `33646639876`) completed
+  `success` in 39s.
 
 - **2026-09-02** — Fixed the `check_decision_allowed` bug found live
   during P13-7's verification sweep (see that Session Log entry and
