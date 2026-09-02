@@ -74,11 +74,10 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 4 — done.** Start here:
-[P5-1](#phase-5--document-module) (Document Module) — depends only on
-Phase 0, next in phase order. Phase 6 (Application Module) is next
-after that but is blocked on Phase 5 finishing (specifically P5-5, not
-just Phase 5's earlier tasks) *and* Phases 2/3 (already done).
+**Phases 0 through 5 — done.** Start here:
+[P6-1](#phase-6--application-module) (Application Module) — all of its
+dependencies (Phases 1, 2, 3, 4, and 5 specifically through P5-5) are
+now satisfied.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -548,7 +547,7 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       > `tests/unit/` tests pass (excluding `customer`/`account`, same
       > pre-existing local port-5432 collision every prior session has
       > hit — unrelated to this task).
-- [ ] **P5-4** — `document/service.py`: `upload(applicant_identifier,
+- [x] **P5-4** — `document/service.py`: `upload(applicant_identifier,
       application_id, category, file)` (create → upload with
       `action_name=replace` → attach metadata → rebuild index) — no
       `customer_id`/`account_id` param; `document/` is a leaf module and
@@ -574,7 +573,40 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       immediately after the final required upload — before waiting out
       the ~10-15s index-rebuild window** (proves it isn't reading the
       index tree).
-- [ ] **P5-5** — `document/service.py`, part 2 — the managed-document
+      > DONE: `REQUIRED_CATEGORIES` (PRD §6.4's table) hardcoded in
+      > `document/service.py` as a plain dict, not imported from
+      > `workflow.task_queues` — `document/` never imports `workflow/`,
+      > even for a shared registry, so this is a deliberate duplication
+      > of the three product-type strings with no import-time assert
+      > tying them together (documented in the module's own docstring as
+      > a latent, currently-unflagged drift risk). `_documents_matching`
+      > (fetch every document, fetch each candidate's real metadata,
+      > filter exactly in Python) reused from
+      > `mayan-edms-customer-archive`'s identical `documents_service.py`
+      > pattern — necessary because Mayan's advanced-search metadata
+      > params don't AND across fields (verified there, re-confirmed by
+      > inspection of the same endpoint here). 18
+      > `tests/unit/document/test_service.py` tests against a
+      > `FakeMayanClient` double (this module's own dependency
+      > boundary), plus a real end-to-end run against the live P5-1
+      > Mayan instance via a throwaway script (scratchpad, not
+      > committed): uploaded three genuinely valid one-page PDFs
+      > (confirmed with `file`) one category at a time, watched
+      > `check_completeness`'s missing-list shrink correctly each time,
+      > then uploaded the final required category and confirmed
+      > `check_completeness` returned `[]` in ~1.4s — nowhere near the
+      > 10-15s index-rebuild window, proving it reads Mayan's metadata
+      > search directly rather than the index tree. **Real, unplanned
+      > finding from this same verification run**: Mayan's default REST
+      > API rate limit (20 req/sec, confirmed by reading
+      > `mayan/apps/rest_api/literals.py`) triggered a genuine `429` under
+      > this realistic upload-then-check-completeness sequence, not a
+      > contrived stress test — fixed by adding a bounded
+      > `Retry-After`-honoring retry to `mayan_client.py`'s `_request`
+      > (P5-3's file, amended here since the gap only showed up once
+      > `service.py` actually drove it end to end); documented as a new
+      > entry in `CLAUDE.md`'s "Known gaps."
+- [x] **P5-5** — `document/service.py`, part 2 — the managed-document
       functions (PRD §6.5): `promote_government_id_to_customer_photo(application_id,
       customer_id)` (re-tags the existing Government ID document with
       `customer_id` metadata, rebuilds index — does not fetch/re-upload
@@ -597,6 +629,33 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       directly; call `promote_government_id_to_customer_photo` and
       confirm no new document was created (same `document_id` as the
       original Government ID upload, just additional metadata).
+      > DONE: **`action_name="new"` (this file's own placeholder,
+      > flagged "confirm during this task") turned out not to exist at
+      > all.** Read Mayan's actual
+      > `documents/document_file_actions.py` directly: only three
+      > registered `DocumentFileAction` backends exist —
+      > `append`/`keep`/`replace`. Confirmed empirically too (`curl`
+      > against a live document): POSTing to
+      > `/documents/<EXISTING id>/files/` a *second* time with
+      > `action_name="replace"` (the same value as the first upload)
+      > creates a new `DocumentFile` **and** a new `DocumentVersion`
+      > under the *same* document id — Mayan's versioning comes from
+      > re-targeting an existing document id, not from a distinct action
+      > name. `upload_consent` and `mayan_client.upload_file`'s docstring
+      > both corrected to reflect this (`action_name="replace"` on every
+      > call, first or subsequent). `promote_government_id_to_customer_photo`
+      > verified against the real instance: document count before/after
+      > promotion unchanged, and `list_customer_documents` returns the
+      > *same* `document_id` as the original Government ID upload.
+      > `upload_consent` verified against the real instance: two calls
+      > with two different files both resolved to the same
+      > `document_id`, and `list_account_documents` showed exactly one
+      > `Consent`-category entry, not two. All of P5-5's verification ran
+      > in the same combined throwaway script as P5-4's (scratchpad, not
+      > committed) — see P5-4's note for the shared 429-retry finding
+      > this run also surfaced. Unit coverage lives in the same
+      > `tests/unit/document/test_service.py` as P5-4 (one file, per
+      > `CLAUDE.md`'s layout — both tasks land in `document/service.py`).
 
 ---
 
@@ -954,6 +1013,42 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 5 (Document Module) complete, all five tasks
+  checked. Brought up `mayan`/`mayan-db`/`mayan-redis` for real (P5-1),
+  renamed from `mayan-edms-customer-archive`'s `db`/`redis`/`app` per
+  P0-4's already-documented plan. Built this project's own
+  `scripts/setup_document_hierarchy.sh` (P5-2) — two document types
+  (`Application Document`, `Account Document`) instead of the reference
+  project's three, since `applicant_identifier` is the top-level branch
+  key here, not `customer_id` — and empirically confirmed the flagged
+  `id_photo` multi-membership assumption for real against the fresh
+  instance (one document, two simultaneous leaf memberships); `CLAUDE.md`
+  updated to record this as confirmed, not just source-read. Built
+  `document/mayan_client.py` (P5-3, 9 respx-mocked unit tests) and
+  `document/service.py`/`document/models.py` (P5-4 + P5-5 together, one
+  file, 18 unit tests against a `FakeMayanClient` double) covering
+  `upload`/`list_documents`/`check_completeness`/`preview` and the three
+  managed-document functions
+  (`promote_government_id_to_customer_photo`/`generate_welcome_letter`/
+  `upload_consent`). Two real findings caught only by actually driving
+  this against the live P5-1 instance end to end, not from unit tests or
+  reading Mayan's docs: (1) `action_name="new"` — this file's own
+  placeholder for consent versioning, explicitly flagged "confirm during
+  this task" — doesn't exist; Mayan only registers
+  `append`/`keep`/`replace`, and versioning an existing document actually
+  comes from POSTing to that same document's `/files/` endpoint again
+  with `action_name="replace"`, confirmed both by reading
+  `document_file_actions.py` and by a live `curl` round-trip; (2) Mayan's
+  default REST API rate limit (20 req/sec) genuinely triggers under a
+  realistic upload-then-check-completeness sequence at POC scale, not
+  just synthetic hammering — fixed with a bounded, `Retry-After`-honoring
+  retry in `mayan_client.py`'s `_request`, documented as a new entry in
+  `CLAUDE.md`'s "Known gaps" (the fetch-all-then-filter search pattern
+  inherited from the reference project is still O(all documents) per
+  call and will need real server-side filtering past POC scale). Next:
+  Phase 6 (Application Module), starting at P6-1 — all its dependencies
+  (Phases 1-5) are now satisfied.
 
 - **2026-09-02** — Confirmed Phase 4's commit (`8312db9`) is green on
   GitHub Actions CI (`gh run watch`, run `33583072309`, `unit-tests`

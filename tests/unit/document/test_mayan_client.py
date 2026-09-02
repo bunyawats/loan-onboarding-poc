@@ -69,6 +69,52 @@ async def test_token_refreshed_on_401(client):
 
 
 @respx.mock
+async def test_429_retried_honoring_retry_after_header(client, monkeypatch):
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    respx.post(f"{BASE}/api/v4/auth/token/obtain/").mock(
+        return_value=httpx.Response(200, json={"token": "abc123"})
+    )
+    doc_route = respx.get(f"{BASE}/api/v4/documents/1/").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "2"}),
+            httpx.Response(200, json={"id": 1}),
+        ]
+    )
+
+    result = await client.get_document(1)
+
+    assert result == {"id": 1}
+    assert doc_route.call_count == 2
+    assert sleeps == [2.0]
+
+
+@respx.mock
+async def test_429_gives_up_after_max_retries(client, monkeypatch):
+    async def fake_sleep(seconds):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    respx.post(f"{BASE}/api/v4/auth/token/obtain/").mock(
+        return_value=httpx.Response(200, json={"token": "abc123"})
+    )
+    doc_route = respx.get(f"{BASE}/api/v4/documents/1/").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "1"})
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.get_document(1)
+
+    assert doc_route.call_count == 1 + MayanClient._MAX_429_RETRIES
+
+
+@respx.mock
 async def test_metadata_type_ids_cached_for_process_lifetime(client):
     respx.post(f"{BASE}/api/v4/auth/token/obtain/").mock(
         return_value=httpx.Response(200, json={"token": "abc123"})

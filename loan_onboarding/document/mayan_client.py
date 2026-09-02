@@ -71,6 +71,19 @@ class MayanClient:
                     self._token = await self._obtain_token()
         return self._token
 
+    # Mayan's REST API rate-limits authenticated callers by default (20
+    # req/sec out of the box, `REST_API_THROTTLING_RATE_USER` --
+    # confirmed by reading mayan/apps/rest_api/literals.py and hit for
+    # real in P5-4/P5-5's own verification: a real customer-shaped burst
+    # -- upload several documents in a row, each doing
+    # create+upload+3x-attach-metadata+rebuild, then check_completeness's
+    # fetch-all-then-per-document-metadata scan -- comfortably exceeds
+    # that in under a second at even POC scale). Every 429 carries a
+    # standard `Retry-After` header (confirmed empirically); honor it
+    # with a small bounded retry rather than letting it surface as an
+    # unhandled error on an otherwise-normal upload flow.
+    _MAX_429_RETRIES = 5
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         token = await self._ensure_token()
         headers = kwargs.pop("headers", {})
@@ -82,6 +95,13 @@ class MayanClient:
                 self._token = await self._obtain_token()
             headers["Authorization"] = f"Token {self._token}"
             response = await client.request(method, path, headers=headers, **kwargs)
+
+        attempt = 0
+        while response.status_code == 429 and attempt < self._MAX_429_RETRIES:
+            delay = float(response.headers.get("Retry-After", 1))
+            await asyncio.sleep(delay)
+            response = await client.request(method, path, headers=headers, **kwargs)
+            attempt += 1
         return response
 
     async def get(self, path: str, **kwargs: Any) -> httpx.Response:
@@ -173,10 +193,14 @@ class MayanClient:
 
     async def upload_file(self, document_id: int, filename: str, content: bytes, action_name: str = "replace") -> None:
         """`action_name` is a string ID for a registered
-        `DocumentFileAction` backend -- `replace` (the default, used for
-        every first-time upload) or `new` (a new file *version* of the
-        same document, used by `upload_consent` -- see CLAUDE.md's
-        "Document module" section and gotcha #3: an invalid string fails
+        `DocumentFileAction` backend -- one of `replace` (the default:
+        the new version's rendered pages are just the new file's pages),
+        `append`, or `keep`. There is no `new` action -- confirmed
+        against Mayan's own `document_file_actions.py` and empirically
+        against a live instance (P5-5's session note): a "new version"
+        of an *existing* document is created by POSTing here again with
+        the *same* `document_id` and `action_name="replace"`, not by a
+        different action name (see gotcha #3: an invalid string fails
         silently, HTTP 200 with a broken async version-creation task)."""
         response = await self.post(
             f"/documents/{document_id}/files/",

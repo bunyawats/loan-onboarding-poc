@@ -1060,6 +1060,27 @@ for `KEYCLOAK_ISSUER`.
 
 ## Known gaps to state explicitly once built
 
+- **Mayan's default REST API rate limit (`REST_API_THROTTLING_RATE_USER`,
+  20 req/sec out of the box) is real and gets hit at POC scale, not just
+  in theory** — found in P5-4/P5-5 by actually running
+  `document.service`'s functions against the real local Mayan instance
+  in a realistic sequence (upload several required categories in a row,
+  each doing create+upload+3×attach-metadata+rebuild, then
+  `check_completeness`'s fetch-all-documents-then-per-document-metadata
+  scan) and watching it 429. `mayan_client.py`'s `_request` now retries
+  on 429 honoring the `Retry-After` header Mayan sends (confirmed
+  present), bounded at `_MAX_429_RETRIES = 5` — not a full fix, just
+  enough that a normal customer upload flow doesn't surface a raw HTTP
+  error. `document/service.py`'s underlying approach
+  (`_documents_matching`: fetch every document in the whole instance,
+  then fetch each one's metadata individually, then filter in Python —
+  inherited from `mayan-edms-customer-archive`'s identical pattern,
+  needed because Mayan's advanced-search endpoint doesn't AND multiple
+  metadata fields together) is still O(all documents in the instance)
+  per call and will get slower and throttle more often as real data
+  volume grows; fine for a POC, would need real server-side filtering
+  (or caching, or a lower-frequency rebuild strategy) before this scaled
+  past that.
 - No real customer authentication on `bff_customer/` (PRD §7.1) — still
   the standout risk; unaffected by `bff_backoffice/`'s real Keycloak
   auth, since they're separate surfaces with separate identity models.
