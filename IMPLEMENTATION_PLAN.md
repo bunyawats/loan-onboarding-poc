@@ -301,9 +301,9 @@ dependency between them.
       > `close_account` function exists anywhere in the plan yet) frees
       > the slot for a new `ACTIVE` account of that type — the actual
       > behavior the whole rule exists for, not just the boolean flip.
-      > CI already has the Postgres service container from Phase 2, so
-      > nothing new needed there — will still confirm green after
-      > push.
+      > CI already had the Postgres service container from Phase 2, so
+      > nothing new needed there — confirmed green via `gh run watch`
+      > (run `33582985833`, 52s, all 16 tests).
 
 ---
 
