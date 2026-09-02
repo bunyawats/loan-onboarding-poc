@@ -13,11 +13,11 @@ _customer_id_counter = itertools.count()
 
 
 def _new_application_id():
-    return f"app-{next(_application_id_counter):09d}"
+    return f"APP-{next(_application_id_counter):09d}"
 
 
 def _fake_customer_id():
-    return f"cus-{next(_customer_id_counter):09d}"
+    return f"CUS-{next(_customer_id_counter):09d}"
 
 
 async def _insert_sample(application_id=None, **overrides):
@@ -75,7 +75,7 @@ async def test_insert_is_idempotent_on_retry_same_application_id():
 
 
 async def test_get_returns_none_for_unknown_id():
-    assert await db.get("app-999999999") is None
+    assert await db.get("APP-999999999") is None
 
 
 async def test_get_by_workflow_id():

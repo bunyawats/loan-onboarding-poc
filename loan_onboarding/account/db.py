@@ -12,7 +12,7 @@ from loan_onboarding.idgen import service as idgen_service
 
 _pool: asyncpg.Pool | None = None
 
-_ID_PREFIX = "acc"
+_ID_PREFIX = "ACC"
 _ID_LENGTH = 9
 _MAX_ID_COLLISION_RETRIES = 10
 

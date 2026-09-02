@@ -499,8 +499,8 @@ touches it. **A customer row no longer gets created on first visit** —
 see "Applying without being a customer yet" above; this module's
 create path only fires from inside an approval.
 
-**`customer_id` is `cus-` followed by a random 9-digit number
-(`idgen.service.generate_id("cus", 9)`), assigned by `db.get_or_create`
+**`customer_id` is `CUS-` followed by a random 9-digit number
+(`idgen.service.generate_id("CUS", 9)`), assigned by `db.get_or_create`
 at insert time — not a database default.** Corrected from an earlier
 draft of this file, which had Postgres generate a `UUID` via
 `DEFAULT gen_random_uuid()`; every domain module's primary key moved to
@@ -549,8 +549,8 @@ constraint — **but a customer's `ACTIVE` accounts may never repeat a
 `db/schema.sql`'s partial unique index on `(customer_id, product_type)
 WHERE status = 'ACTIVE'`.
 
-**`account_id` is `acc-` + a random 9-digit number
-(`idgen.service.generate_id("acc", 9)`), assigned by `db.create` at
+**`account_id` is `ACC-` + a random 9-digit number
+(`idgen.service.generate_id("ACC", 9)`), assigned by `db.create` at
 insert time**, same scheme and same PK-collision-retry handling as
 `customer/`'s — see that module's section and "Data storage" below.
 
@@ -615,8 +615,10 @@ modules.
   → review & submit, calling `application.service.create_application(...)`"
   — uploads happening *before* this call, against an id this function
   alone was supposed to mint, is not satisfiable. The fix: `bff_customer`
-  mints a provisional `application_id` (`idgen.service.generate_id("app",
-  9)` — corrected from an earlier draft that used a plain `uuid4()`,
+  mints a provisional `application_id` (`idgen.service.generate_id("APP",
+  9)`, via the shared `application.service.APPLICATION_ID_PREFIX`/
+  `APPLICATION_ID_LENGTH` constants both call sites reference — corrected
+  from an earlier draft that used a plain `uuid4()`,
   before every id in this codebase moved to the shared human-readable
   scheme, see "Data storage") at the *start* of its wizard, threads it
   through every `document.service.upload(...)` call during the flow,
@@ -1118,9 +1120,9 @@ new shared leaf module, `idgen/` (see "Module dependency graph"):
 
 | Entity | Prefix | Example |
 |---|---|---|
-| `customers.customer_id` | `cus-` | `cus-483920174` |
-| `accounts.account_id` | `acc-` | `acc-019283746` |
-| `applications.application_id` | `app-` | `app-573920184` |
+| `customers.customer_id` | `CUS-` | `CUS-483920174` |
+| `accounts.account_id` | `ACC-` | `ACC-019283746` |
+| `applications.application_id` | `APP-` | `APP-573920184` |
 
 `idgen.service.generate_id(prefix, length) -> str` is a pure function
 (`secrets.choice` over `0-9`, no I/O) — every module that assigns one
@@ -1319,7 +1321,7 @@ for `KEYCLOAK_ISSUER`.
   logic guarantees it), but it moved from **DB-enforced** to
   **code-enforced-only** — a real, if narrow, reduction in the safety
   net, not a change with zero cost.
-- **The 9-digit-numeric primary key format (`cus-`/`acc-`/`app-` +
+- **The 9-digit-numeric primary key format (`CUS-`/`ACC-`/`APP-` +
   `idgen.service.generate_id(prefix, 9)`) trades away collision-safety
   margin for a familiar, account-number-style look.** `10^9` values per
   entity type is real headroom for a POC, but nowhere near a `UUID`'s;

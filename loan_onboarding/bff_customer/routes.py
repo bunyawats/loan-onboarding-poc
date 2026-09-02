@@ -458,7 +458,9 @@ async def new_application_start(
         raise HTTPException(status_code=400, detail=f"unknown product_type {product_type!r}")
     request.session[_DRAFT_KEY] = {
         "product_type": product_type,
-        "application_id": idgen_service.generate_id("app", 9),
+        "application_id": idgen_service.generate_id(
+            application_service.APPLICATION_ID_PREFIX, application_service.APPLICATION_ID_LENGTH
+        ),
         "fields": {},
     }
     return RedirectResponse(url="/apply/new/details", status_code=303)

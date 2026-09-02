@@ -2015,8 +2015,8 @@ Two independent-but-related changes, confirmed with the user before any
 code was touched:
 1. Every primary key (`customers.customer_id`, `accounts.account_id`,
    `applications.application_id`) moves from a Postgres-generated `UUID`
-   to an application-assigned, human-readable string — `cus-`/`acc-`/
-   `app-` followed by a random 9-digit number, via a new shared leaf
+   to an application-assigned, human-readable string — `CUS-`/`ACC-`/
+   `APP-` followed by a random 9-digit number, via a new shared leaf
    module, `idgen/`.
 2. `accounts.application_id` (new, `NOT NULL UNIQUE`) replaces
    `applications.account_id` (removed) — the account now points at its
@@ -2201,6 +2201,48 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Two small, user-requested cleanups, no behavior
+  change: (1) `application/service.py`'s `create_application` and
+  `bff_customer/routes.py`'s wizard pre-mint both used to call
+  `idgen_service.generate_id("app", 9)` with the prefix/length as
+  duplicated raw literals in two different modules -- replaced with
+  shared, non-underscore-prefixed constants,
+  `application.service.APPLICATION_ID_PREFIX`/`APPLICATION_ID_LENGTH`
+  (unlike `customer/db.py`'s and `account/db.py`'s own private
+  `_ID_PREFIX`/`_ID_LENGTH`, each used by exactly one file, this pair
+  needed to be importable from a second module). (2) Changed the
+  actual prefix *values* from lowercase to uppercase --
+  `CUS-`/`ACC-`/`APP-` instead of `cus-`/`acc-`/`app-` -- per explicit
+  user request ("all prefix should be capital letter"). Updated every
+  test literal that fabricates one of these three real ID formats
+  (`tests/unit/application/test_db.py`, `test_service.py`,
+  `test_activities.py`; `tests/unit/account/test_service.py`;
+  `tests/unit/customer/test_service.py`) to match; deliberately left
+  `tests/unit/idgen/test_service.py` (arbitrary example prefixes for
+  the generic, prefix-agnostic `generate_id` function) and
+  `tests/unit/document/test_service.py` (opaque literals like `app-1`/
+  `cust-1` a leaf module never parses) lowercase, since neither is
+  actually exercising these three entities' real format. Updated
+  `CLAUDE.md`'s and `PRD.md`'s design-reference sections (the
+  "Data storage" id-format table, `customer_id`/`account_id`
+  descriptions, the provisional-mint note, and the Known Gaps entropy
+  bullet) to the new casing -- left every Session Log entry and
+  Known-Gaps narrative describing a *specific past live-verification
+  run* (e.g. P13-7's `cus-911063467`/`acc-604713440`) untouched, since
+  those are factual records of ids actually observed under the old
+  lowercase code, not statements of current design. Full unit suite
+  (212 tests) and `lint-imports` both pass. Rebuilt `app`/
+  `worker-activity`/`worker-workflow` and verified live inside the
+  rebuilt `app` container (calling `customer.service.get_or_create`,
+  `account.service.create_account`, and the new
+  `APPLICATION_ID_PREFIX`/`APPLICATION_ID_LENGTH` constants directly
+  against the real Postgres): newly minted ids came back as
+  `APP-850665744`/`CUS-226285776`/`ACC-367517834` -- confirmed
+  uppercase, then deleted as test cleanup. No existing rows were
+  touched -- pre-existing dev-database rows from earlier sessions keep
+  their lowercase ids; only newly-created rows use the new format, an
+  accepted POC/dev-environment cosmetic inconsistency, not a migration.
 
 - **2026-09-02** — Closed `bff_customer`'s no-real-auth gap
   (`CLAUDE.md`/PRD.md's long-standing "standout risk"): a customer used

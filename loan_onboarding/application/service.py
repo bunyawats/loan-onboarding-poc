@@ -42,6 +42,17 @@ from loan_onboarding.workflow import service as workflow_service
 _CONFIRM_TIMEOUT_S = 5.0
 _CONFIRM_INTERVAL_S = 0.05
 
+# Not underscore-prefixed -- unlike customer/db.py's and account/db.py's
+# own private _ID_PREFIX/_ID_LENGTH (each used by exactly one file),
+# application_id is minted from two call sites in two different
+# modules: create_application below, and bff_customer/routes.py's
+# provisional pre-mint (the document-upload-before-submit flow, see
+# CLAUDE.md's note on create_application's optional application_id
+# parameter). Both reference these same constants instead of each
+# duplicating the "app"/9 literal.
+APPLICATION_ID_PREFIX = "APP"
+APPLICATION_ID_LENGTH = 9
+
 _temporal_client: Optional[Client] = None
 _temporal_client_lock = asyncio.Lock()
 
@@ -93,7 +104,7 @@ async def create_application(
     no way to accept a pre-minted id, which conflicted with
     `bff_customer`'s document-upload-before-submit flow). Generates a
     fresh one via `idgen` if not given."""
-    application_id = application_id or idgen_service.generate_id("app", 9)
+    application_id = application_id or idgen_service.generate_id(APPLICATION_ID_PREFIX, APPLICATION_ID_LENGTH)
 
     validated_payload = schemas.validate_payload(product_type, payload)
 

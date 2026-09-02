@@ -11,11 +11,11 @@ _application_id_counter = itertools.count()
 
 
 def _fake_customer_id() -> str:
-    return f"cus-{next(_customer_id_counter):09d}"
+    return f"CUS-{next(_customer_id_counter):09d}"
 
 
 def _fake_application_id() -> str:
-    return f"app-{next(_application_id_counter):09d}"
+    return f"APP-{next(_application_id_counter):09d}"
 
 
 async def test_create_account_different_product_types_creates_two_accounts():
@@ -96,11 +96,11 @@ async def test_get_returns_account_by_id():
 
 async def test_get_raises_account_not_found_for_unknown_id():
     with pytest.raises(AccountNotFound):
-        await service.get("acc-000000000")
+        await service.get("ACC-000000000")
 
 
 async def test_get_by_application_id_returns_none_for_unknown_id():
-    assert await service.get_by_application_id("app-999999999") is None
+    assert await service.get_by_application_id("APP-999999999") is None
 
 
 async def test_get_by_application_id_returns_the_account_it_produced():

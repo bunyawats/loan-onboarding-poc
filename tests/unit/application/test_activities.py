@@ -25,7 +25,7 @@ _application_id_counter = itertools.count()
 
 
 def _new_application_id() -> str:
-    return f"app-{next(_application_id_counter):09d}"
+    return f"APP-{next(_application_id_counter):09d}"
 
 
 @pytest.fixture(autouse=True)

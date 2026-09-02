@@ -21,7 +21,7 @@ _application_id_counter = itertools.count()
 
 
 def _fake_application_id() -> str:
-    return f"app-{next(_application_id_counter):09d}"
+    return f"APP-{next(_application_id_counter):09d}"
 
 
 @pytest.fixture(autouse=True)
@@ -229,7 +229,7 @@ async def test_generates_application_id_when_not_given(monkeypatch, start_workfl
         amount=Decimal("10000"),
     )
 
-    assert result.application_id.startswith("app-")
+    assert result.application_id.startswith("APP-")
 
 
 async def test_invalid_payload_raises_and_never_starts_workflow(monkeypatch, start_workflow_calls):
