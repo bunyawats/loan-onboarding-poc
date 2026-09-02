@@ -89,5 +89,50 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- P5-1: copied from mayan-edms-customer-archive/docker-compose.yml,
+  # renamed per this file's header comment (db -> mayan-db, redis ->
+  # mayan-redis, app -> mayan) to avoid colliding with this project's own
+  # `db`/`backoffice-redis`. `webapp` (that project's demo front end)
+  # deliberately dropped -- document/ talks to Mayan's API directly, no
+  # demo UI needed here.
+  mayan-db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mayan
+      POSTGRES_USER: mayan
+      POSTGRES_PASSWORD: ${MAYAN_POSTGRES_PASSWORD:-mayan}
+    volumes:
+      - mayan_db_data:/var/lib/postgresql/data
+
+  mayan-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --databases 3
+    volumes:
+      - mayan_redis_data:/data
+
+  mayan:
+    image: mayanedms/mayanedms:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      MAYAN_DATABASES: "{'default':{'ENGINE':'django.db.backends.postgresql','NAME':'mayan','USER':'mayan','PASSWORD':'${MAYAN_POSTGRES_PASSWORD:-mayan}','HOST':'mayan-db'}}"
+      MAYAN_CELERY_BROKER_URL: "redis://mayan-redis:6379/0"
+      MAYAN_CELERY_RESULT_BACKEND: "redis://mayan-redis:6379/1"
+      MAYAN_LOCK_MANAGER_BACKEND: "mayan.apps.lock_manager.backends.redis_lock.RedisLock"
+      MAYAN_LOCK_MANAGER_BACKEND_ARGUMENTS: "{'redis_url':'redis://mayan-redis:6379/2'}"
+      MAYAN_AUTOADMIN_USERNAME: ${MAYAN_SERVICE_ACCOUNT_USERNAME:-admin}
+      MAYAN_AUTOADMIN_PASSWORD: ${MAYAN_SERVICE_ACCOUNT_PASSWORD:-changeme}
+    volumes:
+      - mayan_app_data:/var/lib/mayan
+    depends_on:
+      - mayan-db
+      - mayan-redis
+
 volumes:
   db_data:
+  mayan_db_data:
+  mayan_redis_data:
+  mayan_app_data:

@@ -446,10 +446,23 @@ name, so this phase does not need `application/activities.py` to exist).
 **Depends on:** Phase 0. **Unblocks:** Phase 6.
 Independent of Phases 2–4 — can run in parallel if sessions overlap.
 
-- [ ] **P5-1** — Add `mayan-db`, `mayan-redis`, `mayan` to
+- [x] **P5-1** — Add `mayan-db`, `mayan-redis`, `mayan` to
       `docker-compose.yml` (copy wholesale from
       `mayan-edms-customer-archive/docker-compose.yml`).
       DoD: `docker compose up -d mayan`, log in at `localhost:8000`.
+      > DONE: copied that project's `db`/`redis`/`app` services,
+      > renamed per P0-4's already-documented rename pass
+      > (`mayan-db`/`mayan-redis`/`mayan`), `webapp` (demo front end)
+      > dropped — not needed, `document/` talks to Mayan's API
+      > directly. Added `MAYAN_POSTGRES_PASSWORD` to `.env.example`
+      > (mayan-db's own Postgres password, separate container/database
+      > from this project's `db`). Verified for real: `docker compose
+      > up -d mayan` (transitively starts `mayan-db`/`mayan-redis`),
+      > `/authentication/login/` returns HTTP 200, and
+      > `/api/v4/auth/token/obtain/` with the `.env.example` service
+      > account credentials (`admin`/`changeme`) returns a real token —
+      > confirms the container, its Postgres, and its default admin
+      > account all actually work, not just that the container starts.
 - [ ] **P5-2** — `scripts/setup_document_hierarchy.sh`: creates the
       metadata types (`applicant_identifier`, `application_id`,
       `account_id`, `customer_id`, `category`), document types, and the
