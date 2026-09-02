@@ -1,0 +1,277 @@
+"""application/activities.py's tests hit a real Postgres for
+application/customer/account (same deliberate exception as
+test_db.py -- these three tables all live in the same database) but
+mock document.service's two managed-document calls at the function-call
+level, matching CLAUDE.md's Testing convention for a module's
+dependencies that need a live service (Mayan) this test suite doesn't
+stand up."""
+
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from loan_onboarding.account import db as account_db
+from loan_onboarding.application import activities, db as application_db
+from loan_onboarding.customer import db as customer_db
+from loan_onboarding.workflow.workflows import (
+    PersistApplicationInput,
+    PersistDecisionInput,
+    PersistResubmitInput,
+)
+
+
+@pytest.fixture(autouse=True)
+async def _clean_tables():
+    app_pool = await application_db._get_pool()
+    yield
+    await app_pool.execute("DELETE FROM applications")
+    acct_pool = await account_db._get_pool()
+    await acct_pool.execute("DELETE FROM accounts")
+    cust_pool = await customer_db._get_pool()
+    await cust_pool.execute("DELETE FROM customers")
+
+
+@pytest.fixture(autouse=True)
+def _mock_document_service(monkeypatch):
+    calls = {"promote": [], "welcome_letter": []}
+
+    async def fake_promote(application_id, customer_id):
+        calls["promote"].append((application_id, customer_id))
+
+    async def fake_generate_welcome_letter(account_id, customer_id, applicant_name, product_type, amount):
+        calls["welcome_letter"].append((account_id, customer_id, applicant_name, product_type, amount))
+
+    monkeypatch.setattr(activities.document_service, "promote_government_id_to_customer_photo", fake_promote)
+    monkeypatch.setattr(activities.document_service, "generate_welcome_letter", fake_generate_welcome_letter)
+    return calls
+
+
+def _application_input(**overrides):
+    application_id = str(uuid.uuid4())
+    defaults = dict(
+        application_id=application_id,
+        workflow_id=f"wf-{application_id}",
+        product_type="personal_loan",
+        payload={"purpose": "x", "employment_status": "employed", "monthly_income": "5000"},
+        amount=10000.0,
+        applicant_identifier=f"applicant-{application_id}@example.com",
+        applicant_name="Alice Applicant",
+        applicant_email=f"applicant-{application_id}@example.com",
+        applicant_phone="555-0100",
+        customer_id=None,
+    )
+    defaults.update(overrides)
+    return PersistApplicationInput(**defaults)
+
+
+async def _seed_application(**overrides) -> str:
+    inp = _application_input(**overrides)
+    await activities.persist_application(inp)
+    return inp.application_id
+
+
+async def test_persist_application_inserts_row():
+    inp = _application_input()
+    await activities.persist_application(inp)
+
+    record = await application_db.get(uuid.UUID(inp.application_id))
+    assert record is not None
+    assert record["applicant_identifier"] == inp.applicant_identifier
+    assert record["amount"] == Decimal("10000.0")
+    assert record["status"] == "PENDING_UNDERWRITING"
+
+
+async def test_persist_decision_underwriter_reject_writes_columns_with_no_provisioning(_mock_document_service):
+    application_id = await _seed_application()
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="REJECT",
+            actor_name="u1",
+            comment="not eligible",
+            resulting_status="REJECTED",
+        )
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["status"] == "REJECTED"
+    assert record["underwriter_name"] == "u1"
+    assert record["underwriter_comment"] == "not eligible"
+    assert record["underwriter_decided_at"] is not None
+    assert record["customer_id"] is None
+    assert record["account_id"] is None
+    assert _mock_document_service["promote"] == []
+    assert _mock_document_service["welcome_letter"] == []
+
+
+async def test_persist_decision_underwriter_escalation_writes_no_provisioning():
+    application_id = await _seed_application(amount=60000.0)
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="escalating",
+            resulting_status="PENDING_MANAGER_APPROVAL",
+        )
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["status"] == "PENDING_MANAGER_APPROVAL"
+    assert record["underwriter_name"] == "u1"
+    assert record["account_id"] is None
+
+
+async def test_persist_decision_approve_provisions_customer_and_account(_mock_document_service):
+    application_id = await _seed_application()
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["status"] == "APPROVED"
+    assert record["customer_id"] is not None
+    assert record["account_id"] is not None
+
+    account_record = await account_db.get(record["account_id"])
+    assert account_record["customer_id"] == record["customer_id"]
+    assert account_record["product_type"] == "personal_loan"
+
+    assert _mock_document_service["promote"] == [(application_id, str(record["customer_id"]))]
+    assert len(_mock_document_service["welcome_letter"]) == 1
+    assert _mock_document_service["welcome_letter"][0][0] == str(record["account_id"])
+
+
+async def test_persist_decision_approve_reuses_existing_customer_id_without_calling_get_or_create(monkeypatch):
+    existing_customer = await customer_db.get_or_create("returning@example.com")
+    application_id = await _seed_application(
+        applicant_identifier="returning@example.com", customer_id=str(existing_customer["customer_id"])
+    )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("get_or_create must not be called when customer_id is already set")
+
+    monkeypatch.setattr(activities.customer_service, "get_or_create", fail_if_called)
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="manager",
+            decision="APPROVE",
+            actor_name="m1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["customer_id"] == existing_customer["customer_id"]
+
+
+async def test_persist_decision_approve_is_idempotent_on_retry(_mock_document_service):
+    application_id = await _seed_application()
+    decision_input = PersistDecisionInput(
+        application_id=application_id,
+        actor_role="underwriter",
+        decision="APPROVE",
+        actor_name="u1",
+        comment="approved",
+        resulting_status="APPROVED",
+    )
+
+    await activities.persist_decision(decision_input)
+    first_record = await application_db.get(uuid.UUID(application_id))
+
+    # Simulates Temporal retrying an already-completed execution.
+    await activities.persist_decision(decision_input)
+    second_record = await application_db.get(uuid.UUID(application_id))
+
+    assert first_record["account_id"] == second_record["account_id"]
+
+    acct_pool = await account_db._get_pool()
+    account_count = await acct_pool.fetchval(
+        "SELECT count(*) FROM accounts WHERE customer_id = $1", first_record["customer_id"]
+    )
+    assert account_count == 1
+    assert len(_mock_document_service["promote"]) == 1
+    assert len(_mock_document_service["welcome_letter"]) == 1
+
+
+async def test_persist_decision_cancelled_touches_no_decision_columns_or_provisioning(_mock_document_service):
+    application_id = await _seed_application()
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="customer",
+            decision="CANCELLED",
+            actor_name="alice",
+            comment="changed my mind",
+            resulting_status="CANCELLED",
+        )
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["status"] == "CANCELLED"
+    assert record["underwriter_name"] is None
+    assert record["manager_name"] is None
+    assert record["customer_id"] is None
+    assert record["account_id"] is None
+    assert _mock_document_service["promote"] == []
+    assert _mock_document_service["welcome_letter"] == []
+
+
+async def test_persist_decision_native_cancel_honors_explicit_decided_at():
+    application_id = await _seed_application()
+    forced_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="customer",
+            decision="CANCELLED",
+            actor_name="temporal-admin",
+            comment="forced by temporal system",
+            resulting_status="CANCELLED",
+            decided_at=forced_time,
+        )
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["updated_at"] == forced_time
+
+
+async def test_persist_resubmit_updates_payload_and_resets_status():
+    application_id = await _seed_application()
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="REQUEST_MORE_INFO",
+            actor_name="u1",
+            comment="need bank statements",
+            resulting_status="MORE_INFO_REQUESTED",
+        )
+    )
+
+    await activities.persist_resubmit(
+        PersistResubmitInput(application_id=application_id, payload={"purpose": "updated"})
+    )
+
+    record = await application_db.get(uuid.UUID(application_id))
+    assert record["payload"] == {"purpose": "updated"}
+    assert record["status"] == "PENDING_UNDERWRITING"

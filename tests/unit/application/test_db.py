@@ -49,6 +49,25 @@ async def test_insert_defaults_status_and_nullable_columns():
     assert record["account_id"] is None
 
 
+async def test_insert_is_idempotent_on_retry_same_application_id():
+    """Simulates a Temporal activity retry of persist_application after
+    an already-succeeded first attempt -- must return the existing row,
+    not raise a raw UniqueViolationError on the primary key."""
+    application_id = _new_application_id()
+    first = await _insert_sample(application_id=application_id, applicant_name="First Name")
+    second = await _insert_sample(application_id=application_id, applicant_name="Different Name")
+
+    assert first["application_id"] == second["application_id"]
+    # The retry's (different) arguments are ignored -- the original row wins.
+    assert second["applicant_name"] == "First Name"
+
+    pool = await db._get_pool()
+    count = await pool.fetchval(
+        "SELECT count(*) FROM applications WHERE application_id = $1", application_id
+    )
+    assert count == 1
+
+
 async def test_get_returns_none_for_unknown_id():
     assert await db.get(uuid.uuid4()) is None
 

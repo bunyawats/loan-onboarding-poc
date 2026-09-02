@@ -59,15 +59,24 @@ async def insert(
     """Written by `persist_application` (the workflow's first activity),
     never directly by `application.service.create_application` -- see
     CLAUDE.md's "Applying without being a customer yet" / the
-    application module section for why."""
+    application module section for why.
+
+    `ON CONFLICT (application_id) DO NOTHING` makes this safe against a
+    Temporal activity retry (the workflow's `DEFAULT_RETRY_POLICY`
+    allows up to 5 attempts) -- a raw duplicate `INSERT` on the primary
+    key would otherwise surface as an unhandled
+    `UniqueViolationError` on a retried-but-already-succeeded first
+    attempt, same idempotency concern `review-approval-temporal`'s own
+    `persist_request` activity already handles this exact way."""
     pool = await _get_pool()
-    return await pool.fetchrow(
+    record = await pool.fetchrow(
         """
         INSERT INTO applications (
             application_id, applicant_identifier, customer_id, workflow_id,
             product_type, payload, applicant_name, applicant_email,
             applicant_phone, amount
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (application_id) DO NOTHING
         RETURNING *
         """,
         application_id,
@@ -81,6 +90,14 @@ async def insert(
         applicant_phone,
         amount,
     )
+    if record is not None:
+        return record
+    # A retry of an already-succeeded first attempt -- return the
+    # existing row rather than None, so the activity still completes
+    # normally.
+    record = await get(application_id)
+    assert record is not None, "row must exist after ON CONFLICT DO NOTHING"
+    return record
 
 
 async def update_decision(

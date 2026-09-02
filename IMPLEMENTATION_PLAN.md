@@ -746,7 +746,7 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > the P6-1 setup. Verified against a real local Postgres via the
       > same temporary 5433 port remap as P6-1 (reverted before
       > committing, zero diff).
-- [ ] **P6-3** — `application/activities.py`: `persist_application`,
+- [x] **P6-3** — `application/activities.py`: `persist_application`,
       `persist_decision`, `persist_resubmit` — `@activity.defn`,
       registered under the same string names `workflow/workflows.py`
       calls (Phase 4). Each writes to `application/db.py` directly (the
@@ -791,6 +791,49 @@ being a customer yet"), so P6-3 can't be written until both exist.
       retry-idempotency case above), and a test confirming a
       `REJECTED`/`CANCELLED` call never touches `customer/`/`account/`
       or these two `document.service` functions at all.
+      > DONE: **Real gap found and fixed in `application/db.py`
+      > (P6-1) while building this task**: `insert()`'s raw `INSERT`
+      > had no protection against a Temporal retry of an
+      > already-succeeded `persist_application` execution — a second
+      > call with the same `application_id` (the primary key) would
+      > have raised a raw `UniqueViolationError` instead of completing
+      > idempotently. Fixed with `ON CONFLICT (application_id) DO
+      > NOTHING` + a fallback `SELECT`, same pattern
+      > `customer/db.py`'s `get_or_create` already uses, and the same
+      > idempotency concern `review-approval-temporal`'s own
+      > `persist_request` activity handles identically — added a test
+      > for it in `test_db.py` too, not just here.
+      > `persist_decision` branches on `actor_role` to decide which
+      > column set to write (`underwriter_*`/`manager_*`/neither for a
+      > customer-initiated `CANCELLED`), and recomputes "now" for
+      > `underwriter_decided_at`/`manager_decided_at` on every
+      > execution rather than trying to preserve an exact original
+      > timestamp across a Temporal retry — deliberately matching
+      > `review-approval-temporal`'s own `persist_decision`, which
+      > doesn't solve that problem either (its `closed_at` only takes
+      > an explicit override for the native-cancel path, same as this
+      > project's `decided_at`). `tests/unit/application/test_activities.py`,
+      > 9 tests, real Postgres for `application`/`customer`/`account`
+      > (same database, same deliberate exception) with
+      > `document.service`'s two managed-document calls mocked via
+      > `monkeypatch.setattr` on `activities.document_service` — all
+      > passed on the first real run, no further bugs found. Covers
+      > every DoD point literally: underwriter reject (no provisioning,
+      > right columns), underwriter escalation (no provisioning),
+      > terminal approve (provisions customer + account, calls both
+      > `document.service` functions with the right string-cast ids),
+      > approve reusing an already-resolved `customer_id` (asserts
+      > `customer.service.get_or_create` is never even called, not just
+      > that the result is correct), **approve called twice in a row
+      > for the same application — asserts exactly one `accounts` row
+      > and exactly one call each to the two `document.service`
+      > functions**, cancelled (touches neither column set nor
+      > provisioning), native-cancel's explicit `decided_at` override,
+      > and resubmit. Verified against a real local Postgres via the
+      > same temporary 5433 port remap as P6-1/P6-2 (reverted before
+      > committing, zero diff) — ran alongside the full
+      > `customer`/`account`/`application` suites together (45 tests)
+      > to confirm no cross-module interference.
 - [ ] **P6-4** — `application/service.py`, part 1:
       `create_application(applicant_identifier, product_type,
       payload, applicant_name, applicant_email, applicant_phone,
