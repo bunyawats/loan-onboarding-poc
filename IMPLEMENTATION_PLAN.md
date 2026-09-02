@@ -1046,9 +1046,14 @@ is.)*
   retry in `mayan_client.py`'s `_request`, documented as a new entry in
   `CLAUDE.md`'s "Known gaps" (the fetch-all-then-filter search pattern
   inherited from the reference project is still O(all documents) per
-  call and will need real server-side filtering past POC scale). Next:
-  Phase 6 (Application Module), starting at P6-1 — all its dependencies
-  (Phases 1-5) are now satisfied.
+  call and will need real server-side filtering past POC scale). Pushed
+  all four Phase 5 commits (P5-1 through P5-4/P5-5) together and
+  confirmed green on GitHub Actions CI (`gh run watch`, run
+  `33585937933`, `unit-tests` passed in 32s, including the new
+  `tests/unit/document/` suite alongside the existing Postgres-backed
+  and `WorkflowEnvironment`-backed tests). Next: Phase 6 (Application
+  Module), starting at P6-1 — all its dependencies (Phases 1-5) are now
+  satisfied.
 
 - **2026-09-02** — Confirmed Phase 4's commit (`8312db9`) is green on
   GitHub Actions CI (`gh run watch`, run `33583072309`, `unit-tests`
