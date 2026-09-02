@@ -1289,7 +1289,9 @@ is.)*
   every commit, zero diff each time. Next: Phase 7 (Worker Composition
   Root & End-to-End Workflow Verification) — P7-1 (`worker_main.py`)
   should be a fairly mechanical extraction of the ad-hoc wiring this
-  session's own verification scripts already used repeatedly.
+  session's own verification scripts already used repeatedly. Pushed
+  all six Phase 6 commits and confirmed green on GitHub Actions CI
+  (`gh run watch`, run `33588016171`, `unit-tests` passed in 40s).
 
 - **2026-09-02** — Phase 5 (Document Module) complete, all five tasks
   checked. Brought up `mayan`/`mayan-db`/`mayan-redis` for real (P5-1),
