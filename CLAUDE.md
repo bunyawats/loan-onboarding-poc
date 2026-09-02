@@ -1349,39 +1349,48 @@ for `KEYCLOAK_ISSUER`.
   written, but `persist_decision` has no graceful handling for the
   resulting write failure; it would surface as an activity error, not a
   clean outcome.
-- **A second, non-racy way to hit the same failure — found live in
-  Phase 13's P13-7 verification sweep, not just reasoned about.**
-  `check_decision_allowed`'s short-circuit
-  (`if record["customer_id"] is None: return []`, "a brand-new
-  applicant can't conflict with an existing active account") is only
-  correct for an applicant with *no other* application anywhere. Two
-  applications submitted under the same `applicant_identifier` before
-  either is decided both get `customer_id = NULL` at submission (per
-  "Applying without being a customer yet"). If one is approved first
-  (provisioning a customer + an `ACTIVE` `personal_loan` account) and
-  the *other*, older sibling application — whose own `customer_id`
+- **Resolved, found live in Phase 13's P13-7 verification sweep, not
+  just reasoned about.** `check_decision_allowed`'s short-circuit used
+  to read `if record["customer_id"] is None: return []` — "a brand-new
+  applicant can't conflict with an existing active account" — which is
+  only correct for an applicant with *no other* application anywhere.
+  Two applications submitted under the same `applicant_identifier`
+  before either is decided both get `customer_id = NULL` at submission
+  (per "Applying without being a customer yet"). If one is approved
+  first (provisioning a customer + an `ACTIVE` `personal_loan` account)
+  and the *other*, older sibling application — whose own `customer_id`
   column was never backfilled, since it's a different row — is later
-  Approved, `check_decision_allowed` still reads that row's own `NULL`
-  `customer_id` and returns `[]`, never resolving via
-  `applicant_identifier` the way `persist_decision`'s own provisioning
-  step does. The signal reaches the workflow uncontested;
-  `persist_decision` then hits the exact same
-  `ux_accounts_customer_active_product_type` `UniqueViolationError`
-  as the race above, but deterministically, no timing window required.
-  Reproduced directly: two `personal_loan` applications submitted back
-  to back under one identifier, the first Approved (provisioning
-  `cus-911063467`/`acc-604713440`), the second's later Approve then
-  failing every retry with
+  Approved, the old code still read that row's own `NULL` `customer_id`
+  and returned `[]`, never resolving via `applicant_identifier` the way
+  `persist_decision`'s own provisioning step does. The signal reached
+  the workflow uncontested; `persist_decision` then hit the exact same
+  `ux_accounts_customer_active_product_type` `UniqueViolationError` as
+  the race above, but deterministically, no timing window required.
+  Reproduced directly before the fix: two `personal_loan` applications
+  submitted back to back under one identifier, the first Approved
+  (provisioning `cus-911063467`/`acc-604713440`), the second's later
+  Approve then failing every retry with
   `duplicate key value violates unique constraint
   "ux_accounts_customer_active_product_type"` — the activity's 5
   retries all failed identically, and the Temporal workflow itself
   ended in `FAILED` status with the application permanently stuck at
   `PENDING_UNDERWRITING`, no error ever surfaced to `bff_backoffice` or
-  a staff member. `check_decision_allowed` would need to resolve via
-  `customer.service.find_by_identifier(application.applicant_identifier)`
-  when `customer_id` is `NULL`, not trust the column alone, to close
-  this — not attempted here; this bullet documents the confirmed gap,
-  not a fix.
+  a staff member. **Fixed** by having `check_decision_allowed` resolve
+  via `customer.service.find_by_identifier(application.applicant_identifier)`
+  when `customer_id` is `NULL`, instead of trusting the column alone —
+  a genuinely new applicant still short-circuits to `[]` (no customer
+  resolves at all), but a since-approved sibling application is now
+  found. Re-verified live against the exact repro above: the second
+  Approve now returns a clean `"customer already has an active
+  personal_loan account"` error in the review dialog, the application
+  stays at `PENDING_UNDERWRITING` (not signaled), and no Temporal
+  workflow is touched at all — confirmed via `psql` and the worker
+  logs staying silent. See `application/service.py`'s
+  `check_decision_allowed` and `tests/unit/application/test_service.py`'s
+  `test_check_decision_allowed_resolves_by_identifier_when_customer_id_null_but_customer_exists`.
+  The adjacent race-window gap immediately above this bullet is
+  unaffected by this fix — it's a separate, narrower timing issue this
+  change doesn't touch.
 - Module boundaries are enforced by import-linter config, not by a
   process/network boundary — a determined or careless change can still
   violate them if CI isn't actually wired to fail on a violation. Don't

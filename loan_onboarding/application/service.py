@@ -160,17 +160,43 @@ async def check_decision_allowed(application_id: str, decision: str) -> list[str
     Cancel never create an account, so never conflict). Called by
     `bff_backoffice` *before* signalling a decision -- never by
     `application/activities.py`, which has no clean way to surface an
-    error back to a decision-maker from inside a running activity."""
+    error back to a decision-maker from inside a running activity.
+
+    `record["customer_id"]` alone is NOT proof the applicant has no
+    existing customer -- corrected after a real bug found live in
+    Phase 13's P13-7 verification sweep (see CLAUDE.md's Known Gaps).
+    Two applications submitted under the same `applicant_identifier`
+    before either is decided both get `customer_id = NULL` at
+    submission; if one is later approved (provisioning a customer +
+    account) the *other*, older sibling's own row is never backfilled,
+    since it's a different row. Trusting its `NULL` `customer_id` as
+    "definitely no conflict" let a second Approve for the same
+    applicant+product_type reach `persist_decision` uncontested, which
+    then failed `ux_accounts_customer_active_product_type` on every
+    retry and left the application stuck at `PENDING_UNDERWRITING`
+    with a `FAILED` Temporal workflow underneath. Resolving via
+    `customer.service.find_by_identifier` when the column is `NULL` --
+    the same read-only lookup `create_application` already uses --
+    closes this: a genuinely new applicant still resolves to `None`
+    and short-circuits below, but a since-approved sibling application
+    is now found."""
     if decision != "APPROVE":
         return []
 
     record = await application_db.get(application_id)
-    if record is None or record["customer_id"] is None:
-        # A brand-new applicant (no resolved customer yet) can't
-        # possibly conflict with an existing active account.
+    if record is None:
         return []
 
-    has_active = await account_service.has_active_account_of_type(record["customer_id"], record["product_type"])
+    customer_id = record["customer_id"]
+    if customer_id is None:
+        customer = await customer_service.find_by_identifier(record["applicant_identifier"])
+        if customer is None:
+            # Genuinely no resolved customer for this applicant yet --
+            # can't possibly conflict with an existing active account.
+            return []
+        customer_id = customer.customer_id
+
+    has_active = await account_service.has_active_account_of_type(customer_id, record["product_type"])
     if has_active:
         return [f"customer already has an active {record['product_type']} account"]
     return []

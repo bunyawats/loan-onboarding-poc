@@ -150,18 +150,25 @@ complete.** A full `docker compose down -v && docker compose up -d
 live-verification sweep (all three product types, direct approve,
 escalation-then-manager-approve, reject, cancel, more-info-then-resubmit)
 all passed against the new id scheme. **One genuine, pre-existing bug
-(not caused by Phase 13) was found live during this sweep** — see
-`CLAUDE.md`'s Known Gaps, the new bullet just under the existing
-active-account-race-window one: `check_decision_allowed` can miss a
-real active-account conflict (not just race it) when two applications
-share an `applicant_identifier` and one is approved before the other,
-leaving the second stuck at `PENDING_UNDERWRITING` with its Temporal
-workflow `FAILED`. Not fixed — out of scope for an id-format migration
-phase; surfaced to the user, not silently left in this file. **This
-plan's own backlog is empty again** — remaining work is only the
-Known Gaps in `CLAUDE.md` (including the newly-confirmed one above),
-same as after Phase 12. Commit and push are still pending confirmation
-from the user before this session does them.
+(not caused by Phase 13) was found live during this sweep, then fixed
+in a same-day follow-up** (not its own numbered phase — a bug fix, not
+new build-out) — see `CLAUDE.md`'s Known Gaps, the bullet just under
+the still-open active-account-race-window one: `check_decision_allowed`
+was missing a real active-account conflict (not just racing it) when
+two applications share an `applicant_identifier` and one is approved
+before the other, leaving the second stuck at `PENDING_UNDERWRITING`
+with its Temporal workflow `FAILED`. Fixed by resolving via
+`customer.service.find_by_identifier` when `customer_id` is `NULL`
+instead of trusting that column alone; re-verified live against the
+exact repro (a fresh pair of sibling `personal_loan` applications) —
+the second Approve now returns a clean blocking error instead of
+reaching the workflow at all. New regression test:
+`tests/unit/application/test_service.py`'s
+`test_check_decision_allowed_resolves_by_identifier_when_customer_id_null_but_customer_exists`.
+**This plan's own backlog is empty again** — remaining work is only
+the Known Gaps in `CLAUDE.md` (the race-window variant of this same
+area is still open, deliberately — see that bullet), same as after
+Phase 12.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2194,6 +2201,24 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Fixed the `check_decision_allowed` bug found live
+  during P13-7's verification sweep (see that Session Log entry and
+  `CLAUDE.md`'s Known Gaps for the full mechanism). The fix: resolve
+  `customer_id` via `customer.service.find_by_identifier(applicant_identifier)`
+  when the application's own `customer_id` column is `NULL`, instead
+  of trusting `NULL` as proof no customer could possibly exist.
+  Full unit suite (192 tests, including the new regression test) and
+  `lint-imports` pass. Rebuilt `app`/`worker-workflow`/`worker-activity`
+  and re-verified live: two fresh `personal_loan` applications under
+  one identifier, first Approved (provisioned `cus-537708272`/
+  `acc-031947334`), second Approve now correctly blocked in the review
+  dialog with `"customer already has an active personal_loan account"`
+  — confirmed via `psql` the second application stayed at
+  `PENDING_UNDERWRITING` and via worker logs that no activity ever ran
+  for it (the old bug's `FAILED` Temporal workflow + silent stuck
+  application no longer happens). Not committed/pushed yet pending
+  user confirmation.
 
 - **2026-09-02** — Confirmed the CI run for Phase 13's push
   (`gh run list --branch main`, run id `33637386503`, commit `ccad573`)

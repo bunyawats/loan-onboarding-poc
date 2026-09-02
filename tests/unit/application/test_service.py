@@ -375,16 +375,45 @@ async def test_check_decision_allowed_noop_for_non_approve_decisions(monkeypatch
     assert result == []
 
 
-async def test_check_decision_allowed_short_circuits_when_customer_id_null(monkeypatch):
-    application_id = await _seed_application(customer_id=None)
+async def test_check_decision_allowed_permits_when_customer_id_null_and_genuinely_no_customer(monkeypatch):
+    application_id = await _seed_application(applicant_identifier="brand-new-approver@example.com", customer_id=None)
 
     async def fail_if_called(*args, **kwargs):
-        raise AssertionError("account.service must not be called when customer_id is NULL")
+        raise AssertionError("account.service must not be called when no customer resolves at all")
 
     monkeypatch.setattr(service.account_service, "has_active_account_of_type", fail_if_called)
 
     result = await service.check_decision_allowed(application_id, "APPROVE")
     assert result == []
+
+
+async def test_check_decision_allowed_resolves_by_identifier_when_customer_id_null_but_customer_exists():
+    """Reproduces a real bug found live in Phase 13's P13-7 verification
+    sweep (see CLAUDE.md's Known Gaps): two applications submitted under
+    the same applicant_identifier before either is decided both get
+    customer_id = NULL at submission. If one is approved first
+    (provisioning a customer + an ACTIVE account) and the *other*, older
+    sibling application -- whose own customer_id column was never
+    backfilled -- is later Approved, check_decision_allowed must not
+    trust that NULL column as proof of no conflict; it has to re-resolve
+    via applicant_identifier, the same way persist_decision's own
+    provisioning step does."""
+    identifier = "sibling-applications@example.com"
+    customer = await customer_db.get_or_create(identifier)
+    customer_id = customer["customer_id"]
+    # Simulates the already-provisioned ACTIVE account a sibling
+    # application's approval would have created.
+    await account_db.create(customer_id, "personal_loan", _fake_application_id())
+
+    # This application's own customer_id is NULL -- it was submitted
+    # before the sibling was approved and never got backfilled.
+    application_id = await _seed_application(
+        applicant_identifier=identifier, customer_id=None, product_type="personal_loan"
+    )
+
+    result = await service.check_decision_allowed(application_id, "APPROVE")
+    assert result != []
+    assert "personal_loan" in result[0]
 
 
 async def test_check_decision_allowed_blocks_when_active_account_of_same_type_exists():
