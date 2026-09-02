@@ -278,6 +278,99 @@ async def test_persist_decision_retry_after_document_service_failure_does_not_do
     assert final_account.account_id == account_after_failure.account_id
 
 
+async def test_persist_decision_approve_converts_to_rejected_on_active_account_conflict(_mock_document_service):
+    """Reproduces the race-window gap found live in Phase 13's own
+    verification sweep (CLAUDE.md's Known Gaps): two applications for
+    the same applicant_identifier + product_type can both pass
+    check_decision_allowed before either commits (that function is
+    application/service.py's concern, not exercised here -- this test
+    goes straight to the activity to prove persist_decision itself
+    handles losing the race gracefully). The second Approve to reach
+    create_account loses to the real ux_accounts_customer_active_product_type
+    partial unique index; persist_decision must convert that into a
+    clean REJECTED write instead of letting the exception propagate --
+    which used to retry 5 times and fail the whole Temporal workflow,
+    leaving the application stuck at its pre-decision status forever,
+    no error ever surfaced to staff."""
+    identifier = "race-conflict@example.com"
+    application_id_1 = await _seed_application(applicant_identifier=identifier)
+    application_id_2 = await _seed_application(applicant_identifier=identifier)
+
+    # First Approve provisions a customer + an ACTIVE personal_loan account.
+    first_status = await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id_1,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+    assert first_status == "APPROVED"
+
+    # Second Approve for the same applicant+product_type genuinely loses
+    # the race against the real partial unique index -- not mocked.
+    second_status = await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id_2,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+
+    assert second_status == "REJECTED"
+
+    second_record = await application_db.get(application_id_2)
+    assert second_record["status"] == "REJECTED"
+    assert "active personal_loan account" in second_record["underwriter_comment"]
+    assert await account_service.get_by_application_id(application_id_2) is None
+
+    # No second account was created for the shared customer.
+    acct_pool = await account_db._get_pool()
+    account_count = await acct_pool.fetchval(
+        "SELECT count(*) FROM accounts WHERE customer_id = $1", second_record["customer_id"]
+    )
+    assert account_count == 1
+
+    # The conflict path never reaches document.service -- only the
+    # first, winning Approve's welcome letter exists.
+    assert len(_mock_document_service["welcome_letter"]) == 1
+
+
+async def test_persist_decision_reraises_a_different_unique_violation_unrecognized(monkeypatch):
+    """The conflict-to-REJECTED conversion is deliberately narrow -- it
+    only recognizes ux_accounts_customer_active_product_type by name.
+    Any other UniqueViolationError (a bug, or a constraint this code
+    doesn't know about) must still propagate as a real activity error,
+    not be silently swallowed."""
+    import asyncpg
+
+    application_id = await _seed_application()
+
+    async def fail_with_unrelated_constraint(*args, **kwargs):
+        exc = asyncpg.exceptions.UniqueViolationError("simulated")
+        exc.constraint_name = "some_other_constraint"
+        raise exc
+
+    monkeypatch.setattr(activities.account_service, "create_account", fail_with_unrelated_constraint)
+
+    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+        await activities.persist_decision(
+            PersistDecisionInput(
+                application_id=application_id,
+                actor_role="underwriter",
+                decision="APPROVE",
+                actor_name="u1",
+                comment="approved",
+                resulting_status="APPROVED",
+            )
+        )
+
+
 async def test_persist_decision_cancelled_touches_no_decision_columns_or_provisioning(_mock_document_service):
     application_id = await _seed_application()
 

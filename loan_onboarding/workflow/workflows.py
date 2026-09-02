@@ -263,7 +263,15 @@ class LoanApplicationWorkflow:
             self._busy = False  # this attempt never actually transitioned
             raise ApplicationError(str(e))
 
-        await workflow.execute_activity(
+        # persist_decision returns the status it actually wrote -- not
+        # necessarily `resulting_status` verbatim. An Approve can lose
+        # the active-account-per-product-type race after this signal
+        # already passed check_decision_allowed (CLAUDE.md's Known
+        # Gaps); persist_decision converts that into a clean REJECTED
+        # write rather than raising, and self._status has to agree with
+        # whatever actually landed in Postgres, not the status this
+        # workflow *intended* before the activity ran.
+        actual_status = await workflow.execute_activity(
             "persist_decision",
             PersistDecisionInput(
                 application_id=self._application_id,
@@ -275,8 +283,9 @@ class LoanApplicationWorkflow:
             ),
             start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
+            result_type=str,
         )
-        self._status = resulting_status
+        self._status = actual_status
         if is_terminal:
             self._finalized = True
             self._closed_by = actor_name

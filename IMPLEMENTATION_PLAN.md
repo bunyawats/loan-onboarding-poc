@@ -2202,6 +2202,34 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-02** — Fixed the active-account-race-window gap's "no
+  graceful handling" half (the race window itself is deliberately
+  still open -- see `CLAUDE.md`'s Known Gaps). Reproduced live first,
+  via the underwriter's own Bulk Approve action (two `personal_loan`
+  applications for one identifier, both selected and approved
+  together -- its pre-check loop lets both pass `check_decision_allowed`
+  before either signal goes out, then fires both signals concurrently):
+  confirmed the loser's `persist_decision` hit a real
+  `UniqueViolationError` on `ux_accounts_customer_active_product_type`,
+  retried 5 times, failed the Temporal workflow (`Status: FAILED`), and
+  left the application stuck at `PENDING_UNDERWRITING` forever. Given
+  four options, the user chose: convert the loser's outcome into a
+  clean `REJECTED` write (system-generated comment) instead of letting
+  the exception propagate. Also fixed a related, previously-latent
+  inconsistency while implementing this: `persist_decision` now returns
+  the status it actually wrote, and `workflows.py`'s `submit_decision`
+  uses that return value for the workflow's own `self._status` instead
+  of its pre-computed value, so the workflow's own `get_status` query
+  can never disagree with Postgres (nothing queries it directly today,
+  but this was a real, if unobserved, gap). Full unit suite (194 tests,
+  including 2 new regression tests) and `lint-imports` pass. Rebuilt
+  `app`/`worker-workflow`/`worker-activity` and re-verified live against
+  the exact repro: the loser now lands cleanly on `REJECTED` with the
+  auto-generated comment, its Temporal workflow ends `Status: COMPLETED`
+  (not `FAILED`) with a query result correctly reporting
+  `"status":"REJECTED"`, and the worker logs stay silent -- no retries,
+  no traceback. Not committed/pushed yet pending user confirmation.
+
 - **2026-09-02** — Fixed the `check_decision_allowed` bug found live
   during P13-7's verification sweep (see that Session Log entry and
   `CLAUDE.md`'s Known Gaps for the full mechanism). The fix: resolve

@@ -359,15 +359,17 @@ the *outcome* of an approved loan, not something that pre-exists it.**
   `application/service.py`'s new read-only call into
   `account.service.has_active_account_of_type(customer_id,
   product_type)` (see the corrected module-boundary rule above). **A
-  real, accepted gap, not fully closed**: the window between this
-  pre-check passing and `persist_decision` actually writing the account
-  is small but nonzero (e.g. two different staff members approving two
-  different applications for the same customer+product_type within
-  that window) — if it's ever hit, the partial unique index is the
-  backstop (the `INSERT` fails), but `persist_decision` has no special
-  handling for that failure today; it would surface as an activity
-  error rather than a clean outcome. Worth revisiting if this ever
-  stops being rare enough to ignore for a POC.
+  real, accepted gap in the window itself, not fully closed**: two
+  different staff members approving two different applications for the
+  same customer+product_type within the small-but-nonzero window
+  between this pre-check passing and `persist_decision` actually
+  writing the account can still both pass the check — the partial
+  unique index is the backstop that stops the bad state from ever
+  being written. What's no longer a gap is what happens to the loser
+  when that's hit: `persist_decision` now converts it into a clean
+  `REJECTED` outcome instead of a stuck application and a `FAILED`
+  Temporal workflow — see "Known gaps" below for the full mechanism,
+  the live repro, and why the window itself was left open on purpose.
 - **Document hierarchy still gates submission on a two-level branch**
   (`<applicant_identifier> -> <application_id> -> category`, see
   "Document hierarchy" below) — document upload/completeness-check at
@@ -1340,15 +1342,59 @@ for `KEYCLOAK_ISSUER`.
 - No real customer authentication on `bff_customer/` (PRD §7.1) — still
   the standout risk; unaffected by `bff_backoffice/`'s real Keycloak
   auth, since they're separate surfaces with separate identity models.
-- The active-account-per-product-type rule (`accounts.product_type`'s
-  partial unique index, "Applying without being a customer yet") is
-  checked before a decision is signaled, but not atomically with it —
-  two near-simultaneous Approve decisions for the same customer and
-  product type could both pass `check_decision_allowed` before either
-  commits. The database constraint stops the bad state from ever being
-  written, but `persist_decision` has no graceful handling for the
-  resulting write failure; it would surface as an activity error, not a
-  clean outcome.
+- **Resolved (the "no graceful handling" half only — the race window
+  itself is deliberately still open, see below).** The active-account-
+  per-product-type rule (`accounts.product_type`'s partial unique
+  index, "Applying without being a customer yet") is checked before a
+  decision is signaled, but not atomically with it — two near-
+  simultaneous Approve decisions for the same customer and product type
+  can both pass `check_decision_allowed` before either commits. The
+  database constraint always stopped the bad state from ever being
+  *written*; what used to be missing was any graceful handling of the
+  resulting write failure on the loser's side. Reproduced live via the
+  underwriter's own Bulk Approve action (its pre-check loop runs
+  `check_decision_allowed` for every selected item *before* any signal
+  goes out, then fires all signals concurrently via `asyncio.gather` —
+  the natural way to hit the real race, not a race condition needing
+  threading tricks to simulate): two `personal_loan` applications for
+  one identifier, both selected and bulk-approved together, one
+  genuinely won the `ux_accounts_customer_active_product_type` race and
+  the other's `persist_decision` hit the real
+  `UniqueViolationError` — before the fix, that retried 5 times
+  identically, failed the whole Temporal workflow (`Status: FAILED`),
+  and left the application stuck at its pre-decision status forever,
+  no error ever surfaced to staff. **Fixed** by having
+  `persist_decision` catch that specific constraint violation and
+  convert the loser's outcome into a clean `REJECTED` write (with a
+  system-generated comment explaining the conflict) instead of letting
+  the exception propagate — confirmed by design decision with the user
+  (three other options were on the table: leave it, fail fast but still
+  stuck, or add a distributed lock; converting to a clean terminal
+  state was chosen as the one that actually closes the "stuck forever"
+  outcome without the invasiveness of serializing the check-and-write).
+  `persist_decision` now also returns the status it actually wrote, and
+  `workflows.py`'s `submit_decision` uses that return value (not its
+  own pre-computed `resulting_status`) for the workflow's own
+  `self._status` — closing a related, previously-unnoticed
+  inconsistency where the workflow's own `get_status` query could have
+  disagreed with what Postgres actually held (nothing in this codebase
+  queries workflow status directly today, so this was latent, not
+  observed, but is now correct either way). Re-verified live against
+  the exact repro above: the losing application lands cleanly on
+  `REJECTED` with the auto-generated comment, its Temporal workflow
+  ends `Status: COMPLETED` (not `FAILED`) with a query result that
+  correctly reports `"status":"REJECTED"`, and the worker logs stay
+  silent — no retries, no traceback. **What's still an open,
+  deliberately-accepted gap**: the race window itself (two decisions
+  passing `check_decision_allowed` before either commits) is
+  unchanged — this fix only guarantees a clean *outcome* when the race
+  is lost, it doesn't prevent the race from happening. A real fix for
+  the window itself (e.g. a distributed lock keyed on
+  `customer_id`+`product_type`, held across the check-then-signal gap)
+  would be more invasive and wasn't the scope of this pass. See
+  `application/activities.py`'s `persist_decision` and
+  `tests/unit/application/test_activities.py`'s
+  `test_persist_decision_approve_converts_to_rejected_on_active_account_conflict`.
 - **Resolved, found live in Phase 13's P13-7 verification sweep, not
   just reasoned about.** `check_decision_allowed`'s short-circuit used
   to read `if record["customer_id"] is None: return []` — "a brand-new

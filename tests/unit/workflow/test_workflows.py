@@ -61,8 +61,14 @@ def _make_fake_activities(calls: list[_RecordedCall]):
         calls.append(_RecordedCall("persist_application", inp))
 
     @activity.defn(name="persist_decision")
-    async def persist_decision(inp: PersistDecisionInput) -> None:
+    async def persist_decision(inp: PersistDecisionInput) -> str:
+        # Mirrors the real activity's normal-path return (the status it
+        # actually wrote) -- application/activities.py's own tests cover
+        # the active-account-conflict path where this can differ from
+        # inp.resulting_status; that's an application/ concern, not a
+        # workflow-orchestration one, so it isn't faked here.
         calls.append(_RecordedCall("persist_decision", inp))
+        return inp.resulting_status
 
     @activity.defn(name="persist_resubmit")
     async def persist_resubmit(inp: PersistResubmitInput) -> None:

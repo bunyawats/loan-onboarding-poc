@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import asyncpg
 from temporalio import activity
 
 from loan_onboarding.account import service as account_service
@@ -30,6 +31,14 @@ from loan_onboarding.workflow.workflows import (
     PersistDecisionInput,
     PersistResubmitInput,
 )
+
+# The one business-rule constraint account/db.py's create() deliberately
+# lets propagate uncontested (see its own docstring) -- the caller here
+# is exactly the "someone who decides how to handle it" that comment
+# refers to. Any other UniqueViolationError (e.g. an accounts_pkey
+# collision) is already retried inside account/db.py itself and should
+# never reach here; re-raise it unrecognized rather than mask it.
+_ACTIVE_ACCOUNT_CONFLICT_CONSTRAINT = "ux_accounts_customer_active_product_type"
 
 
 @activity.defn
@@ -53,7 +62,12 @@ async def persist_application(inp: PersistApplicationInput) -> None:
 
 
 @activity.defn
-async def persist_decision(inp: PersistDecisionInput) -> None:
+async def persist_decision(inp: PersistDecisionInput) -> str:
+    """Returns the status actually written -- normally `inp.resulting_status`
+    verbatim, but see the active-account-conflict handling below, where
+    it can differ. `workflows.py`'s `submit_decision` uses this return
+    value (not its own pre-computed `resulting_status`) as the
+    workflow's own `self._status`, so the two never disagree."""
     application_id = inp.application_id
     record = await application_db.get(application_id)
     assert record is not None, f"application {application_id} not found"
@@ -81,6 +95,7 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
     # a native Temporal cancel) touches neither column set.
 
     customer_id: str | None = None
+    final_status = inp.resulting_status
 
     # Idempotency guard: a Temporal retry of an already-completed
     # APPROVED execution must not create a second account, a second
@@ -102,16 +117,44 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
             customer = await customer_service.get_or_create(record["applicant_identifier"])
             customer_id = customer.customer_id
 
-        account = await account_service.create_account(customer_id, record["product_type"], application_id)
-
-        await document_service.promote_government_id_to_customer_photo(application_id, customer_id)
-        await document_service.generate_welcome_letter(
-            account.account_id,
-            customer_id,
-            record["applicant_name"],
-            record["product_type"],
-            str(record["amount"]),
-        )
+        try:
+            account = await account_service.create_account(customer_id, record["product_type"], application_id)
+        except asyncpg.exceptions.UniqueViolationError as exc:
+            if exc.constraint_name != _ACTIVE_ACCOUNT_CONFLICT_CONSTRAINT:
+                raise
+            # Lost the active-account-per-product-type race (CLAUDE.md's
+            # Known Gaps): check_decision_allowed passed for this
+            # application before it was signaled, but a concurrently-
+            # processed application for the same customer+product_type
+            # won the race to actually create the account -- confirmed
+            # live via Phase 13's own bulk-approve verification. The
+            # database constraint already stopped the bad state from
+            # ever being written; converting this Approve into a clean
+            # REJECTED outcome (rather than letting the exception
+            # propagate) is what actually fixes the "stuck forever with
+            # a FAILED Temporal workflow, no error surfaced to staff"
+            # half of that gap. customer_id stays whatever it resolved
+            # to above -- get_or_create is itself idempotent, so a
+            # real, unused customer row isn't an orphaned-state concern.
+            final_status = "REJECTED"
+            conflict_note = (
+                f"Automatically rejected: customer already has an active "
+                f"{record['product_type']} account (lost a race against a "
+                f"concurrently-processed application for the same customer)."
+            )
+            if inp.actor_role == "underwriter":
+                underwriter_comment = f"{inp.comment} {conflict_note}".strip()
+            elif inp.actor_role == "manager":
+                manager_comment = f"{inp.comment} {conflict_note}".strip()
+        else:
+            await document_service.promote_government_id_to_customer_photo(application_id, customer_id)
+            await document_service.generate_welcome_letter(
+                account.account_id,
+                customer_id,
+                record["applicant_name"],
+                record["product_type"],
+                str(record["amount"]),
+            )
     elif existing_account is not None:
         # A retry that finds the account already provisioned -- carry
         # the already-resolved customer_id forward so the final write
@@ -128,7 +171,7 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
 
     await application_db.update_decision(
         application_id,
-        status=inp.resulting_status,
+        status=final_status,
         underwriter_name=underwriter_name,
         underwriter_comment=underwriter_comment,
         underwriter_decided_at=underwriter_decided_at,
@@ -138,6 +181,7 @@ async def persist_decision(inp: PersistDecisionInput) -> None:
         customer_id=customer_id,
         updated_at=inp.decided_at,
     )
+    return final_status
 
 
 @activity.defn
