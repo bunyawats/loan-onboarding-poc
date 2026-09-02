@@ -834,7 +834,7 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > committing, zero diff) — ran alongside the full
       > `customer`/`account`/`application` suites together (45 tests)
       > to confirm no cross-module interference.
-- [ ] **P6-4** — `application/service.py`, part 1:
+- [x] **P6-4** — `application/service.py`, part 1:
       `create_application(applicant_identifier, product_type,
       payload, applicant_name, applicant_email, applicant_phone,
       amount)`. **No `customer_id`/`account_id` params** — generates
@@ -856,6 +856,58 @@ being a customer yet"), so P6-3 can't be written until both exist.
       both still `NULL` (assuming a brand-new `applicant_identifier`),
       then submit an incomplete one and confirm no workflow was started
       (check Temporal Web UI — no new execution).
+      > DONE: **real architectural gap found and fixed while implementing
+      > this task, before writing any code**: this task's own literal
+      > spec ("generates `application_id`") gives `create_application` no
+      > way to accept a pre-existing id, but `document.service.upload(...)`
+      > needs an `application_id` to tag uploads with and Phase 11's own
+      > New Application flow is "document upload → review & submit,
+      > calling `create_application(...)`" — uploads happening *before*
+      > this call, against an id only this call was supposed to mint, is
+      > not satisfiable as originally specced. Fixed by making
+      > `application_id` an optional parameter (defaults to a fresh
+      > `uuid4()` if omitted, used verbatim if given) — `CLAUDE.md`
+      > updated in place with the full reasoning, marked "corrected from
+      > an earlier draft" per this file's convention. `workflow.service`'s
+      > functions take a `client: Client` as their first parameter
+      > (dependency-injection style, for testability) rather than owning
+      > one internally, so `application/service.py` needed its own
+      > lazily-connected module-level Temporal client — added
+      > `_get_temporal_client()`, same lazy-singleton shape as every
+      > `db.py`'s `_get_pool()`. `_wait_until()` ported directly from
+      > `review-approval-temporal`'s `workflow/service.py` (same
+      > constants, same "always return the last read, even on timeout"
+      > contract), polling `application/db.py`'s own `get()`.
+      > `tests/unit/application/test_service.py`, 8 tests — `workflow.service.start_workflow`
+      > and `_get_temporal_client` mocked at the function-call boundary
+      > (no real Temporal needed), `document.service.check_completeness`
+      > mocked the same way (no real Mayan needed), `customer.service`
+      > run for real against Postgres. Covers the missing-categories
+      > short-circuit, a simulated persist_application commit (via the
+      > mocked `start_workflow` inserting the row itself, standing in for
+      > what a real worker would do) proving `_wait_until` picks it up,
+      > existing-vs-new customer_id resolution, both the
+      > provided-`application_id` and generated-`application_id` paths,
+      > payload validation failure, and the wait-until-timeout-returns-None
+      > edge case with the timeout/interval constants shrunk via
+      > monkeypatch for test speed. **Then the DoD's actual
+      > integration-verify**, against the complete real local stack (`db`,
+      > `temporal`, `mayan`) plus a throwaway ad-hoc worker (scratchpad,
+      > not committed — `worker_main.py` doesn't exist until Phase 7, so
+      > this wired `workflow.worker.run_worker()` with
+      > `application/activities.py`'s three real activities directly, the
+      > same shape `worker_main.py` will eventually use): submitted an
+      > incomplete application, confirmed all 4 missing categories
+      > reported and — via a real `handle.describe()` call against
+      > Temporal — that no workflow execution exists for it at all; then
+      > uploaded all 4 required real documents under a *pre-minted*
+      > `application_id` (exactly the upload-before-submit flow that
+      > motivated the fix above) and called `create_application` with
+      > that same id, confirming a real `PENDING_UNDERWRITING` row with
+      > `customer_id`/`account_id` both `NULL` and a real `RUNNING`
+      > Temporal execution. Verified against Postgres via the same
+      > temporary 5433 port remap as every other P6 task (reverted before
+      > committing, zero diff).
 - [ ] **P6-5** — `application/service.py`, part 2:
       `resubmit_application(application_id, payload)` — same gate
       re-check, then `workflow.service.signal_resubmit()` against the

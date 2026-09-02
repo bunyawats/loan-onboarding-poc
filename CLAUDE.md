@@ -471,10 +471,32 @@ application domain specifically now that other domains have their own
 modules.
 
 - `service.create_application(applicant_identifier, product_type,
-  payload, applicant_name, applicant_email, applicant_phone, amount)` —
-  **no `customer_id`/`account_id` params** — neither is guaranteed to
-  exist yet (see "Applying without being a customer yet" above).
-  Generates `application_id` (UUID) first, resolves
+  payload, applicant_name, applicant_email, applicant_phone, amount,
+  application_id=None)` — **no `customer_id`/`account_id` params** —
+  neither is guaranteed to exist yet (see "Applying without being a
+  customer yet" above). **`application_id` is optional, corrected from
+  an earlier draft of this file that gave this function no such
+  parameter at all** — that draft said this function "generates
+  `application_id` (UUID) first," full stop, which quietly conflicts
+  with the customer-facing flow it's paired with elsewhere in this same
+  file: `document.service.upload(applicant_identifier, application_id,
+  category, file)` needs an `application_id` to tag uploads with, and
+  Phase 11's own New Application flow is specified as "document upload
+  → review & submit, calling `application.service.create_application(...)`"
+  — uploads happening *before* this call, against an id this function
+  alone was supposed to mint, is not satisfiable. The fix: `bff_customer`
+  mints a provisional `application_id` (a plain `uuid4()`, no domain
+  module needed for that) at the *start* of its wizard, threads it
+  through every `document.service.upload(...)` call during the flow,
+  and passes that same id to `create_application(...)` at final submit
+  — this function uses it verbatim instead of minting its own. If
+  omitted (a caller with no upload-first flow), this function generates
+  a fresh one itself, same as the original draft. Either way, the
+  returned result always carries `application_id` (even in the
+  missing-categories branch, which persists no row) so a caller that
+  *didn't* pre-mint one can still learn what id its just-checked
+  documents should be tagged under, then retry this same call once
+  they're uploaded. Resolves
   `customer_id` via the **read-only** `customer.service.find_by_identifier(applicant_identifier)`
   (`None` if this is a new applicant — `account_id` is always `None` at
   this point, full stop, regardless), validates

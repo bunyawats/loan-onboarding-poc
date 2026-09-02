@@ -39,3 +39,20 @@ class Application:
 
 class ApplicationNotFound(Exception):
     """Raised by service.get() when no application exists for the given id."""
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationSubmissionResult:
+    """Returned by both `create_application` and `resubmit_application`
+    -- either carries the resulting `Application` (the document gate was
+    satisfied and the workflow was started/signalled) or a non-empty
+    `missing_categories` list (nothing was started). `application_id` is
+    always present, even in the missing-categories branch (which
+    persists no row) -- see CLAUDE.md's note on `create_application`'s
+    optional `application_id` parameter: a caller that didn't pre-mint
+    one can still learn what id its just-checked documents should be
+    tagged under, then retry once they're uploaded."""
+
+    application_id: UUID
+    application: Application | None
+    missing_categories: list[str]
