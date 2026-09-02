@@ -74,13 +74,9 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phase 0 — done, all six tasks checked and verified, including CI
-confirmed green on GitHub Actions after the actual push.** Start here:
-[P1-1](#phase-1--data-layer) — note `db/schema.sql` and
-`db/init/01-init.sh` already exist and were exercised for real during
-Phase 0's P0-4 verification, so Phase 1 may already be effectively
-done; confirm against P1-1/P1-2's exact DoD before assuming so rather
-than re-doing the work.
+**Phases 0 and 1 — done.** Start here: [P2-1](#phase-2--customer-module)
+(Customer Module) — can run in parallel with Phase 3 (Account Module)
+if two sessions ever overlap, no dependency between them.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -181,16 +177,28 @@ assumption; until then treat it as provisional, not settled.)*
 
 **Depends on:** Phase 0. **Unblocks:** Phases 2, 3, 6.
 
-- [ ] **P1-1** — `db/schema.sql`: `customers`, `accounts`, `applications`
+- [x] **P1-1** — `db/schema.sql`: `customers`, `accounts`, `applications`
       tables per `PRD.md` §9, no foreign keys between them (per
       `CLAUDE.md`'s "Data storage" — deliberate).
-- [ ] **P1-2** — `db/init/*.sh`: creates the `loan_onboarding` and
+      > DONE (pre-existing from an earlier design session, re-verified
+      > here rather than assumed): `SELECT ... FROM pg_constraint WHERE
+      > contype = 'f'` against a real `loan_onboarding` database
+      > returns zero rows — confirmed no FKs exist, not just that none
+      > were written in the SQL by hand.
+- [x] **P1-2** — `db/init/*.sh`: creates the `loan_onboarding` and
       `temporal` databases in the one `db` Postgres container, applies
       `schema.sql` to `loan_onboarding` only.
       DoD (integration-verify): `docker compose up -d db`, then
       `psql` into both databases and confirm `applications`/`accounts`/
       `customers` exist only in `loan_onboarding`, and `temporal` is
       empty (Temporal's own migrations create its own tables later).
+      > DONE: re-verified with **`db` alone** (Phase 0's P0-4 check had
+      > brought `db` and `temporal` up together, so `temporal`'s own
+      > auto-setup had already populated its database by the time that
+      > was checked — not the same thing this task's DoD asks for).
+      > With only `db` running: `loan_onboarding` has exactly the 3
+      > tables, `temporal` database exists but `\dt` reports "Did not
+      > find any relations" — genuinely empty, as required.
 
 ---
 
@@ -760,6 +768,19 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 1 complete, both tasks checked. `db/schema.sql`
+  and `db/init/01-init.sh` already existed from an earlier design
+  session — re-verified them against P1-1/P1-2's *exact* DoD rather
+  than assuming the earlier Phase 0 check-off carried over: Phase 0's
+  P0-4 verification had brought `db` and `temporal` up *together*, so
+  by the time it checked, `temporal`'s own auto-setup had already
+  populated that database — not the same as this task's DoD, which
+  specifically wants `db` alone and an empty `temporal` database. Redid
+  the check with only `db` running: confirmed empty, and separately
+  confirmed zero FK constraints in `loan_onboarding` via
+  `pg_constraint`, not just eyeballing the SQL. No code changes this
+  session, only verification + checkbox updates.
 
 - **2026-09-02** — Phase 0 complete, all six tasks checked. Committed
   (`bad9ef9`) and pushed; confirmed P0-6's CI workflow actually ran
