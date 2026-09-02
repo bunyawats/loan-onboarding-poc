@@ -2,7 +2,11 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from loan_onboarding.application import db
+
+pytestmark = pytest.mark.usefixtures("_clean_applications_table")
 
 
 def _new_application_id():

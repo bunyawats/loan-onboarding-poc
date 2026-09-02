@@ -709,7 +709,7 @@ being a customer yet"), so P6-3 can't be written until both exist.
       > phase's workaround for this machine's native Postgres on 5432 --
       > reverted before committing, confirmed zero diff in
       > `docker-compose.yml` afterward).
-- [ ] **P6-2** — `application/schemas.py`: Pydantic payload model per
+- [x] **P6-2** — `application/schemas.py`: Pydantic payload model per
       product type (PRD §6.1's field tables), registry keyed by
       `product_type`, `assert` at import time checking this registry's
       keys match `workflow.task_queues.KNOWN_PRODUCT_TYPES` exactly
@@ -718,6 +718,34 @@ being a customer yet"), so P6-3 can't be written until both exist.
       DoD: a unit test that deliberately desyncs the two registries
       (monkeypatch one) and confirms the assert actually fires — don't
       just trust that it would.
+      > DONE: closely modeled on `review-approval-temporal`'s own
+      > `workflow/schemas.py` (fetched and read directly) — one Pydantic
+      > model per product type (`PersonalLoanPayload`/`AutoLoanPayload`/
+      > `MortgagePayload`, PRD §6.1's field tables), a
+      > `PRODUCT_TYPE_SCHEMAS` registry, and the import-time
+      > `assert set(...) == set(...)` against
+      > `workflow.task_queues.KNOWN_PRODUCT_TYPES`. `validate_payload()`
+      > uses `model_dump(mode="json")` specifically (not the bare
+      > default) so `Decimal` fields serialize to JSON-safe strings
+      > before ever reaching `application/db.py`'s `jsonb` codec, which
+      > calls plain `json.dumps` and cannot encode a raw `Decimal`.
+      > `tests/unit/application/test_schemas.py`, 8 tests — including
+      > the DoD's literal ask: `monkeypatch.setattr` on
+      > `workflow.task_queues.KNOWN_PRODUCT_TYPES` followed by
+      > `importlib.reload(schemas)` inside `pytest.raises(AssertionError)`,
+      > confirming the assert actually fires on a real re-import rather
+      > than trusting the expression would evaluate correctly — restores
+      > the module via a second reload after `monkeypatch.undo()` so
+      > later tests still see the real registry. Also had to rescope
+      > `tests/unit/application/conftest.py`'s Postgres-cleanup fixture
+      > (added in P6-1) from package-level `autouse=True` to an opt-in
+      > fixture used only by `test_db.py`'s `pytestmark` — as written it
+      > forced every test in the package (including these schema-only,
+      > no-I/O tests) to open a real database connection, caught by
+      > actually running this file rather than assumed compatible with
+      > the P6-1 setup. Verified against a real local Postgres via the
+      > same temporary 5433 port remap as P6-1 (reverted before
+      > committing, zero diff).
 - [ ] **P6-3** — `application/activities.py`: `persist_application`,
       `persist_decision`, `persist_resubmit` — `@activity.defn`,
       registered under the same string names `workflow/workflows.py`
