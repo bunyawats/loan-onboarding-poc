@@ -2232,8 +2232,9 @@ is.)*
   backstop for that, and closing it fully would need a lock spanning
   the check (web process) through the write (worker process,
   arbitrarily later via Temporal) -- explained to the user as a much
-  larger, riskier change not undertaken here. Not committed/pushed yet
-  pending user confirmation.
+  larger, riskier change not undertaken here. Committed and pushed
+  (commit `530d305`); CI run (`gh run list --branch main`, run id
+  `33648517532`) completed `success` in 48s.
 
 - **2026-09-02** — Fixed the active-account-race-window gap's "no
   graceful handling" half (the race window itself is deliberately
