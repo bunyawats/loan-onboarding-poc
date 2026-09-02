@@ -1159,6 +1159,27 @@ for `KEYCLOAK_ISSUER`.
   `_public_keycloak_issuer()` and `docker-compose.yml`'s `app` service
   comment. Verified via a real browser login/logout round trip through
   the fully containerized stack after the fix.
+- **Resolved post-P12**: `db`'s published host port (`5432`, Postgres's
+  own default) collides with a native, host-installed Postgres on a
+  developer machine that's already bound `127.0.0.1:5432` — confirmed
+  directly, twice, on this project's own dev machine: both a native
+  `psql postgresql://postgres:postgres@localhost:5432/loan_onboarding`
+  and pgAdmin (running natively, pointed at `localhost:5432`) silently
+  connected to the *native* Postgres instead of this container's, and
+  failed with `FATAL: role "postgres" does not exist` (a real,
+  reproducible error, not a hypothetical one — the native instance has
+  no `postgres` role, this container's does). `docker-compose.yml`'s
+  `db` service now publishes on `5433` instead — every in-Compose
+  service (`temporal`, `worker-activity`, `app`) is unaffected, since
+  they all reach this container via the internal hostname `db:5432`,
+  never the host-published port; only host-side tools (pgAdmin, a
+  native `psql`, or `DATABASE_URL` for a natively-run `app.py`/
+  `worker_main.py`, as several earlier phases' own manual verification
+  needed) have to know to use `5433`. This is the same class of
+  collision as the earlier `db`-vs-`mayan` port-8000 note above — a
+  developer machine's own pre-existing services silently shadowing a
+  container's published port, with no error until something actually
+  tries to connect and gets someone else's server.
 - **Mayan's default REST API rate limit (`REST_API_THROTTLING_RATE_USER`,
   20 req/sec out of the box) is real and gets hit at POC scale, not just
   in theory** — found in P5-4/P5-5 by actually running

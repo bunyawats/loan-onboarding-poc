@@ -22,7 +22,17 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-loan_onboarding}
     ports:
-      - "5432:5432"
+      # Published on 5433, NOT 5432 -- a native macOS Postgres binding
+      # 127.0.0.1:5432 wins over Docker's own published 5432 for any
+      # client connecting to "localhost"/"127.0.0.1" (confirmed directly:
+      # `psql localhost:5432` and pgAdmin both silently hit the native
+      # instance and fail with "role postgres does not exist", not this
+      # container). Every in-Compose service still reaches this one via
+      # the internal hostname `db:5432`, unaffected by the host port
+      # chosen here -- only host-side tools (pgAdmin, a native `psql`,
+      # DATABASE_URL for a natively-run app.py/worker_main.py) need to
+      # use 5433 explicitly.
+      - "5433:5432"
     volumes:
       # This script runs from here (official postgres image behavior).
       - ./db/init:/docker-entrypoint-initdb.d
