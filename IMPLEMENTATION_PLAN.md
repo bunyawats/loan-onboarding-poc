@@ -668,8 +668,47 @@ activities.py`'s `persist_decision` now calls `customer.service` and
 `account.service` on approval (see `CLAUDE.md`'s "Applying without
 being a customer yet"), so P6-3 can't be written until both exist.
 
-- [ ] **P6-1** — `application/models.py`, `application/db.py` (the only
+- [x] **P6-1** — `application/models.py`, `application/db.py` (the only
       code touching the `applications` table).
+      > DONE: `db.py` is deliberately a thin data-access layer --
+      > `insert`/`update_decision`/`update_resubmission` take
+      > already-resolved column values; the branching over *which*
+      > columns matter for a given decision (underwriter vs manager vs
+      > neither, for CANCELLED) lives in `application/activities.py`
+      > (P6-3), not here. `update_decision` uses `COALESCE($n, column)`
+      > for every optional column so a caller can update just the
+      > columns relevant to one decision without clobbering others
+      > (verified directly: a manager decision after an earlier
+      > underwriter escalation leaves the underwriter columns intact).
+      > Registered a `jsonb` type codec on the connection pool
+      > (`asyncpg` doesn't serialize dict<->jsonb on its own) so
+      > `payload` round-trips as a plain Python dict everywhere.
+      > **Real bug caught by actually running these tests against
+      > Postgres, not by reasoning about the SQL**: the first draft used
+      > `COALESCE($11, timezone('utc', now()))` for `updated_at`'s
+      > default -- `timezone('utc', now())` evaluates to a *naive*
+      > `timestamp`, which forced Postgres to infer `$11` itself as
+      > naive `timestamp` too (to match the other `COALESCE` branch),
+      > so passing a tz-aware Python `datetime` for the
+      > native-Temporal-cancel override raised
+      > `asyncpg.exceptions.DataError` ("can't subtract offset-naive and
+      > offset-aware datetimes") — fixed by using plain `now()` (already
+      > `timestamptz`, matching the column type, no inference mismatch).
+      > `tests/unit/application/test_db.py`, 13 tests (jsonb round-trip,
+      > insert defaults, `update_decision`'s column-preservation and
+      > provisioning-write behavior, the native-cancel `updated_at`
+      > override, resubmission, and `list_for_applicant`/`list_by_status`
+      > filtering+pagination+counts) — same deliberate real-Postgres
+      > exception as `customer`/`account`'s own `db.py` tests. Also
+      > incidentally proved `db/schema.sql`'s `chk_approved_has_account`
+      > constraint actually fires (two tests originally tried to set
+      > `status='APPROVED'` without an `account_id` and correctly got
+      > rejected — fixed the tests, not the constraint, once traced back
+      > to what the constraint is for). Verified against a real local
+      > Postgres via a temporary port remap (5433, same as every prior
+      > phase's workaround for this machine's native Postgres on 5432 --
+      > reverted before committing, confirmed zero diff in
+      > `docker-compose.yml` afterward).
 - [ ] **P6-2** — `application/schemas.py`: Pydantic payload model per
       product type (PRD §6.1's field tables), registry keyed by
       `product_type`, `assert` at import time checking this registry's
