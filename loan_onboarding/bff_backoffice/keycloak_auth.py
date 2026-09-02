@@ -1,0 +1,190 @@
+"""
+Low-level Keycloak integration for `bff_backoffice/` -- the only module
+in this codebase with a Keycloak dependency (CLAUDE.md's "Identity":
+no domain module validates a Keycloak token; they trust
+`bff_backoffice` to have already checked, since there's no network
+boundary between them for an unchecked call to cross). JWT validation
+and permission checks via a UMA ticket exchange, direct reuse of
+`review-approval-temporal`'s own `keycloak_auth.py`, adapted for this
+project's Resource/Scopes.
+
+Deliberately framework-agnostic (no FastAPI imports, no
+HTTPException) -- `bff_backoffice/keycloak_session.py` maps failures
+from here into redirects/403s.
+
+The five permissions (`UnderwriterApprove`, `UnderwriterReject`,
+`UnderwriterRequestMoreInfo`, `ManagerApprove`, `ManagerReject`) are
+Authorization Services Scopes on a single `LoanApplication` Resource on
+the `loan-onboarding-backoffice` client, each gated by a role-based
+Policy via its own scope-type Permission -- not realm roles. They never
+appear in a plain access token's `realm_access.roles` claim;
+`get_permissions()` below is what actually checks them, via a UMA
+ticket exchange, a real (not cached) call to Keycloak per check. See
+the `keycloak-admin` skill and `keycloak/import/loanrealm-realm.json`
+for the full structure.
+"""
+
+import os
+
+import httpx
+import jwt
+from jwt import PyJWKClient
+
+_jwk_client: PyJWKClient | None = None
+
+
+def _keycloak_issuer() -> str:
+    issuer = os.environ.get("KEYCLOAK_ISSUER")
+    if not issuer:
+        raise RuntimeError("KEYCLOAK_ISSUER is not set")
+    return issuer
+
+
+def _get_jwk_client() -> PyJWKClient:
+    global _jwk_client
+    if _jwk_client is None:
+        _jwk_client = PyJWKClient(f"{_keycloak_issuer()}/protocol/openid-connect/certs")
+    return _jwk_client
+
+
+def decode_token(token: str) -> dict:
+    """Validate a Keycloak-issued JWT's signature and issuer, returning
+    its claims.
+
+    Raises jwt.PyJWTError (or a subclass -- ExpiredSignatureError,
+    InvalidSignatureError, InvalidIssuerError, etc.) on any validation
+    failure. Callers catch jwt.PyJWTError, not a specific subclass,
+    unless they need to distinguish reasons.
+    """
+    jwk_client = _get_jwk_client()
+    signing_key = jwk_client.get_signing_key_from_jwt(token)
+    return jwt.decode(
+        token,
+        signing_key.key,
+        algorithms=["RS256"],
+        issuer=_keycloak_issuer(),
+        leeway=5,  # tolerate small clock skew between this host and Keycloak on iat/exp/nbf
+        options={"verify_aud": False},  # set an audience and verify it in production
+    )
+
+
+class TokenInvalid(Exception):
+    """The bearer token itself was rejected during a UMA ticket exchange
+    (expired, malformed, wrong signature, etc.) -- an authentication
+    failure, not an authorization one. Confirmed empirically (in the
+    reference project this is ported from): Keycloak returns 401
+    {"error": "invalid_grant", "error_description": "Invalid bearer
+    token"} for this case."""
+
+
+class PermissionCheckError(Exception):
+    """The UMA ticket exchange failed for an infrastructure reason
+    (Keycloak unreachable, misconfigured client, unexpected response
+    shape) -- distinct from both TokenInvalid and a clean "granted:
+    set()" empty-permissions result."""
+
+
+class RefreshFailed(Exception):
+    """The refresh token itself was rejected by Keycloak's token endpoint
+    (expired past ssoSessionIdleTimeout, revoked, or malformed) -- the
+    caller (`keycloak_session.py`'s `get_session_user()`) treats this the
+    same as a fully expired session: clear it and force re-login."""
+
+
+async def refresh_access_token(refresh_token: str) -> dict:
+    """Exchange a refresh token for a new token set via Keycloak's token
+    endpoint (grant_type=refresh_token). Returns the raw response dict
+    (access_token, refresh_token, expires_in, refresh_expires_in, ...).
+
+    Raises RefreshFailed only when Keycloak actually rejects the refresh
+    token (a real "please log in again" case). A network-level failure
+    (Keycloak unreachable) is deliberately left to propagate as a raw
+    httpx exception rather than folded into RefreshFailed -- an infra
+    outage should surface as a loud failure, not silently log out every
+    active session the moment its access token happens to expire (same
+    "infra failure vs. auth failure" split get_permissions() draws below
+    via PermissionCheckError vs. TokenInvalid).
+    """
+    client_id = os.environ.get("KEYCLOAK_CLIENT_ID")
+    client_secret = os.environ.get("KEYCLOAK_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise RuntimeError("KEYCLOAK_CLIENT_ID/KEYCLOAK_CLIENT_SECRET are not set")
+
+    url = f"{_keycloak_issuer()}/protocol/openid-connect/token"
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+        )
+    if response.status_code != 200:
+        raise RefreshFailed(response.text)
+    return response.json()
+
+
+async def get_permissions(access_token: str) -> set[str]:
+    """Return the set of Scope names (e.g. "UnderwriterApprove") this
+    access token is currently granted on the "LoanApplication" resource,
+    via a UMA ticket exchange against the "loan-onboarding-backoffice"
+    resource server.
+
+    Confirmed empirically against a real instance (P9-1's verification):
+    response_mode=permissions returns one entry per *resource* -- here
+    always exactly one, since there's only one resource -- with a
+    "scopes" list of every granted scope name on it, e.g.
+    `[{"rsid": "...", "rsname": "LoanApplication", "scopes":
+    ["UnderwriterApprove", "UnderwriterReject", "UnderwriterRequestMoreInfo"]}]`.
+    Flattening every entry's "scopes" (rather than reading "rsname") is
+    what makes this scope-level rather than resource-level.
+
+    A token with zero granted permissions is NOT an error: Keycloak
+    returns 403 {"error": "access_denied", "error_description":
+    "not_authorized"} for that case, which this function turns into an
+    empty set. An actually-invalid token gets a *different* response
+    (401 {"error": "invalid_grant"}), raised here as TokenInvalid so
+    callers can tell "not logged in" apart from "logged in, no
+    permission" -- important, since `keycloak_session.py` needs to react
+    differently to the two (401-style vs 403-style responses).
+    """
+    client_id = os.environ.get("KEYCLOAK_CLIENT_ID")
+    client_secret = os.environ.get("KEYCLOAK_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise RuntimeError("KEYCLOAK_CLIENT_ID/KEYCLOAK_CLIENT_SECRET are not set")
+
+    url = f"{_keycloak_issuer()}/protocol/openid-connect/token"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:uma-ticket",
+                    "audience": client_id,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "response_mode": "permissions",
+                },
+            )
+    except httpx.HTTPError as e:
+        raise PermissionCheckError(f"could not reach Keycloak: {e}") from e
+
+    if response.status_code == 401:
+        raise TokenInvalid(response.text)
+
+    if response.status_code == 403:
+        body = response.json()
+        if body.get("error") == "access_denied":
+            return set()
+        raise PermissionCheckError(f"unexpected 403 from Keycloak: {body}")
+
+    if response.status_code != 200:
+        raise PermissionCheckError(f"unexpected {response.status_code} from Keycloak: {response.text}")
+
+    granted: set[str] = set()
+    for perm in response.json():
+        granted.update(perm.get("scopes", []))
+    return granted

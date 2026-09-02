@@ -74,20 +74,23 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 8 — done.** Phase 7 was a real milestone: everything
+**Phases 0 through 9 — done.** Phase 7 was a real milestone: everything
 below the two BFFs (customer/account/application/document/workflow,
 the worker processes, the full approve/reject/escalate/resubmit/cancel
 lifecycle) now works end to end against the real local stack, with a
 real bug found and fixed along the way (see P7-3's note and `CLAUDE.md`'s
 updated provisioning-sequence section). Phase 8 added `import-linter`,
 confirmed clean against the current codebase and confirmed to actually
-fail CI on a real violation (P8-2's note). Start here:
-[Phase 9](#phase-9--keycloak-realm--back-office-auth-plumbing)
-(Keycloak Realm & Back-Office Auth Plumbing) — next in phase order,
-depends only on Phase 0. Phase 10 (Back-Office BFF UI) additionally
-needs Phase 7 (done); Phase 11 (Customer BFF UI) needs Phases 2, 3, 5,
-7 (all done). Load the `keycloak-admin` skill before starting Phase 9,
-per that phase's own instruction.
+fail CI on a real violation (P8-2's note). Phase 9 built the realm
+import and all three `bff_backoffice/` auth modules
+(`keycloak_auth.py`/`session_store.py`/`keycloak_session.py`), verified
+against a real local Keycloak + Redis. Start here:
+[Phase 10](#phase-10--back-office-bff-ui-staff-screens) (Back-Office
+BFF UI) — depends on Phases 7 and 9 (both now done). **Load the
+`list-pagination-bulk-actions` and `htmx4` skills before starting**, per
+that phase's own instruction. Phase 11 (Customer BFF UI) needs Phases
+2, 3, 5, 7 (all done) and could run instead/in parallel if a session
+prefers.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1267,16 +1270,55 @@ this and Phase 7 done).
       > confirmed via the Admin REST API (equivalent to admin-console
       > inspection, scriptable) that the realm's roles/client/users all
       > match the import file exactly.
-- [ ] **P9-2** — `bff_backoffice/keycloak_auth.py`: JWT decode
+- [x] **P9-2** — `bff_backoffice/keycloak_auth.py`: JWT decode
       (`PyJWKClient`), `get_permissions()` (UMA ticket exchange,
       `response_mode=permissions`, read the per-resource `scopes`
       array), `refresh_access_token()`. `KEYCLOAK_ISSUER`/client
       id/secret read lazily, not at import time.
-- [ ] **P9-3** — `bff_backoffice/session_store.py`: Redis-backed
+      > DONE: direct reuse of `review-approval-temporal`'s own
+      > `keycloak_auth.py` (fetched and read, not worked from memory),
+      > adapted for this project's `LoanApplication` resource/five
+      > scopes. Deliberately framework-agnostic (no FastAPI imports),
+      > same as the reference. 14 unit tests in
+      > `tests/unit/bff_backoffice/test_keycloak_auth.py`, mirroring the
+      > reference project's own `test_keycloak_auth.py` structure
+      > exactly: `decode_token` against a locally-generated RSA keypair
+      > (valid, expired, wrong issuer, wrong signature, unset issuer),
+      > `get_permissions` with `respx`-mocked UMA responses (granted,
+      > zero-granted via 403 `access_denied`, invalid token via 401,
+      > unexpected 403 body, Keycloak unreachable, missing client
+      > credentials) — the granted-permissions shape re-uses this
+      > project's own real rsid/scopes confirmed live in P9-1, not
+      > invented. Added `refresh_access_token` tests too (success,
+      > rejected, missing credentials) since P9-4 depends on it.
+- [x] **P9-3** — `bff_backoffice/session_store.py`: Redis-backed
       `/ui/*` session store (`ui-session:<id>` →
       `username`/`role`/`access_token`/`access_expires_at`/
       `refresh_token`/`refresh_expires_at`).
-- [ ] **P9-4** — `bff_backoffice/keycloak_session.py`:
+      > DONE: owns its own lazily-initialized Redis client from
+      > `BACKOFFICE_REDIS_URL`, same convention as every domain module's
+      > `db.py` owning its own lazy `asyncpg` pool — not obtained via a
+      > FastAPI `app.state`, since `app.py` (Phase 10) doesn't exist
+      > yet and there's no reason this module should depend on it
+      > existing. Sliding TTL (`SESSION_TTL_SECONDS = 30 * 60`): every
+      > `get()` pushes the key's expiry back out. 5 unit tests against a
+      > **real** `backoffice-redis` (same deliberate "hits real infra"
+      > exception as `customer`/`account`/`application`'s db-layer
+      > tests — the TTL-sliding behavior is a statement about real Redis
+      > expiry a mock can't verify), including one that sets a
+      > short-TTL key directly, confirms `get()` extends it past the
+      > original expiry, then confirms the key is genuinely still alive
+      > after the original short TTL would have elapsed. **Published
+      > `backoffice-redis` on host port 6380** (kept permanently, not
+      > reverted like the `db` port-remap workaround elsewhere in this
+      > plan) — unlike the Postgres 5432 collision, this is a
+      > deliberate, useful addition: `.env.example`'s own header comment
+      > already documents swapping a Docker-internal name for
+      > `localhost:<published port>` when running natively, exactly
+      > this module's own test suite (and any future natively-run
+      > `bff_backoffice` process before Phase 10's `app` Compose service
+      > exists) needs.
+- [x] **P9-4** — `bff_backoffice/keycloak_session.py`:
       `get_session_user()` (async, transparent refresh),
       `require_session_role(role)`, `require_permission(permission)`/
       `check_permission()`. Role gates screens, permission gates
@@ -1286,6 +1328,49 @@ this and Phase 7 done).
       (JWT-validation tests patch key resolution directly and let real
       `jwt.decode()` run against a locally-generated test keypair — same
       approach as the reference project's `test_keycloak_auth.py`).
+      > DONE: **deliberate adaptation from the reference project, not a
+      > literal port** — every function takes a plain `session_id: str
+      > | None` (and, for `complete_login`, an already-resolved
+      > `expected_state`) instead of a FastAPI `Request`. The reference
+      > project's equivalent functions read `request.session`/
+      > `request.app.state.redis` directly, which is untestable without
+      > a real Starlette `Request` — since `app.py` (Phase 10) doesn't
+      > exist yet, there's no reason this module's session-resolution
+      > *logic* should be coupled to a web framework to be testable;
+      > `bff_backoffice/routes.py` (Phase 10) is expected to be the
+      > thin, framework-coupled layer that reads
+      > `request.session.get(SESSION_KEY)` and calls into this module's
+      > plain functions. Noted prominently in the module's own
+      > docstring so Phase 10 doesn't mistake this for an oversight.
+      > Role-gate (`require_session_role`/`RoleDenied`) and
+      > permission-gate (`require_permission`/`check_permission`/
+      > `PermissionDenied`) are two genuinely separate exception types
+      > and code paths, per CLAUDE.md's explicit warning against
+      > conflating them. 24 unit tests in
+      > `tests/unit/bff_backoffice/test_keycloak_session.py`, mocking
+      > `session_store`/`keycloak_auth` at the function-call boundary
+      > (a `FakeStore` double, `respx` for `complete_login`'s token
+      > exchange) — `get_session_user`'s no-session/unknown-session/
+      > valid/transparent-refresh/refresh-fails-so-delete-and-redirect
+      > paths, both gate types' pass/deny cases, and `complete_login`'s
+      > full matrix (state mismatch, exchange rejected, Underwriter
+      > role, Manager role, no recognized role, invalid token). **Real
+      > bug caught while writing these tests, not a hypothetical**: the
+      > first draft of several `complete_login` tests defined
+      > `fake_decode_token` as `async def`, but the real
+      > `keycloak_auth.decode_token` is synchronous — calling the async
+      > fake without awaiting it returned an un-awaited coroutine object
+      > instead of raising or returning claims, surfacing as a
+      > confusing `AttributeError: 'coroutine' object has no attribute
+      > 'get'` deep inside `complete_login` rather than a clear test
+      > failure; fixed by making the fakes plain sync functions,
+      > matching the real signature. All 43
+      > `tests/unit/bff_backoffice/` tests pass together (14 + 5 + 24),
+      > and the full `tests/unit/` suite (176 tests) passes with no
+      > regressions, verified via the same temporary 5433 Postgres port
+      > remap as every other phase since Phase 2 (reverted before
+      > committing) plus the new permanent 6380 Redis port. **This
+      > completes Phase 9.**
 
 ---
 
@@ -1406,6 +1491,53 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 9 (Keycloak Realm & Back-Office Auth Plumbing)
+  complete, all four tasks checked. Loaded the `keycloak-admin` skill
+  first, per this phase's own instruction. `keycloak/import/loanrealm-realm.json`
+  (P9-1) adapted directly from `review-approval-temporal`'s own
+  `myrealm-realm.json` -- two roles, one confidential client with
+  Authorization Services enabled, one `LoanApplication` resource with
+  five scopes, two role policies, five scope-type permissions; no
+  `TemporalAdmin` role/conditional-flow client (out of scope per
+  CLAUDE.md). Verified against a freshly created (not restarted --
+  avoided the skill's own "restart skips import" gotcha) `keycloak`
+  container: realm import confirmed in logs, and the full raw-token +
+  UMA-exchange `curl` sequence run for *both* `underwriter1` (exactly
+  the three Underwriter scopes) and `manager1` (exactly the two Manager
+  scopes) -- neither leaks the other's permissions. `bff_backoffice/keycloak_auth.py`
+  (P9-2) is a direct reuse of the reference project's own module, just
+  adapted for this project's resource/scopes. `session_store.py` (P9-3)
+  owns its own lazily-initialized Redis client (matching every domain
+  module's `db.py` pattern) rather than reading `request.app.state`,
+  since `app.py` doesn't exist until Phase 10 -- published
+  `backoffice-redis` on host port 6380 permanently (not a revert-before-
+  commit workaround like the Postgres port remaps), matching
+  `.env.example`'s own documented "swap for localhost:<port> when
+  running natively" convention. `keycloak_session.py` (P9-4) is a
+  **deliberate adaptation, not a literal port**: every function takes a
+  plain `session_id` instead of a FastAPI `Request`, so its
+  session-resolution logic is unit-testable without a real Starlette
+  request -- `bff_backoffice/routes.py` (Phase 10) is expected to be the
+  thin, framework-coupled layer on top. 43 new unit tests
+  (`tests/unit/bff_backoffice/`) -- `keycloak_auth.py`'s tests mirror
+  the reference project's own `test_keycloak_auth.py` structure exactly
+  (RSA-keypair JWT tests, `respx`-mocked UMA exchange); `session_store.py`'s
+  hit a real Redis (same deliberate exception as the Postgres-backed
+  `db.py` tests elsewhere, since TTL-sliding is a real-infra behavior a
+  mock can't verify); `keycloak_session.py`'s mock `session_store`/
+  `keycloak_auth` at the function boundary. One real bug caught while
+  writing these (not hypothetical): several `complete_login` test fakes
+  for `decode_token` were accidentally `async def`, but the real
+  function is synchronous -- calling the un-awaited coroutine produced
+  a confusing `AttributeError` deep inside `complete_login` rather than
+  a clean test failure; fixed by making the fakes plain sync functions.
+  Full `tests/unit/` suite: 176 tests pass together. Next: Phase 10
+  (Back-Office BFF UI) -- load the `list-pagination-bulk-actions` and
+  `htmx4` skills first, per that phase's own instruction; it's the
+  first phase that actually builds `app.py`, wiring
+  `keycloak_session.py`'s framework-agnostic functions into real
+  FastAPI routes/dependencies for the first time.
 
 - **2026-09-02** — Phase 8 (Import-Linter & CI) complete, both tasks
   checked. Added `import-linter` to `pyproject.toml`'s `[tool.importlinter]`

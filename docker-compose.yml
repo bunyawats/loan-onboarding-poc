@@ -94,6 +94,14 @@ services:
     # Named distinctly from mayan-redis (Phase 5) -- CLAUDE.md's
     # "Data storage": Keycloak sessions + bulk-selection for
     # bff_backoffice only, never shared with Mayan's own cache.
+    # Published on a non-default host port (6380, not 6379) so
+    # bff_backoffice/session_store.py's own tests (P9-3/P9-4) -- and any
+    # natively-run bff_backoffice process before Phase 10's `app`
+    # Compose service exists -- can reach it via
+    # BACKOFFICE_REDIS_URL=redis://localhost:6380/0, same convention
+    # .env.example's own header comment already documents for `db`.
+    ports:
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
