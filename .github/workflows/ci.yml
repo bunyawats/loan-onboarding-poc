@@ -52,12 +52,10 @@ jobs:
 
       # Phase 8 (IMPLEMENTATION_PLAN.md): import-linter, encoding the
       # module dependency graph from CLAUDE.md's "Module dependency
-      # graph" section. Required, not informational -- a violation here
-      # should fail the build. Reserving the slot now so Phase 8 isn't
-      # inventing CI structure from scratch.
-      #
-      # - name: Check module boundaries (import-linter)
-      #   run: lint-imports
+      # graph" section (pyproject.toml's [tool.importlinter]). Required,
+      # not informational -- a violation here fails the build.
+      - name: Check module boundaries (import-linter)
+        run: lint-imports
 
       # No tests/contract/ step -- CLAUDE.md's "Testing" section: the
       # application/schemas.py assert against

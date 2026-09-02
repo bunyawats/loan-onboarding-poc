@@ -28,10 +28,91 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "respx",
+    "import-linter",
 ]
 
 [tool.setuptools.packages.find]
 include = ["loan_onboarding*"]
+
+# P8-1: encodes CLAUDE.md's "Module dependency graph" section --
+# literally, not just informally. A layers contract captures the
+# overall hierarchy (leaf modules with nothing below them, application
+# above them, both BFFs above application-and-below, composition roots
+# on top), and a `forbidden` contract per explicitly-bulleted "never
+# imports" rule gives a direct, traceable 1:1 mapping to that section's
+# own wording -- both together, not one or the other, per this task's
+# own phrasing ("every 'never imports' rule as a forbidden contract,
+# every 'leaf module' as a layer with nothing below it").
+[tool.importlinter]
+root_packages = ["loan_onboarding"]
+
+[[tool.importlinter.contracts]]
+name = "Overall layering (leaves -> application -> BFFs -> composition roots)"
+type = "layers"
+layers = [
+    "(app) | worker_main",
+    "bff_customer | bff_backoffice",
+    "application",
+    "customer | account | document | workflow",
+]
+containers = ["loan_onboarding"]
+
+[[tool.importlinter.contracts]]
+name = "customer/ never imports anything else in this codebase"
+type = "forbidden"
+source_modules = ["loan_onboarding.customer"]
+forbidden_modules = [
+    "loan_onboarding.account",
+    "loan_onboarding.document",
+    "loan_onboarding.workflow",
+    "loan_onboarding.application",
+    "loan_onboarding.bff_customer",
+    "loan_onboarding.bff_backoffice",
+    "loan_onboarding.worker_main",
+]
+
+[[tool.importlinter.contracts]]
+name = "account/ never imports anything else in this codebase"
+type = "forbidden"
+source_modules = ["loan_onboarding.account"]
+forbidden_modules = [
+    "loan_onboarding.customer",
+    "loan_onboarding.document",
+    "loan_onboarding.workflow",
+    "loan_onboarding.application",
+    "loan_onboarding.bff_customer",
+    "loan_onboarding.bff_backoffice",
+    "loan_onboarding.worker_main",
+]
+
+[[tool.importlinter.contracts]]
+name = "document/ never imports application/ or workflow/"
+type = "forbidden"
+source_modules = ["loan_onboarding.document"]
+forbidden_modules = ["loan_onboarding.application", "loan_onboarding.workflow"]
+
+[[tool.importlinter.contracts]]
+name = "workflow/ never imports application/, document/, customer/, or account/"
+type = "forbidden"
+source_modules = ["loan_onboarding.workflow"]
+forbidden_modules = [
+    "loan_onboarding.application",
+    "loan_onboarding.document",
+    "loan_onboarding.customer",
+    "loan_onboarding.account",
+]
+
+[[tool.importlinter.contracts]]
+name = "bff_customer/ and bff_backoffice/ never import each other"
+type = "forbidden"
+source_modules = ["loan_onboarding.bff_customer"]
+forbidden_modules = ["loan_onboarding.bff_backoffice"]
+
+[[tool.importlinter.contracts]]
+name = "bff_backoffice/ and bff_customer/ never import each other"
+type = "forbidden"
+source_modules = ["loan_onboarding.bff_backoffice"]
+forbidden_modules = ["loan_onboarding.bff_customer"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

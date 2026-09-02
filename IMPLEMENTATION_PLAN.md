@@ -1158,7 +1158,7 @@ result before continuing into Keycloak/UI work.
 **Depends on:** Phases 2–7 (needs real imports to check against — don't
 do this against an empty skeleton).
 
-- [ ] **P8-1** — `.importlinter` (or `pyproject.toml`
+- [x] **P8-1** — `.importlinter` (or `pyproject.toml`
       `[tool.importlinter]`) encoding the full dependency graph from
       `CLAUDE.md`'s "Module dependency graph" section — every "never
       imports" rule as a `forbidden` contract, every "leaf module" as a
@@ -1167,6 +1167,30 @@ do this against an empty skeleton).
       clean (if it doesn't, that's a real violation introduced in
       Phases 2–7 — fix the violation, don't loosen the contract to make
       it pass).
+      > DONE: `pyproject.toml`'s `[tool.importlinter]` (not a separate
+      > `.importlinter` file — one config file already holds every other
+      > tool's config in this project). Both forms this task's own
+      > wording asks for, together: one `layers` contract encoding the
+      > full hierarchy (`customer | account | document | workflow` as
+      > the bottom, mutually-independent leaf layer via `importlinter`'s
+      > `|` syntax — nothing declared below them — then `application`,
+      > then `bff_customer | bff_backoffice`, then `(app) | worker_main`
+      > on top, `app` wrapped in parens/marked optional since it doesn't
+      > exist until Phase 10/11), plus one `forbidden` contract per
+      > literal "never imports" bullet in `CLAUDE.md`'s section
+      > (`customer`, `account`, `document`, `workflow`, and
+      > `bff_customer`/`bff_backoffice`'s mutual exclusion) for direct,
+      > traceable 1:1 mapping to that section's own wording. `lint-imports`
+      > passes clean against the current codebase — 7 kept, 0 broken —
+      > confirming every module boundary held through Phases 1-7 without
+      > a single accidental violation. **Didn't just trust a clean run**:
+      > temporarily added a real one-line boundary violation
+      > (`customer/db.py` importing `account/db.py`) and confirmed both
+      > the `layers` contract and the specific `customer` `forbidden`
+      > contract catch it with an exact file/line citation, then
+      > reverted (`git checkout --`) and re-confirmed clean — proves the
+      > contracts actually enforce something, not just that they happen
+      > to pass. Added `import-linter` to `dev` extras.
 - [ ] **P8-2** — Wire the import-linter run into the CI workflow from
       P0-6, required (not just informational) — a failure here should
       fail the build.
