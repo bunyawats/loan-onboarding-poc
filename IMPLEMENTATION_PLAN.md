@@ -1369,8 +1369,16 @@ this and Phase 7 done).
       > and the full `tests/unit/` suite (176 tests) passes with no
       > regressions, verified via the same temporary 5433 Postgres port
       > remap as every other phase since Phase 2 (reverted before
-      > committing) plus the new permanent 6380 Redis port. **This
-      > completes Phase 9.**
+      > committing) plus the new permanent 6380 Redis port. **Real gap
+      > caught by CI itself, not local verification**: the first push
+      > went red — `.github/workflows/ci.yml` only provisioned a
+      > Postgres service container, no Redis, so
+      > `session_store.py`'s tests had nothing to connect to in CI even
+      > though they passed locally against the real `backoffice-redis`
+      > container. Fixed by adding a `redis:7-alpine` service container
+      > alongside the existing `postgres` one (same health-check-gated
+      > pattern) and a `BACKOFFICE_REDIS_URL` env var for the test step;
+      > confirmed green on the next push. **This completes Phase 9.**
 
 ---
 

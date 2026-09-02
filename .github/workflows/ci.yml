@@ -27,6 +27,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Phase 9 (P9-3): bff_backoffice/session_store.py's tests hit a
+      # real Redis (same "no live services, except when correctness-
+      # critical" exception as Postgres above -- TTL-sliding behavior
+      # can't be meaningfully asserted against a mock).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +61,7 @@ jobs:
       - name: Run unit tests
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/loan_onboarding
+          BACKOFFICE_REDIS_URL: redis://localhost:6379/0
         run: pytest tests/unit
 
       # Phase 8 (IMPLEMENTATION_PLAN.md): import-linter, encoding the
