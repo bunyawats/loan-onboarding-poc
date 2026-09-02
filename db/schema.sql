@@ -108,8 +108,15 @@ CREATE TABLE applications (
     account_id                UUID,
 
     -- Nullable: unset until persist_application (the workflow's first
-    -- activity) commits; cleared if a Temporal admin deletes the
-    -- execution out from under a row (see CLAUDE.md's reconciliation note).
+    -- activity) commits. **Never cleared afterward by any code in this
+    -- codebase** -- corrected in P12-1 from an earlier draft of this
+    -- comment, which claimed it gets cleared "if a Temporal admin
+    -- deletes the execution out from under a row"; no such
+    -- reconciliation job was ever built (confirmed by grepping for any
+    -- write to this column outside persist_application -- there is
+    -- none), so a terminated workflow or a deleted execution leaves
+    -- this value pointing at a Temporal execution that no longer
+    -- exists, permanently. See CLAUDE.md's "Known gaps".
     workflow_id               TEXT,
 
     product_type              TEXT NOT NULL

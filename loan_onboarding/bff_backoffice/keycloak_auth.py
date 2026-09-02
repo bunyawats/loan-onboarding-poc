@@ -40,6 +40,25 @@ def _keycloak_issuer() -> str:
     return issuer
 
 
+def _public_keycloak_issuer() -> str:
+    """The `iss` value Keycloak actually stamps into an issued token --
+    matches whatever URL the *browser's* authorization request used
+    (`keycloak_session.py`'s `build_authorize_url`), not necessarily
+    `KEYCLOAK_ISSUER` (which `_keycloak_issuer()` above is for: reaching
+    Keycloak over the network -- fetching its JWKS, POSTing to its
+    token endpoint -- from wherever this process runs). The two only
+    diverge once `app` and `keycloak` are separate containers on a
+    Docker network (found for real in P12-3): the token-exchange POST
+    correctly targets the internal `http://keycloak:8080/...`, but the
+    token that comes back carries `iss=http://localhost:8080/...`
+    (matching the public URL the browser was sent to) -- validating it
+    against the internal address fails with "Invalid issuer" even
+    though the token is entirely legitimate. Falls back to
+    `_keycloak_issuer()` when unset, so the native/host-run case (one
+    identical issuer value for everything) needs no config change."""
+    return os.environ.get("KEYCLOAK_PUBLIC_ISSUER") or _keycloak_issuer()
+
+
 def _get_jwk_client() -> PyJWKClient:
     global _jwk_client
     if _jwk_client is None:
@@ -62,7 +81,7 @@ def decode_token(token: str) -> dict:
         token,
         signing_key.key,
         algorithms=["RS256"],
-        issuer=_keycloak_issuer(),
+        issuer=_public_keycloak_issuer(),
         leeway=5,  # tolerate small clock skew between this host and Keycloak on iat/exp/nbf
         options={"verify_aud": False},  # set an audience and verify it in production
     )

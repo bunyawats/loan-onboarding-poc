@@ -100,6 +100,28 @@ def _issuer() -> str:
     return issuer
 
 
+def _public_issuer() -> str:
+    """The issuer URL as the *browser* needs to reach it -- distinct
+    from `_issuer()` (used for every server-to-server call: token
+    exchange, JWKS fetch, UMA permission checks) once `app` and
+    `keycloak` are separate containers on a Docker network. Found for
+    real during P12-3's from-clean `docker compose up`: with
+    `KEYCLOAK_ISSUER=http://keycloak:8080/realms/loanrealm` (correct
+    for the `app` container's own server-to-server calls),
+    `build_authorize_url`/`logout_redirect_url` were sending the
+    browser to `http://keycloak:...` too -- a hostname that only
+    resolves inside the compose network, never on the host running the
+    browser. Never hit before because every earlier phase's testing ran
+    `app.py` natively on the host, where `KEYCLOAK_ISSUER=http://localhost:8080/...`
+    was correct for both purposes at once.
+
+    Falls back to `_issuer()` when unset, so the native/host-run case
+    (both issuer values identical) needs no config change -- only
+    `docker-compose.yml`'s `app` service sets `KEYCLOAK_PUBLIC_ISSUER`
+    explicitly."""
+    return os.environ.get("KEYCLOAK_PUBLIC_ISSUER") or _issuer()
+
+
 def _client_id() -> str:
     client_id = os.environ.get("KEYCLOAK_CLIENT_ID")
     if not client_id:
@@ -127,7 +149,7 @@ def build_authorize_url(redirect_uri: str) -> tuple[str, str]:
         "redirect_uri": redirect_uri,
         "state": state,
     }
-    return f"{_issuer()}/protocol/openid-connect/auth?{urlencode(params)}", state
+    return f"{_public_issuer()}/protocol/openid-connect/auth?{urlencode(params)}", state
 
 
 async def complete_login(code: str, state: str, expected_state: str | None, redirect_uri: str) -> tuple[str, str]:
@@ -193,7 +215,7 @@ def logout_redirect_url(redirect_uri: str) -> str:
     `redirect_uri` must match a `post.logout.redirect.uris` entry
     registered on the client (`keycloak/import/loanrealm-realm.json`)."""
     params = {"client_id": _client_id(), "post_logout_redirect_uri": redirect_uri}
-    return f"{_issuer()}/protocol/openid-connect/logout?{urlencode(params)}"
+    return f"{_public_issuer()}/protocol/openid-connect/logout?{urlencode(params)}"
 
 
 async def logout(session_id: str | None) -> None:

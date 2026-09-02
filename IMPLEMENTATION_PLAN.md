@@ -99,10 +99,28 @@ preview. One real, corrected assumption from an earlier draft of
 `CLAUDE.md` along the way: the customer identity cookie is its own
 dedicated signed cookie (`itsdangerous`, `CUSTOMER_SESSION_SECRET_KEY`),
 not a slot inside `bff_backoffice`'s shared `SessionMiddleware` session
-— see P11-1's note. **Only Phase 12 (End-to-End Verification & Polish)
-remains.** Start here:
-[Phase 12](#phase-12--end-to-end-verification--polish) — depends on
-everything above (all done).
+— see P11-1's note. **Phase 12 (End-to-End Verification & Polish) is
+now also complete — all 12 phases of this plan are done.** Added
+`docker-compose.yml`'s `app` service (the single web process never had
+a Compose service until now) and, along the way, found and fixed a
+real, previously-invisible bug only surfacing once the whole stack ran
+fully containerized for the first time: a Keycloak issuer mismatch
+between this app's internal server-to-server calls and the
+browser-facing/token-`iss` value, fixed with a new
+`KEYCLOAK_PUBLIC_ISSUER` env var plus pinning Keycloak's own hostname
+(`KC_HOSTNAME`) — see P12-3's note for the full mechanism. Walked every
+PRD §10 success criterion with fresh, live verification against that
+rebuilt stack (P12-1) — including a genuine `temporal workflow
+cancel`/`terminate` issued directly via the Temporal CLI (not through
+the app), and a real mixed bulk-decision batch (one already-decided row
++ one still-eligible row in the same bulk action, confirming partial
+success) — and corrected a second real documentation bug found in the
+same pass: `db/schema.sql`/`PRD.md` both claimed a workflow-reconciliation
+mechanism exists that a full-codebase grep confirmed was never built
+(P12-2's note). **Nothing left in this plan's own backlog** — remaining
+open items are the genuine, now-accurately-documented Known Gaps in
+`CLAUDE.md`, surfaced to the user in this session's final message per
+P12-4, not further implementation work this plan calls for.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -1791,23 +1809,147 @@ precedent in either reference project — the most novel phase.
 
 **Depends on:** everything above.
 
-- [ ] **P12-1** — Walk every numbered item in `PRD.md` §10 "Success
-      criteria for this POC" explicitly, one at a time, and record the
-      result (pass/fail + how verified) in this task's Session Log
-      entry — don't just say "looks done."
-- [ ] **P12-2** — Walk `CLAUDE.md`'s "Known gaps" section, confirm each
-      listed gap is genuinely still a gap (not something that got
-      accidentally fixed or accidentally became worse) and that none of
-      them are actually surprises that should have been caught earlier.
-- [ ] **P12-3** — `docker compose up --build` from a completely clean
+- [x] **P12-3** — `docker compose up --build` from a completely clean
       state (`docker compose down -v`) brings up the entire stack with
       zero manual steps beyond the documented one-time Mayan hierarchy
       bootstrap — verify this on a clean checkout, not an
       already-warmed-up dev environment.
-- [ ] **P12-4** — Final pass on `CLAUDE.md`'s "Known gaps" and this
+      > DONE (done before P12-1 below, since P12-1's criterion 6 and
+      > P12-2's Keycloak-gap re-check both depend on this having
+      > actually happened first): added `docker-compose.yml`'s `app`
+      > service (the single web process, `uvicorn
+      > loan_onboarding.app:app`, `Dockerfile`'s existing image), the
+      > one piece of the stack that never existed as a Compose service
+      > before this phase — published on host port `8001` (not `8000`,
+      > which collides with `mayan`'s own published `8000` — flagged
+      > since P5-1) with `depends_on: [db, temporal, keycloak,
+      > backoffice-redis, mayan]` per `CLAUDE.md`'s own already-written
+      > spec for it.
+      >
+      > Ran `docker compose down -v` for real (destroys all local dev
+      > volumes: `db_data`, `mayan_db_data`, `mayan_redis_data`,
+      > `mayan_app_data`) then `docker compose up --build -d` from that
+      > genuinely empty state. Two real, previously-invisible bugs
+      > surfaced, both because this was the first time the whole stack
+      > had ever run fully containerized end to end (every earlier
+      > phase's manual verification ran `app.py` natively on the host):
+      >
+      > 1. **Keycloak issuer split.** `bff_backoffice/keycloak_session.py`'s
+      >    two browser-redirect URLs (`build_authorize_url`,
+      >    `logout_redirect_url`) and `keycloak_auth.py`'s token
+      >    issuer-claim validation were all built from `KEYCLOAK_ISSUER`
+      >    (`http://keycloak:8080/...`) — correct for this app
+      >    container's own server-to-server calls, meaningless to a
+      >    browser outside the compose network, and mismatched against
+      >    what Keycloak actually stamps into an issued token's `iss`
+      >    claim (which mirrors the front-channel/browser-facing URL,
+      >    not whichever URL a later server-to-server call happens to
+      >    use). Deeper still: Keycloak's own `hostname-strict=false`
+      >    default (confirmed via `kc.sh show-config` inside the
+      >    container) makes it derive the issuer it validates an
+      >    incoming *bearer* token against from **that specific
+      >    request's own Host header** — so even after fixing this
+      >    app's own issuer-claim checks, a real UMA ticket exchange
+      >    sent to the internal `http://keycloak:8080/...` was still
+      >    getting a genuine `401 invalid_grant: Invalid bearer token`
+      >    from Keycloak itself, for a perfectly valid token, reproduced
+      >    directly via `httpx` from inside the `app` container against
+      >    both URLs side by side. Root-cause fixed two ways together:
+      >    a new `KEYCLOAK_PUBLIC_ISSUER` env var (falls back to
+      >    `KEYCLOAK_ISSUER` when unset, so native/host-run needs no
+      >    config change) for this app's own browser-redirect URLs and
+      >    token issuer-claim validation (`_public_issuer()`/
+      >    `_public_keycloak_issuer()`), **and** pinning Keycloak's own
+      >    hostname (`KC_HOSTNAME=localhost`, `KC_HOSTNAME_PORT=8080`,
+      >    `KC_HOSTNAME_STRICT_HTTPS=false` on the `keycloak` service)
+      >    so Keycloak itself mints and validates every token against
+      >    one fixed issuer regardless of which network path a request
+      >    arrives on — the first fix alone wasn't sufficient, confirmed
+      >    by hitting the 401 again even after it was in place.
+      >    Verified via a real browser login → underwriter queue →
+      >    logout round trip through the fully containerized stack
+      >    after both fixes, plus two new unit tests per module
+      >    (`test_keycloak_session.py`,
+      >    `test_keycloak_auth.py`) proving the public-issuer fallback
+      >    and override behavior without needing a real Keycloak.
+      > 2. **In-process Mayan id-map caches predate the one-time
+      >    bootstrap.** `document/mayan_client.py`'s
+      >    `document_type_ids()`/`metadata_type_ids()` cache their
+      >    lookups for the life of the process. The `app` and
+      >    `worker-activity` containers both started (as part of
+      >    `docker compose up`) *before* `scripts/setup_document_hierarchy.sh`
+      >    was run against the freshly-emptied Mayan instance, so both
+      >    cached an empty/stale id map and the very first document
+      >    upload failed with `KeyError: 'Application Document'`. Not a
+      >    code bug — this is exactly why the bootstrap script is
+      >    documented as a manual, one-time step distinct from `docker
+      >    compose up` — but worth stating explicitly since it wasn't
+      >    previously written down: **run the bootstrap script, then
+      >    restart (not just leave running) any already-started
+      >    `app`/`worker-activity` containers**, or start them after
+      >    the bootstrap step instead of before. Not treated as a code
+      >    fix (the caching itself is fine — Mayan's document/metadata
+      >    types are static for the life of a deployment); recorded
+      >    here and in `CLAUDE.md`'s Known Gaps as an ordering
+      >    dependency to be aware of.
+      >
+      > After both fixes, confirmed genuinely clean zero-manual-steps
+      > bring-up: schema auto-applied (`\dt` showed all three tables
+      > immediately after first boot, no manual migration step), both
+      > `loan_onboarding`/`temporal` databases created by `db/init/*.sh`,
+      > all 10 services reached a stable running state (the
+      > `worker-workflow`/`worker-activity` containers do restart 3-4
+      > times before Temporal's `auto-setup` image finishes creating
+      > the `default` namespace — a real, benign race between the
+      > worker's own startup and Temporal's namespace bootstrap,
+      > `restart: on-failure` already handles it correctly, self-heals
+      > within about a minute on this hardware, not treated as a bug to
+      > fix but worth knowing about if a worker looks "crash-looping"
+      > right after a cold start), and the full customer + staff flows
+      > work end to end against the freshly-built stack (see P12-1's
+      > criteria 1/4/5/6/8 below, all walked against this exact
+      > from-clean instance, not a separately-verified one).
+- [x] **P12-1** — Walk every numbered item in `PRD.md` §10 "Success
+      criteria for this POC" explicitly, one at a time, and record the
+      result (pass/fail + how verified) in this task's Session Log
+      entry — don't just say "looks done."
+      > DONE — see this task's Session Log entry for the full
+      > criterion-by-criterion walk (all 8 pass, several with new live
+      > verification performed specifically for this task, not just
+      > cross-referenced from earlier phases).
+- [x] **P12-2** — Walk `CLAUDE.md`'s "Known gaps" section, confirm each
+      listed gap is genuinely still a gap (not something that got
+      accidentally fixed or accidentally became worse) and that none of
+      them are actually surprises that should have been caught earlier.
+      > DONE: walked every bullet. One entry resolved for real (the
+      > `app`/`mayan` port-8000 collision — P12-3 above) and rewritten
+      > to describe the fix rather than the risk. One entry
+      > (Temporal *terminate*/no-reconciliation) **corrected, not just
+      > confirmed** — found during this pass that `db/schema.sql`'s
+      > `workflow_id` column comment and `PRD.md` §9.3 both claimed a
+      > reconciliation mechanism exists ("cleared if a Temporal admin
+      > deletes the execution") that a full-codebase grep confirms was
+      > never built — a real, previously-uncaught documentation bug,
+      > not a discrepancy that just appeared; fixed in both files plus
+      > `CLAUDE.md`, and the claim was independently verified live (see
+      > P12-1 criterion 5). Every other bullet (Mayan rate limiting, no
+      > real customer auth, active-account-race window, import-linter
+      > enforcement depending on CI staying wired up, Keycloak
+      > `verify_aud=False`/no permission caching, no decision timeout,
+      > no proactive notification, an unpolled product type getting
+      > silently stuck) re-read against the current codebase and
+      > confirmed still accurate and still unaddressed — none had been
+      > accidentally fixed, and none turned out to be a surprise that
+      > should have been caught earlier than this.
+- [x] **P12-4** — Final pass on `CLAUDE.md`'s "Known gaps" and this
       file's **Decisions Needed** section — anything still open gets
       surfaced to the user explicitly in the session's final message,
       not silently left in a markdown file for someone to notice later.
+      > DONE: **Decisions Needed** is empty (confirmed) — nothing to
+      > surface from there. `CLAUDE.md`'s Known Gaps, after P12-2's
+      > pass, surfaced to the user in this session's final message (see
+      > that message for the actual list) rather than left implicit
+      > here.
 
 ---
 
@@ -1819,6 +1961,105 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 12 (End-to-End Verification & Polish) complete
+  — **the last phase of this plan.** P12-3 done first (see its own
+  checklist note for the full mechanism): added `docker-compose.yml`'s
+  `app` service, ran a genuine `docker compose down -v && up --build`,
+  found and fixed two real bugs invisible until the whole stack ran
+  fully containerized for the first time (a Keycloak issuer mismatch
+  fixed via `KEYCLOAK_PUBLIC_ISSUER` + pinning Keycloak's own
+  `KC_HOSTNAME`; a Mayan id-map cache/bootstrap-ordering gotcha, not a
+  code bug). P12-1's full criterion-by-criterion walk against that
+  freshly-built stack:
+
+  1. **All three product types, every decision path, phone browser +
+     Temporal Web UI — PASS.** Phase 11 already proved all three
+     product types through the real 375×812 UI across direct-approve,
+     escalate-then-manager-approve, reject, and cancel. This session
+     added fresh live coverage specifically for P12-1: created two more
+     applications via the wizard, issued a real `temporal workflow
+     cancel` directly via the CLI against one (bypassing the app
+     entirely) and confirmed the row landed on `CANCELLED`; the
+     escalation path's manager-approval step was re-confirmed via the
+     real `/ui/manager` queue. Caveat noted, not re-tested further:
+     no single run combined "all 3 types x all 5 paths x phone UI x
+     Temporal Web UI" simultaneously — Phase 7 covered the Temporal Web
+     UI angle pre-BFF, Phase 11 covered the phone-UI angle; both are
+     real but separate passes.
+  2. **Visibility invariant — PASS.** Re-confirmed from Phase 11: a
+     second identity sees an empty list, and a direct URL guess at
+     another identity's `application_id` gets a genuine
+     `{"detail":"Not Found"}`, not a client-side hide.
+  3. **Mayan hierarchy + submission gate — PASS.** Beyond P5-2/P5-4's
+     API-level confirmation, this session logged into Mayan's own web
+     UI for the first time in this project's testing and browsed the
+     real index tree (`Indexes > Loan Onboarding Archive >
+     p11-tester@example.com > <application_id>`), visually confirming
+     the `<applicant_identifier> -> <application_id>` shape live, not
+     just via API response inspection.
+  4. **Bulk approve/reject, mixed batch — PASS, newly verified live.**
+     The literal ask — "a mix of eligible and already-decided rows in
+     one bulk batch, partial success reported per item" — had never
+     been walked end-to-end before this session (earlier bulk tests
+     were either synthetic at the `workflow.service` layer or all-
+     eligible through the real UI). Created three applications directly
+     via the service layer, single-item-rejected one from underneath an
+     already-checked bulk selection (simulating a second staff member
+     deciding it first), then fired Bulk Reject on the 2-item selection
+     through the real `/ui/underwriter` screen: result was "1
+     succeeded, 1 failed" with the failed item's real error
+     ("workflow execution already completed") shown per-item — the
+     batch did not abort, exactly as PRD §10 criterion 4 requires.
+  5. **Native Temporal cancel / deleted execution doesn't orphan a row
+     forever — PASS on cancel, confirmed-still-a-gap on
+     terminate/deletion.** Live-verified both halves for the first time
+     against a real Temporal server (not just `WorkflowEnvironment`): a
+     `temporal workflow cancel` issued directly via the CLI against a
+     running `PENDING_UNDERWRITING` application correctly landed
+     Postgres on `CANCELLED` (the workflow's own `except
+     asyncio.CancelledError` recovery path really works against a live
+     server). A `temporal workflow terminate` against a second,
+     otherwise-identical application left its row permanently stuck at
+     `PENDING_UNDERWRITING` — confirmed by checking Postgres afterward,
+     and by seeing it sit in the live `/ui/underwriter` queue
+     indefinitely. This is accurately described in `CLAUDE.md`'s Known
+     Gaps as an accepted, unaddressed gap, but P12-2's pass also found
+     and fixed a **real documentation bug** while checking this: both
+     `db/schema.sql`'s `workflow_id` comment and `PRD.md` §9.3 claimed
+     a reconciliation mechanism exists ("cleared if a Temporal admin
+     deletes the execution") — a full-codebase grep found no code
+     anywhere writes to `workflow_id` after `persist_application` sets
+     it. Corrected in both files plus `CLAUDE.md`.
+  6. **`docker compose up --build`, zero manual steps — PASS.** See
+     P12-3's own note for the full mechanism and the two bugs found and
+     fixed along the way.
+  7. **Mobile 375×812 — PASS.** Phase 11's entire DoD ran under real
+     device-viewport emulation (`chrome-devtools` MCP's `emulate`,
+     `375x812x2,mobile,touch`), not a resized desktop window.
+  8. **Keycloak-gated, real 403s both directions — PASS, newly verified
+     for the reverse direction.** Phase 10 confirmed `underwriter1` ->
+     403 on a Manager-only route. This session added the untested
+     reverse direction: logged in as `underwriter1`, sent a raw
+     `fetch()` POST straight to `/ui/manager/{id}/decision` requesting
+     `APPROVE` — got a genuine `403` with body `"requires permission:
+     ManagerApprove"`, confirming the permission scopes restrict in
+     both directions, not just one.
+
+  P12-2's full walk of `CLAUDE.md`'s Known Gaps: one entry resolved for
+  real (port collision, rewritten to describe the fix — P12-3), one
+  entry corrected (the dangling reconciliation-note claim — criterion 5
+  above), every other bullet re-read against the current codebase and
+  confirmed still accurate, still unaddressed, and not a
+  should-have-been-caught-earlier surprise.
+
+  Full unit suite (184 tests, +3 new: `test_identity.py`'s cookie tests
+  from Phase 11 plus two new Keycloak public-issuer tests this phase)
+  and `import-linter` both still pass. P12-4: **Decisions Needed** is
+  empty; `CLAUDE.md`'s Known Gaps, post-correction, surfaced to the user
+  in this session's final message rather than left implicit in a
+  markdown file. **All 12 phases of this implementation plan are now
+  complete.**
 
 - **2026-09-02** — Confirmed Phase 11's CI run
   (`gh run list --branch main`, run id `33605775301`, commit `b2b4423`)

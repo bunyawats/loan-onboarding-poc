@@ -1135,17 +1135,30 @@ for `KEYCLOAK_ISSUER`.
 
 ## Known gaps to state explicitly once built
 
-- **`app`/`app-backoffice`'s planned host port (`8000`, per this file's
-  own `app.py` docstring example and `keycloak/import/loanrealm-realm.json`'s
-  primary redirect URIs) collides with `mayan`'s already-published host
-  port `8000` (P5-1).** Not a problem *today* — there's no `app`/
-  `app-backoffice` Compose service yet, Phase 10's own manual
-  verification ran `app.py` natively on port `8001` instead, and the
-  realm now also registers `http://localhost:8001/ui/callback` as a
-  documented native-dev alternative — but whoever adds the real Compose
-  service needs to pick a different host port for it (or for `mayan`)
-  rather than assuming `8000` is free, and update the realm's redirect
-  URIs to match whatever's actually chosen.
+- **Resolved in P12-3**: `app`'s planned host port `8000` (per this
+  file's own `app.py` docstring example) would have collided with
+  `mayan`'s already-published host port `8000` (flagged as a risk since
+  P5-1). `docker-compose.yml`'s `app` service (added in P12-3, once
+  both BFFs existed) publishes on `8001` instead, which was already
+  registered as this project's native-dev redirect URI
+  (`keycloak/import/loanrealm-realm.json`'s `http://localhost:8001/ui/callback`)
+  — no realm changes were needed. A second, real bug was found and
+  fixed in the same pass, invisible until the very first fully
+  containerized `docker compose up --build` (every earlier phase tested
+  `app.py` running natively on the host, where this never surfaced):
+  `bff_backoffice/keycloak_session.py`'s two browser-redirect URLs
+  (login, logout) and `keycloak_auth.py`'s token issuer-claim validation
+  were built from `KEYCLOAK_ISSUER` (`http://keycloak:8080/...`,
+  correct for this app container's own server-to-server calls to
+  Keycloak, but meaningless to a browser outside the compose network,
+  and mismatched against what Keycloak actually stamps into an issued
+  token's `iss` claim, which mirrors the front-channel/browser-facing
+  URL). Fixed with a new `KEYCLOAK_PUBLIC_ISSUER` env var (falls back
+  to `KEYCLOAK_ISSUER` when unset, so the native/host-run case needs no
+  config change) — see both modules' `_public_issuer()`/
+  `_public_keycloak_issuer()` and `docker-compose.yml`'s `app` service
+  comment. Verified via a real browser login/logout round trip through
+  the fully containerized stack after the fix.
 - **Mayan's default REST API rate limit (`REST_API_THROTTLING_RATE_USER`,
   20 req/sec out of the box) is real and gets hit at POC scale, not just
   in theory** — found in P5-4/P5-5 by actually running
@@ -1188,9 +1201,29 @@ for `KEYCLOAK_ISSUER`.
   `verify_aud=False` until a real audience is configured; no caching on
   permission checks (every mutating action is a live UMA exchange).
 - No timeout on "wait for Underwriter/Manager decision."
-- A Temporal *terminate* (vs. *cancel*) still can't be recovered from
+- **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to
-  catch.
+  catch — and, worse than previously documented here, no reconciliation
+  job exists anywhere in this codebase to catch it from the outside
+  either.** An earlier draft of `db/schema.sql`'s `workflow_id` column
+  comment (and `PRD.md`'s §9.3 data-model table) claimed this column
+  "gets cleared if a Temporal admin deletes the execution," describing
+  a reconciliation mechanism as if it existed — corrected in P12-1
+  after grepping the codebase and finding no code anywhere writes to
+  `workflow_id` after `persist_application` sets it. Both claims (the
+  terminate gap, and the absence of any reconciliation) were verified
+  for real in P12-1, not just reasoned about: a genuine
+  `temporal workflow cancel` issued directly via the Temporal CLI
+  (bypassing this app entirely) against a live `PENDING_UNDERWRITING`
+  application correctly landed the Postgres row on `CANCELLED` (the
+  `except asyncio.CancelledError` recovery path works against a real
+  server, not just `WorkflowEnvironment`); a `temporal workflow
+  terminate` against a second, otherwise-identical application left its
+  row permanently stuck at `PENDING_UNDERWRITING` with no error raised
+  anywhere — confirmed by checking Postgres afterward, not assumed. A
+  human operator today has no query, alert, or job that would ever
+  surface this stuck row; finding it requires manually cross-referencing
+  Postgres against Temporal's own workflow list.
 - No proactive notification (email/SMS) on status change.
 - A product type present in `application/schemas.py`'s registry but
   missing from `workflow/task_queues.py`'s `KNOWN_PRODUCT_TYPES` is

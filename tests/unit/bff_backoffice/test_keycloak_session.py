@@ -335,3 +335,21 @@ def test_logout_redirect_url_includes_client_and_redirect():
 
     assert url.startswith(f"{ISSUER}/protocol/openid-connect/logout?")
     assert "loan-onboarding-backoffice" in url
+
+
+def test_build_authorize_url_uses_public_issuer_when_set(monkeypatch):
+    """The container-split scenario found in P12-3: `KEYCLOAK_ISSUER`
+    is the internal, network-reachable address for this app's own
+    server-to-server calls; the browser must never see it (it's not
+    resolvable outside the compose network) -- these two browser
+    redirects need `KEYCLOAK_PUBLIC_ISSUER` instead, whenever it's set."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER", "http://keycloak:8080/realms/loanrealm")
+    monkeypatch.setenv("KEYCLOAK_PUBLIC_ISSUER", "http://localhost:8080/realms/loanrealm")
+
+    authorize_url, _ = keycloak_session.build_authorize_url("http://x/ui/callback")
+    logout_url = keycloak_session.logout_redirect_url("http://x/ui/login")
+
+    assert authorize_url.startswith("http://localhost:8080/realms/loanrealm/protocol/openid-connect/auth?")
+    assert logout_url.startswith("http://localhost:8080/realms/loanrealm/protocol/openid-connect/logout?")
+    assert "keycloak:8080" not in authorize_url
+    assert "keycloak:8080" not in logout_url

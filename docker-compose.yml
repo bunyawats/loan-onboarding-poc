@@ -1,29 +1,18 @@
 name: loan-onboarding-poc
 
-# Phase 0 skeleton (IMPLEMENTATION_PLAN.md P0-4): db, temporal,
-# temporal-ui, keycloak, backoffice-redis only. No app/worker services
-# yet -- those come once there's code to run (Phase 7/10/11).
-#
-# mayan-db/mayan-redis/mayan are DELIBERATELY NOT here yet -- P5-1
-# copies them "wholesale" from mayan-edms-customer-archive/docker-compose.yml,
-# but that file's actual service names are db/redis/app, not
-# mayan-db/mayan-redis/mayan, and its `db`/`redis` names collide with
-# this file's own `db` (Postgres) and `backoffice-redis` -- P5-1 needs
-# a rename pass (db -> mayan-db, redis -> mayan-redis, app -> mayan),
-# not a literal copy-paste. Its `webapp` service (a demo front end) has
-# no equivalent need here, since document/ talks to Mayan's API
-# directly.
-#
-# worker-workflow/worker-activity (P7-2) follow review-approval-
-# temporal's own identical WORKER_MODE split: workflow code is pure/
-# deterministic and never touches Postgres or Mayan, so worker-workflow
-# gets neither DATABASE_URL nor Mayan credentials; worker-activity runs
-# application/activities.py's real implementations, so it needs both
-# (DATABASE_URL for the applications/customers/accounts tables it
-# writes to on approval, Mayan credentials for the two managed-document
-# calls in that same provisioning block). No `app`/`app-customer`/
-# `app-backoffice` service yet -- those come in Phase 10/11 once the
-# BFFs exist.
+# Grew up in phases (IMPLEMENTATION_PLAN.md): P0-4 laid down db,
+# temporal, temporal-ui, keycloak, backoffice-redis; P5-1 added
+# mayan-db/mayan-redis/mayan (renamed from mayan-edms-customer-archive's
+# own db/redis/app to avoid colliding with this file's own `db`/
+# `backoffice-redis` -- that project's `webapp` demo front end was
+# dropped, since document/ talks to Mayan's API directly); P7-2 added
+# worker-workflow/worker-activity (review-approval-temporal's
+# WORKER_MODE split -- workflow code is pure/deterministic and never
+# touches Postgres or Mayan, so worker-workflow gets neither
+# DATABASE_URL nor Mayan credentials; worker-activity runs
+# application/activities.py's real implementations, so it needs both);
+# P12-3 added `app`, the single web process, once both BFFs (Phase 10,
+# Phase 11) existed to mount into it.
 
 services:
   db:
@@ -81,6 +70,30 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
+      # Pins Keycloak's own notion of its issuer/hostname to the one
+      # public URL, regardless of which network path a request arrives
+      # on -- found necessary in P12-3, the hard way: with
+      # `hostname-strict=false` (this image's `start-dev` default),
+      # Keycloak derives the issuer it validates a bearer token against
+      # from *that request's own Host header*, per request. A UMA
+      # ticket exchange or refresh-token call `app`'s server-to-server
+      # code sends to the internal `http://keycloak:8080/...` was
+      # rejected outright -- "401 invalid_grant: Invalid bearer token"
+      # -- for a perfectly valid token, purely because the token's own
+      # `iss` claim (stamped as `http://localhost:8080/...`, from the
+      # browser's original front-channel request) didn't match the
+      # `keycloak:8080` Host header *that specific internal request*
+      # arrived on. Fixing only this app's own issuer-claim validation
+      # (`KEYCLOAK_PUBLIC_ISSUER`, `_public_issuer()`/
+      # `_public_keycloak_issuer()`) was necessary but not sufficient --
+      # Keycloak itself was independently rejecting the token before
+      # our code ever got to check anything. Pinning the hostname here
+      # makes Keycloak mint and validate every token against this one
+      # fixed issuer regardless of which URL reached it, which is what
+      # actually closes the gap.
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8080"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
     volumes:
       # Empty until Phase 9 (P9-1) adds loanrealm-realm.json here --
       # --import-realm is a no-op against an empty directory, so
@@ -183,6 +196,61 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-loan_onboarding}
       TEMPORAL_HOST: temporal:7233
       TEMPORAL_NAMESPACE: default
+      MAYAN_BASE_URL: http://mayan:8000
+      MAYAN_SERVICE_ACCOUNT_USERNAME: ${MAYAN_SERVICE_ACCOUNT_USERNAME:-admin}
+      MAYAN_SERVICE_ACCOUNT_PASSWORD: ${MAYAN_SERVICE_ACCOUNT_PASSWORD:-changeme}
+    restart: on-failure
+
+  # --- P12-3: the single web process (app.py mounts both bff_customer
+  # and bff_backoffice's routers -- CLAUDE.md's "Deployment"). Published
+  # on host port 8001, NOT 8000 -- CLAUDE.md's "Known gaps" flagged that
+  # 8000 collides with `mayan`'s own already-published host port 8000;
+  # 8001 was already registered as this project's documented
+  # native-dev-server redirect URI
+  # (keycloak/import/loanrealm-realm.json's `http://localhost:8001/ui/callback`),
+  # so publishing the containerized app there too needs zero realm
+  # changes -- bff_backoffice/routes.py's `_redirect_uri()` derives the
+  # callback URL from the browser's own request (`request.base_url`),
+  # not a hardcoded host/port, so whichever host port the browser
+  # actually used is what gets sent to Keycloak.
+  app:
+    build: .
+    command: uvicorn loan_onboarding.app:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      keycloak:
+        condition: service_started
+      backoffice-redis:
+        condition: service_healthy
+      mayan:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-loan_onboarding}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/loanrealm
+      # The browser needs a host-reachable URL for the two redirects
+      # keycloak_session.py sends it to (login, logout) -- `keycloak`
+      # only resolves inside this compose network. Every other Keycloak
+      # call (token exchange, JWKS, UMA permission checks) is
+      # server-to-server, from inside this container, and correctly
+      # keeps using KEYCLOAK_ISSUER above. `keycloak_auth.py`'s
+      # `decode_token()` also needs this value specifically for its
+      # issuer-claim check (not just the two browser redirects) -- a
+      # token's `iss` claim matches the front-channel/public URL, not
+      # whichever URL the server used to fetch it. See both modules'
+      # `_public_issuer()`/`_public_keycloak_issuer()`.
+      KEYCLOAK_PUBLIC_ISSUER: http://localhost:8080/realms/loanrealm
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-loan-onboarding-backoffice}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-dev-secret-change-me}
+      BACKOFFICE_SESSION_SECRET_KEY: ${BACKOFFICE_SESSION_SECRET_KEY:-dev-secret-change-me}
+      BACKOFFICE_REDIS_URL: redis://backoffice-redis:6379/0
+      CUSTOMER_SESSION_SECRET_KEY: ${CUSTOMER_SESSION_SECRET_KEY:-dev-secret-change-me}
       MAYAN_BASE_URL: http://mayan:8000
       MAYAN_SERVICE_ACCOUNT_USERNAME: ${MAYAN_SERVICE_ACCOUNT_USERNAME:-admin}
       MAYAN_SERVICE_ACCOUNT_PASSWORD: ${MAYAN_SERVICE_ACCOUNT_PASSWORD:-changeme}

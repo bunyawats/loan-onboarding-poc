@@ -440,7 +440,7 @@ the same customer and product type).
 | `applicant_identifier` | the durable identity key (§7.1) — always present at submission, regardless of whether the applicant is a recognized customer yet. This is what "a customer only sees their own applications" (§10 criterion 2) is actually keyed on. |
 | `customer_id` | **nullable** — set at submission if `applicant_identifier` matches an existing customer, otherwise `NULL` until (and unless) this application is later approved |
 | `account_id` | **nullable** — `NULL` for the application's entire non-terminal lifetime; set exactly once, when the application reaches terminal `APPROVED` |
-| `workflow_id` | Temporal workflow id, nullable (cleared if a Temporal admin deletes the execution — same reconciliation pattern as the reference project) |
+| `workflow_id` | Temporal workflow id, nullable until `persist_application` commits it. **Never cleared afterward** — a terminated workflow or a deleted execution leaves this pointing at a Temporal execution that no longer exists; no reconciliation job exists to catch it. See `CLAUDE.md`'s "Known gaps" (corrected in P12-1 from an earlier draft of this row, which incorrectly claimed such a mechanism existed). |
 | `product_type` | `personal_loan` \| `auto_loan` \| `mortgage` |
 | `payload` | JSONB, product-specific fields |
 | `applicant_name`, `applicant_email`, `applicant_phone`, `amount` | captured **as submitted** — a deliberate snapshot, not a live read of the customer's current profile (see `CLAUDE.md`'s "Denormalized applicant fields" note) |

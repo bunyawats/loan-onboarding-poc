@@ -121,6 +121,40 @@ def test_decode_token_keycloak_issuer_unset(monkeypatch, rsa_keys):
         keycloak_auth.decode_token("irrelevant")
 
 
+def test_decode_token_validates_against_public_issuer_when_set(monkeypatch, rsa_keys):
+    """The container-split scenario found in P12-3: KEYCLOAK_ISSUER is
+    the internal, network-reachable address (used for the JWKS fetch --
+    irrelevant here since that's patched out); the token itself carries
+    whatever `iss` Keycloak stamped based on the browser-facing
+    authorize request, which is KEYCLOAK_PUBLIC_ISSUER, not
+    KEYCLOAK_ISSUER. Must validate successfully against the public one."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER", "http://keycloak:8080/realms/loanrealm")
+    monkeypatch.setenv("KEYCLOAK_PUBLIC_ISSUER", "http://localhost:8080/realms/loanrealm")
+    private_key, public_key = rsa_keys
+    _patch_jwk_client(monkeypatch, public_key)
+    token = _make_token(private_key, iss="http://localhost:8080/realms/loanrealm")
+
+    claims = keycloak_auth.decode_token(token)
+
+    assert claims["preferred_username"] == "underwriter1"
+
+
+def test_decode_token_rejects_internal_issuer_when_public_issuer_set(monkeypatch, rsa_keys):
+    """The mirror of the test above -- a token carrying the *internal*
+    issuer is exactly what a real token never does once
+    KEYCLOAK_PUBLIC_ISSUER is configured, and must still be rejected
+    (this is the literal bug found in P12-3, before `decode_token` was
+    corrected to validate against the public issuer)."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER", "http://keycloak:8080/realms/loanrealm")
+    monkeypatch.setenv("KEYCLOAK_PUBLIC_ISSUER", "http://localhost:8080/realms/loanrealm")
+    private_key, public_key = rsa_keys
+    _patch_jwk_client(monkeypatch, public_key)
+    token = _make_token(private_key, iss="http://keycloak:8080/realms/loanrealm")
+
+    with pytest.raises(pyjwt.InvalidIssuerError):
+        keycloak_auth.decode_token(token)
+
+
 # ----------------------------------------------------------- get_permissions ----
 
 async def test_get_permissions_granted():
