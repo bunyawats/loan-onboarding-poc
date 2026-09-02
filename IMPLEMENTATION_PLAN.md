@@ -144,15 +144,24 @@ through a real browser — customer wizard submission (id minted as
 and Approve — then confirmed via `psql` that `customers`/`accounts`/
 `applications` all used the new prefixed-id format and
 `accounts.application_id` correctly pointed back at the approving
-application. **What's left is P13-7 only**: a full `docker compose
-down -v && docker compose up -d --build` from genuinely empty volumes,
-the complete standard live-verification sweep (all three product
-types, escalation, reject, more-info-then-resubmit, cancel), and the
-commit/push/confirm-CI-green step — none of that has been done yet,
-and the down -v / push steps are disruptive/visible enough that they
-should be confirmed with whoever picks this up rather than run
-unilaterally. Start here:
-[Phase 13](#phase-13--human-readable-primary-keys--account-to-application-direction-flip).
+application. **P13-7 is now also done — all 7 of Phase 13's tasks are
+complete.** A full `docker compose down -v && docker compose up -d
+--build` from genuinely empty volumes plus the complete standard
+live-verification sweep (all three product types, direct approve,
+escalation-then-manager-approve, reject, cancel, more-info-then-resubmit)
+all passed against the new id scheme. **One genuine, pre-existing bug
+(not caused by Phase 13) was found live during this sweep** — see
+`CLAUDE.md`'s Known Gaps, the new bullet just under the existing
+active-account-race-window one: `check_decision_allowed` can miss a
+real active-account conflict (not just race it) when two applications
+share an `applicant_identifier` and one is approved before the other,
+leaving the second stuck at `PENDING_UNDERWRITING` with its Temporal
+workflow `FAILED`. Not fixed — out of scope for an id-format migration
+phase; surfaced to the user, not silently left in this file. **This
+plan's own backlog is empty again** — remaining work is only the
+Known Gaps in `CLAUDE.md` (including the newly-confirmed one above),
+same as after Phase 12. Commit and push are still pending confirmation
+from the user before this session does them.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2131,7 +2140,7 @@ gaps in this file are deliberately left unaddressed.
       pass with zero remaining `UUID`-typed usage of these three ids
       anywhere in `loan_onboarding/` (a `grep -rn "UUID" loan_onboarding/`
       confined to unrelated code, if any, is the check).
-- [ ] **P13-7** — Final full-stack verification and CI.
+- [x] **P13-7** — Final full-stack verification and CI.
       DoD (integration-verify, whole phase): `docker compose down -v &&
       docker compose up -d --build` from genuinely empty volumes;
       re-run this project's own standard live-verification sweep (all
@@ -2140,7 +2149,38 @@ gaps in this file are deliberately left unaddressed.
       confirm via `psql` that every `customers`/`accounts`/`applications`
       row uses the new prefixed id format and that
       `accounts.application_id` correctly matches the approving
-      application in each case. Commit, push, confirm CI green — same
+      application in each case.
+      > DONE — `docker compose down -v && docker compose up -d --build`
+      > from genuinely empty volumes (confirmed all volumes actually
+      > removed first), `scripts/setup_document_hierarchy.sh` re-run
+      > against the fresh Mayan instance. Walked all three product types
+      > through a real browser: personal_loan direct-approve, auto_loan
+      > reject, mortgage escalate-then-manager-approve, auto_loan
+      > cancel, and personal_loan more-info-then-resubmit all completed
+      > correctly with the new `cus-`/`acc-`/`app-` id format, confirmed
+      > via `psql` (`accounts.application_id` correctly points at each
+      > approving application). **A genuine pre-existing bug was found
+      > live in this pass, not introduced by Phase 13** — see
+      > `CLAUDE.md`'s Known Gaps, the new bullet directly under the
+      > existing active-account-race-window one: `check_decision_allowed`
+      > trusts a `NULL` `customer_id` on the application row as proof
+      > "no conflict is possible," which breaks (deterministically, not
+      > just as a race) once the same `applicant_identifier` has two
+      > applications outstanding and one is approved before the other.
+      > Reproduced by resubmitting the more-info application and
+      > approving it after a sibling application for the same
+      > applicant had already been approved and provisioned an
+      > `ACTIVE` `personal_loan` account — the second Approve's signal
+      > reached the workflow uncontested, `persist_decision` hit
+      > `ux_accounts_customer_active_product_type`'s real constraint on
+      > every retry, and the Temporal workflow ended `FAILED` with the
+      > application stuck at `PENDING_UNDERWRITING` forever, no error
+      > surfaced anywhere. Not fixed here — out of scope for Phase 13
+      > (an id-format/direction-flip migration), and CLAUDE.md already
+      > carried an adjacent "accepted for a POC" gap in this exact
+      > area; this is a documentation correction (a broader, easier-to-hit
+      > variant of that gap actually confirmed to fire), not new work
+      > this phase was scoped to do. Commit, push, confirm CI green — same
       task-id-prefixed-commit-message and `gh run watch` convention
       every prior phase in this file has used.
 
@@ -2154,6 +2194,31 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — P13-7 done, closing out Phase 13. Full
+  `docker compose down -v && docker compose up -d --build` from
+  genuinely empty volumes (confirmed volumes actually removed, not
+  just containers), `scripts/setup_document_hierarchy.sh` re-run
+  against the fresh Mayan instance, workers restarted once past the
+  brief post-boot window before Temporal's `default` namespace exists.
+  Walked all three product types and every terminal/non-terminal
+  outcome through a real browser against the rebuilt stack:
+  personal_loan direct-approve, auto_loan reject, mortgage
+  escalate-then-manager-approve, auto_loan cancel, personal_loan
+  more-info-then-resubmit — all produced correctly-formatted
+  `cus-`/`acc-`/`app-` ids and a correctly-linked
+  `accounts.application_id`, confirmed via `psql`. Found and documented
+  (not fixed — out of this phase's scope) a real pre-existing bug while
+  processing the more-info application's resubmit-then-approve: see
+  `CLAUDE.md`'s Known Gaps for the full mechanism
+  (`check_decision_allowed` trusting a stale `NULL` `customer_id`
+  column instead of re-resolving by `applicant_identifier`). Also
+  incidentally hit and worked around a native-JS-`confirm()`-dialog
+  browser-automation gotcha on the customer Cancel button (stub
+  `window.confirm` before clicking, or close and reopen the tab if one
+  gets stuck) — not a codebase bug, purely a testing-tool note.
+  **Phase 13 (all 7 tasks) is now fully complete.** Commit/push for
+  this phase's work is still pending explicit user confirmation.
 
 - **2026-09-02** — P13-1 through P13-6 done (idgen module,
   db/schema.sql's TEXT-id + accounts.application_id migration,
