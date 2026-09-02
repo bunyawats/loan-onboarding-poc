@@ -523,11 +523,31 @@ Independent of Phases 2–4 — can run in parallel if sessions overlap.
       > alongside real siblings once documents of both types existed —
       > harmless, `link_documents: false` on all of them, exactly as the
       > reference project's docs predict.
-- [ ] **P5-3** — `document/mayan_client.py`: thin async wrapper,
+- [x] **P5-3** — `document/mayan_client.py`: thin async wrapper,
       `Accept: application/json` default header (do not omit — see
       `CLAUDE.md`), service-account token obtained lazily and refreshed
       on 401, metadata/document-type id lookups cached for process
       lifetime.
+      > DONE: modeled closely on `mayan-edms-customer-archive`'s own
+      > `mayan_client.py` (fetched and read directly), adapted for this
+      > project's five metadata fields (`applicant_identifier`,
+      > `application_id`, `account_id`, `customer_id`, `category`) and
+      > two document types (`Application Document`, `Account Document`)
+      > instead of that project's three. `upload_file`'s `action_name`
+      > is a parameter (default `"replace"`), not hardcoded, so P5-5's
+      > `upload_consent` can pass `"new"` once that value is confirmed
+      > against Mayan's API rather than needing a second upload method.
+      > `tests/unit/document/test_mayan_client.py`, 9 tests, `respx`-mocked
+      > at the HTTP transport layer (no live Mayan needed for this
+      > module's own client tests, unlike `customer`/`account`'s
+      > deliberate real-Postgres exception) — lazy token fetch + caching,
+      > 401-triggered re-fetch and retry, paginated id-map loading and
+      > caching, `index_template_id` found-by-slug and
+      > not-found-raises, `upload_file`'s multipart body and
+      > `action_name` default, `relative_path` prefix-stripping. All 36
+      > `tests/unit/` tests pass (excluding `customer`/`account`, same
+      > pre-existing local port-5432 collision every prior session has
+      > hit — unrelated to this task).
 - [ ] **P5-4** — `document/service.py`: `upload(applicant_identifier,
       application_id, category, file)` (create → upload with
       `action_name=replace` → attach metadata → rebuild index) — no
