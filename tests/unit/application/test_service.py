@@ -16,6 +16,7 @@ from loan_onboarding.account import db as account_db
 from loan_onboarding.application import db as application_db, service
 from loan_onboarding.application.models import ApplicationNotFound
 from loan_onboarding.customer import db as customer_db
+from loan_onboarding.workflow.workflows import STATUS_PENDING_UNDERWRITING
 
 _application_id_counter = itertools.count()
 
@@ -330,7 +331,7 @@ async def test_resubmit_signals_existing_workflow_and_waits_for_payload_update(m
     async def fake_signal_resubmit(client, workflow_id, payload):
         signal_calls.append((workflow_id, payload))
         # Simulate persist_resubmit (the activity a real worker would run).
-        await application_db.update_resubmission(application_id, payload)
+        await application_db.update_resubmission(application_id, payload, STATUS_PENDING_UNDERWRITING)
 
     monkeypatch.setattr(service.workflow_service, "signal_resubmit", fake_signal_resubmit)
 

@@ -31,6 +31,8 @@ from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.idgen import service as idgen_service
 from loan_onboarding.workflow import service as workflow_service
+from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
+from loan_onboarding.workflow.workflows import DECISION_APPROVE
 
 # start_workflow()/handle.signal() only confirm Temporal *accepted* the
 # call, not that persist_application/persist_resubmit has actually
@@ -63,8 +65,8 @@ async def _get_temporal_client() -> Client:
         async with _temporal_client_lock:
             if _temporal_client is None:
                 _temporal_client = await Client.connect(
-                    os.environ.get("TEMPORAL_HOST", "localhost:7233"),
-                    namespace=os.environ.get("TEMPORAL_NAMESPACE", "default"),
+                    os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+                    namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
                 )
     return _temporal_client
 
@@ -192,7 +194,7 @@ async def check_decision_allowed(application_id: str, decision: str) -> list[str
     `check_decision_allowed_bulk` instead, not this function directly
     -- see that function's docstring for why a plain per-item loop over
     this one isn't enough there."""
-    if decision != "APPROVE":
+    if decision != DECISION_APPROVE:
         return []
 
     record = await application_db.get(application_id)
@@ -249,7 +251,7 @@ async def check_decision_allowed_bulk(application_ids: list[str], decision: str)
     across requests. `persist_decision`'s conflict-to-REJECTED handling
     remains the backstop for that case, and is expected to still fire
     occasionally for genuinely concurrent, cross-request decisions."""
-    if decision != "APPROVE":
+    if decision != DECISION_APPROVE:
         return {application_id: [] for application_id in application_ids}
 
     results: dict[str, list[str]] = {}

@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from loan_onboarding.application import db
+from loan_onboarding.workflow.workflows import STATUS_PENDING_UNDERWRITING
 
 pytestmark = pytest.mark.usefixtures("_clean_applications_table")
 
@@ -180,7 +181,7 @@ async def test_update_resubmission_replaces_payload_and_resets_status():
     await _insert_sample(application_id=application_id, payload={"old": True})
     await db.update_decision(application_id, status="MORE_INFO_REQUESTED")
 
-    record = await db.update_resubmission(application_id, {"new": True})
+    record = await db.update_resubmission(application_id, {"new": True}, STATUS_PENDING_UNDERWRITING)
 
     assert record["payload"] == {"new": True}
     assert record["status"] == "PENDING_UNDERWRITING"

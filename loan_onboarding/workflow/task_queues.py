@@ -23,6 +23,14 @@ established pattern per CLAUDE.md's dependency graph; the reverse isn't).
 # queue nothing is polling (see CLAUDE.md's "Breaking the cycle").
 KNOWN_PRODUCT_TYPES = ("personal_loan", "auto_loan", "mortgage")
 
+# Local-dev fallbacks for TEMPORAL_HOST/TEMPORAL_NAMESPACE -- every
+# process that opens its own Temporal Client (application/service.py,
+# workflow/worker.py, both BFFs' routes.py) reads the env vars with
+# these same defaults; a shared pair here keeps the four call sites
+# from independently retyping the same literals.
+DEFAULT_TEMPORAL_HOST = "localhost:7233"
+DEFAULT_TEMPORAL_NAMESPACE = "default"
+
 
 def task_queue_for_product_type(product_type: str) -> str:
     return f"loan-onboarding-{product_type}-task-queue"

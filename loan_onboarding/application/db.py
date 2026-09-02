@@ -164,17 +164,24 @@ async def update_decision(
     )
 
 
-async def update_resubmission(application_id: str, payload: dict[str, Any]) -> asyncpg.Record:
+async def update_resubmission(application_id: str, payload: dict[str, Any], status: str) -> asyncpg.Record:
+    """`status` is caller-supplied (application/activities.py passes
+    workflow.workflows.STATUS_PENDING_UNDERWRITING), same
+    already-resolved-column-values principle this module's own
+    docstring states -- a resubmission always lands back at that status,
+    but which status that is isn't this thin data-access layer's
+    decision to hardcode."""
     pool = await _get_pool()
     return await pool.fetchrow(
         """
         UPDATE applications
-        SET payload = $2, status = 'PENDING_UNDERWRITING', updated_at = now()
+        SET payload = $2, status = $3, updated_at = now()
         WHERE application_id = $1
         RETURNING *
         """,
         application_id,
         payload,
+        status,
     )
 
 

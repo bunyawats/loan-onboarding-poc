@@ -35,9 +35,21 @@ from loan_onboarding.application.models import Application, ApplicationNotFound
 from loan_onboarding.bff_customer import identity, notifications
 from loan_onboarding.document import service as document_service
 from loan_onboarding.document.models import UploadedFile
+from loan_onboarding.document.service import CATEGORY_GOVERNMENT_ID
 from loan_onboarding.idgen import service as idgen_service
 from loan_onboarding.workflow import service as workflow_service
-from loan_onboarding.workflow.workflows import TERMINAL_STATUSES
+from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
+from loan_onboarding.workflow.workflows import (
+    DECISION_CANCELLED,
+    ROLE_CUSTOMER,
+    STATUS_APPROVED,
+    STATUS_CANCELLED,
+    STATUS_MORE_INFO_REQUESTED,
+    STATUS_PENDING_MANAGER_APPROVAL,
+    STATUS_PENDING_UNDERWRITING,
+    STATUS_REJECTED,
+    TERMINAL_STATUSES,
+)
 
 router = APIRouter(prefix="/apply", tags=["Customer"])
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -78,12 +90,12 @@ PRODUCT_FIELDS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 STATUS_LABELS = {
-    "PENDING_UNDERWRITING": "Under Review",
-    "PENDING_MANAGER_APPROVAL": "Escalated for Manager Review",
-    "MORE_INFO_REQUESTED": "More Info Requested",
-    "APPROVED": "Approved",
-    "REJECTED": "Rejected",
-    "CANCELLED": "Cancelled",
+    STATUS_PENDING_UNDERWRITING: "Under Review",
+    STATUS_PENDING_MANAGER_APPROVAL: "Escalated for Manager Review",
+    STATUS_MORE_INFO_REQUESTED: "More Info Requested",
+    STATUS_APPROVED: "Approved",
+    STATUS_REJECTED: "Rejected",
+    STATUS_CANCELLED: "Cancelled",
 }
 
 
@@ -123,14 +135,14 @@ def _build_timeline(application: Application) -> list[dict[str, str]]:
             steps.append({"label": "Escalated to Manager", "state": "done"})
         steps.append({"label": STATUS_LABELS[application.status], "state": "current"})
         return steps
-    if application.status == "PENDING_UNDERWRITING":
+    if application.status == STATUS_PENDING_UNDERWRITING:
         steps.append({"label": "Under Review", "state": "current"})
         return steps
-    if application.status == "PENDING_MANAGER_APPROVAL":
+    if application.status == STATUS_PENDING_MANAGER_APPROVAL:
         steps.append({"label": "Under Review", "state": "done"})
         steps.append({"label": "Escalated to Manager", "state": "current"})
         return steps
-    if application.status == "MORE_INFO_REQUESTED":
+    if application.status == STATUS_MORE_INFO_REQUESTED:
         steps.append({"label": "Under Review", "state": "done"})
         steps.append({"label": "More Info Requested", "state": "current"})
         return steps
@@ -286,7 +298,7 @@ async def _detail_context(application: Application) -> dict[str, Any]:
     required = document_service.REQUIRED_CATEGORIES[application.product_type]
     by_category = {category: [d for d in documents if d.category == category] for category in required}
     categories = None
-    if application.status == "MORE_INFO_REQUESTED":
+    if application.status == STATUS_MORE_INFO_REQUESTED:
         # Additional documents may only be added while more info is
         # requested (PRD §8.1) -- the upload-capable rendering
         # (`_document_category.html`'s <form>) is only built in that
@@ -296,7 +308,7 @@ async def _detail_context(application: Application) -> dict[str, Any]:
                 "category": category,
                 "documents": by_category[category],
                 "upload_url": f"/apply/applications/{application_id}/documents/upload",
-                "capture": category == "Government ID",
+                "capture": category == CATEGORY_GOVERNMENT_ID,
             }
             for category in required
         ]
@@ -327,7 +339,7 @@ async def cancel_application(
         raise HTTPException(status_code=400, detail="application is already in a terminal state")
     client = await _get_temporal_client()
     await workflow_service.signal_decision(
-        client, application.workflow_id, "customer", "CANCELLED", applicant_identifier, ""
+        client, application.workflow_id, ROLE_CUSTOMER, DECISION_CANCELLED, applicant_identifier, ""
     )
     await application_service.wait_for_status_change(application_id, application.status)
     return RedirectResponse(url=f"/apply/applications/{application_id}", status_code=303)
@@ -338,7 +350,7 @@ async def resubmit_application(
     request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     application = await _owned_application(application_id, applicant_identifier)
-    if application.status != "MORE_INFO_REQUESTED":
+    if application.status != STATUS_MORE_INFO_REQUESTED:
         raise HTTPException(status_code=400, detail="application is not awaiting more info")
 
     form = await request.form()
@@ -372,7 +384,7 @@ async def upload_more_info_document(
     applicant_identifier: str = Depends(_require_applicant),
 ):
     application = await _owned_application(application_id, applicant_identifier)
-    if application.status != "MORE_INFO_REQUESTED":
+    if application.status != STATUS_MORE_INFO_REQUESTED:
         raise HTTPException(status_code=400, detail="documents can only be added while more info is requested")
     required = document_service.REQUIRED_CATEGORIES[application.product_type]
     if category not in required:
@@ -543,7 +555,7 @@ async def new_application_documents(request: Request, applicant_identifier: str 
             "upload_url": "/apply/new/documents/upload",
             # Camera-capture hint (PRD §6.4/§8.1) only makes sense for a
             # physical ID card, not a multi-page bank statement/report.
-            "capture": category == "Government ID",
+            "capture": category == CATEGORY_GOVERNMENT_ID,
         }
         for category in required
     ]
@@ -656,7 +668,7 @@ async def _get_temporal_client() -> Client:
     global _temporal_client
     if _temporal_client is None:
         _temporal_client = await Client.connect(
-            os.environ.get("TEMPORAL_HOST", "localhost:7233"),
-            namespace=os.environ.get("TEMPORAL_NAMESPACE", "default"),
+            os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+            namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
         )
     return _temporal_client

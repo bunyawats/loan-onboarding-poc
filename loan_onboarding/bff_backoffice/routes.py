@@ -43,6 +43,16 @@ from loan_onboarding.bff_backoffice.keycloak_session import SESSION_KEY
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.workflow import service as workflow_service
+from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
+from loan_onboarding.workflow.workflows import (
+    DECISION_APPROVE,
+    DECISION_REJECT,
+    DECISION_REQUEST_MORE_INFO,
+    ROLE_MANAGER,
+    ROLE_UNDERWRITER,
+    STATUS_PENDING_MANAGER_APPROVAL,
+    STATUS_PENDING_UNDERWRITING,
+)
 
 router = APIRouter(prefix="/ui", tags=["Web UI"])
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -54,18 +64,18 @@ _PAGE_SIZE = 10
 _STATE_KEY = "oauth_state"
 
 ROLE_STATUS = {
-    "underwriter": "PENDING_UNDERWRITING",
-    "manager": "PENDING_MANAGER_APPROVAL",
+    ROLE_UNDERWRITER: STATUS_PENDING_UNDERWRITING,
+    ROLE_MANAGER: STATUS_PENDING_MANAGER_APPROVAL,
 }
 
 # (role, decision) -> the Authorization Services Scope that decision
 # requires -- keycloak/import/loanrealm-realm.json's five Permissions.
 DECISION_PERMISSION = {
-    ("underwriter", "APPROVE"): "UnderwriterApprove",
-    ("underwriter", "REJECT"): "UnderwriterReject",
-    ("underwriter", "REQUEST_MORE_INFO"): "UnderwriterRequestMoreInfo",
-    ("manager", "APPROVE"): "ManagerApprove",
-    ("manager", "REJECT"): "ManagerReject",
+    (ROLE_UNDERWRITER, DECISION_APPROVE): "UnderwriterApprove",
+    (ROLE_UNDERWRITER, DECISION_REJECT): "UnderwriterReject",
+    (ROLE_UNDERWRITER, DECISION_REQUEST_MORE_INFO): "UnderwriterRequestMoreInfo",
+    (ROLE_MANAGER, DECISION_APPROVE): "ManagerApprove",
+    (ROLE_MANAGER, DECISION_REJECT): "ManagerReject",
 }
 
 # Which decisions each role's screen actually offers (single-item
@@ -73,11 +83,15 @@ DECISION_PERMISSION = {
 # route module's own validation of a submitted `decision` value against
 # what's legal for the given `role`.
 ROLE_DECISIONS = {
-    "underwriter": ("APPROVE", "REJECT", "REQUEST_MORE_INFO"),
-    "manager": ("APPROVE", "REJECT"),
+    ROLE_UNDERWRITER: (DECISION_APPROVE, DECISION_REJECT, DECISION_REQUEST_MORE_INFO),
+    ROLE_MANAGER: (DECISION_APPROVE, DECISION_REJECT),
 }
 
-DECISION_LABELS = {"APPROVE": "Approve", "REJECT": "Reject", "REQUEST_MORE_INFO": "Request More Info"}
+DECISION_LABELS = {
+    DECISION_APPROVE: "Approve",
+    DECISION_REJECT: "Reject",
+    DECISION_REQUEST_MORE_INFO: "Request More Info",
+}
 
 
 def _decision_options(role: str) -> list[tuple[str, str, str]]:
@@ -123,8 +137,8 @@ async def _get_temporal_client() -> Client:
     global _temporal_client
     if _temporal_client is None:
         _temporal_client = await Client.connect(
-            os.environ.get("TEMPORAL_HOST", "localhost:7233"),
-            namespace=os.environ.get("TEMPORAL_NAMESPACE", "default"),
+            os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+            namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
         )
     return _temporal_client
 
@@ -469,8 +483,8 @@ async def _staff_decision(
     except ApplicationNotFound:
         raise HTTPException(status_code=404)
 
-    if decision == "APPROVE":
-        blocking = await application_service.check_decision_allowed(application_id, "APPROVE")
+    if decision == DECISION_APPROVE:
+        blocking = await application_service.check_decision_allowed(application_id, DECISION_APPROVE)
         if blocking:
             ctx = await _application_detail_context(application_id, role, user)
             ctx["error"] = "; ".join(blocking)
@@ -581,7 +595,7 @@ async def _bulk_decision_execute(
     workflow_ids: list[str] = []
     eligible: list[Any] = []
 
-    if decision == "APPROVE":
+    if decision == DECISION_APPROVE:
         # Pre-filter conflicting applications out of the batch *before*
         # collecting workflow_ids (P6-5b/P10-3) -- reported in the same
         # per-item result shape bulk_signal_decision returns for any
@@ -593,7 +607,7 @@ async def _bulk_decision_execute(
         # bulk action would otherwise both pass an independent per-item
         # check, since neither one's account exists yet.
         blocking_by_id = await application_service.check_decision_allowed_bulk(
-            [application.application_id for application in applications], "APPROVE"
+            [application.application_id for application in applications], DECISION_APPROVE
         )
         for application in applications:
             blocking = blocking_by_id[application.application_id]

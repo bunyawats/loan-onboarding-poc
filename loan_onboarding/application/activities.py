@@ -27,6 +27,11 @@ from loan_onboarding.application import db as application_db
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.workflow.workflows import (
+    ROLE_MANAGER,
+    ROLE_UNDERWRITER,
+    STATUS_APPROVED,
+    STATUS_PENDING_UNDERWRITING,
+    STATUS_REJECTED,
     PersistApplicationInput,
     PersistDecisionInput,
     PersistResubmitInput,
@@ -83,11 +88,11 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
 
     underwriter_name = underwriter_comment = underwriter_decided_at = None
     manager_name = manager_comment = manager_decided_at = None
-    if inp.actor_role == "underwriter":
+    if inp.actor_role == ROLE_UNDERWRITER:
         underwriter_name = inp.actor_name
         underwriter_comment = inp.comment
         underwriter_decided_at = decided_at
-    elif inp.actor_role == "manager":
+    elif inp.actor_role == ROLE_MANAGER:
         manager_name = inp.actor_name
         manager_comment = inp.comment
         manager_decided_at = decided_at
@@ -107,10 +112,10 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
     # onto applications the way an account_id column on this table used
     # to require.
     existing_account = None
-    if inp.resulting_status == "APPROVED":
+    if inp.resulting_status == STATUS_APPROVED:
         existing_account = await account_service.get_by_application_id(application_id)
 
-    if inp.resulting_status == "APPROVED" and existing_account is None:
+    if inp.resulting_status == STATUS_APPROVED and existing_account is None:
         if record["customer_id"] is not None:
             customer_id = record["customer_id"]
         else:
@@ -136,15 +141,15 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
             # half of that gap. customer_id stays whatever it resolved
             # to above -- get_or_create is itself idempotent, so a
             # real, unused customer row isn't an orphaned-state concern.
-            final_status = "REJECTED"
+            final_status = STATUS_REJECTED
             conflict_note = (
                 f"Automatically rejected: customer already has an active "
                 f"{record['product_type']} account (lost a race against a "
                 f"concurrently-processed application for the same customer)."
             )
-            if inp.actor_role == "underwriter":
+            if inp.actor_role == ROLE_UNDERWRITER:
                 underwriter_comment = f"{inp.comment} {conflict_note}".strip()
-            elif inp.actor_role == "manager":
+            elif inp.actor_role == ROLE_MANAGER:
                 manager_comment = f"{inp.comment} {conflict_note}".strip()
         else:
             await document_service.promote_government_id_to_customer_photo(application_id, customer_id)
@@ -186,4 +191,4 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
 
 @activity.defn
 async def persist_resubmit(inp: PersistResubmitInput) -> None:
-    await application_db.update_resubmission(inp.application_id, inp.payload)
+    await application_db.update_resubmission(inp.application_id, inp.payload, STATUS_PENDING_UNDERWRITING)

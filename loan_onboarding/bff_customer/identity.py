@@ -88,14 +88,16 @@ _CODE_ALPHABET = "0123456789"
 # new (zero-attempt) verification instead of resetting an existing one.
 _MAX_VERIFICATION_ATTEMPTS = 5
 
+_DEV_SECRET_FALLBACK = "dev-only-insecure-secret"
+
 
 def _serializer() -> URLSafeTimedSerializer:
-    secret = os.environ.get("CUSTOMER_SESSION_SECRET_KEY", "dev-only-insecure-secret")
+    secret = os.environ.get("CUSTOMER_SESSION_SECRET_KEY", _DEV_SECRET_FALLBACK)
     return URLSafeTimedSerializer(secret, salt="bff-customer-identify")
 
 
 def _pending_serializer() -> URLSafeTimedSerializer:
-    secret = os.environ.get("CUSTOMER_SESSION_SECRET_KEY", "dev-only-insecure-secret")
+    secret = os.environ.get("CUSTOMER_SESSION_SECRET_KEY", _DEV_SECRET_FALLBACK)
     return URLSafeTimedSerializer(secret, salt="bff-customer-pending-verification")
 
 

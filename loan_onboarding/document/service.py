@@ -31,17 +31,24 @@ from .mayan_client import (
 )
 from .models import DocumentRef, DocumentStream, UploadedFile
 
+# The one category with system behavior hung off it (photo promotion
+# on approval, CLAUDE.md's "Applying without being a customer yet") --
+# named here so bff_customer/routes.py's camera-capture hint and this
+# module's own promote_government_id_to_customer_photo() can't drift
+# apart on the exact string.
+CATEGORY_GOVERNMENT_ID = "Government ID"
+
 REQUIRED_CATEGORIES: dict[str, list[str]] = {
-    "personal_loan": ["Government ID", "Proof of Income", "Bank Statements", "Credit Report"],
+    "personal_loan": [CATEGORY_GOVERNMENT_ID, "Proof of Income", "Bank Statements", "Credit Report"],
     "auto_loan": [
-        "Government ID",
+        CATEGORY_GOVERNMENT_ID,
         "Proof of Income",
         "Bank Statements",
         "Credit Report",
         "Vehicle Title/Invoice",
     ],
     "mortgage": [
-        "Government ID",
+        CATEGORY_GOVERNMENT_ID,
         "Proof of Income",
         "Bank Statements",
         "Credit Report",
@@ -191,7 +198,7 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     once (`<application_id>/Government ID` and
     `<applicant_identifier>/id_photo`) -- confirmed against a real
     instance in P5-2, see CLAUDE.md's "Document hierarchy"."""
-    matches = await _documents_matching({"application_id": application_id, "category": "Government ID"})
+    matches = await _documents_matching({"application_id": application_id, "category": CATEGORY_GOVERNMENT_ID})
     if not matches:
         raise DocumentNotFound(f"no Government ID document found for application {application_id}")
 

@@ -38,10 +38,25 @@ from temporalio.exceptions import ApplicationError
 # reason about anywhere else.
 MANAGER_ESCALATION_THRESHOLD_USD = 50_000
 
-VALID_ACTOR_ROLES = ("underwriter", "manager", "customer")
-VALID_DECISIONS = ("APPROVE", "REJECT", "REQUEST_MORE_INFO", "CANCELLED")
+ROLE_UNDERWRITER = "underwriter"
+ROLE_MANAGER = "manager"
+ROLE_CUSTOMER = "customer"
+VALID_ACTOR_ROLES = (ROLE_UNDERWRITER, ROLE_MANAGER, ROLE_CUSTOMER)
 
-TERMINAL_STATUSES = frozenset({"APPROVED", "REJECTED", "CANCELLED"})
+DECISION_APPROVE = "APPROVE"
+DECISION_REJECT = "REJECT"
+DECISION_REQUEST_MORE_INFO = "REQUEST_MORE_INFO"
+DECISION_CANCELLED = "CANCELLED"
+VALID_DECISIONS = (DECISION_APPROVE, DECISION_REJECT, DECISION_REQUEST_MORE_INFO, DECISION_CANCELLED)
+
+STATUS_PENDING_UNDERWRITING = "PENDING_UNDERWRITING"
+STATUS_PENDING_MANAGER_APPROVAL = "PENDING_MANAGER_APPROVAL"
+STATUS_MORE_INFO_REQUESTED = "MORE_INFO_REQUESTED"
+STATUS_APPROVED = "APPROVED"
+STATUS_REJECTED = "REJECTED"
+STATUS_CANCELLED = "CANCELLED"
+
+TERMINAL_STATUSES = frozenset({STATUS_APPROVED, STATUS_REJECTED, STATUS_CANCELLED})
 
 DEFAULT_RETRY_POLICY = RetryPolicy(maximum_attempts=5)
 DEFAULT_ACTIVITY_TIMEOUT = timedelta(seconds=30)
@@ -110,7 +125,7 @@ class LoanApplicationWorkflow:
         self._application_id: str = ""
         self._payload: dict[str, Any] = {}
         self._amount: float = 0.0
-        self._status = "PENDING_UNDERWRITING"
+        self._status = STATUS_PENDING_UNDERWRITING
         self._closed_by: Optional[str] = None
         self._closed_comment: Optional[str] = None
         self._finalized = False
@@ -139,41 +154,41 @@ class LoanApplicationWorkflow:
         """Returns (resulting_status, is_terminal), or raises ValueError
         if `decision` isn't valid for `actor_role` at the current status.
         """
-        if decision == "CANCELLED":
+        if decision == DECISION_CANCELLED:
             if self._status in TERMINAL_STATUSES:
                 raise ValueError(f"application already {self._status}, cannot cancel")
-            if actor_role != "customer":
+            if actor_role != ROLE_CUSTOMER:
                 raise ValueError(
                     f"CANCELLED must be requested by actor_role='customer', got {actor_role!r}"
                 )
-            return "CANCELLED", True
+            return STATUS_CANCELLED, True
 
-        if self._status == "PENDING_UNDERWRITING":
-            if actor_role != "underwriter":
+        if self._status == STATUS_PENDING_UNDERWRITING:
+            if actor_role != ROLE_UNDERWRITER:
                 raise ValueError(
                     f"{decision!r} at PENDING_UNDERWRITING requires actor_role='underwriter', "
                     f"got {actor_role!r}"
                 )
-            if decision == "APPROVE":
+            if decision == DECISION_APPROVE:
                 if self._amount >= MANAGER_ESCALATION_THRESHOLD_USD:
-                    return "PENDING_MANAGER_APPROVAL", False
-                return "APPROVED", True
-            if decision == "REJECT":
-                return "REJECTED", True
-            if decision == "REQUEST_MORE_INFO":
-                return "MORE_INFO_REQUESTED", False
+                    return STATUS_PENDING_MANAGER_APPROVAL, False
+                return STATUS_APPROVED, True
+            if decision == DECISION_REJECT:
+                return STATUS_REJECTED, True
+            if decision == DECISION_REQUEST_MORE_INFO:
+                return STATUS_MORE_INFO_REQUESTED, False
             raise ValueError(f"invalid decision {decision!r} for underwriter")
 
-        if self._status == "PENDING_MANAGER_APPROVAL":
-            if actor_role != "manager":
+        if self._status == STATUS_PENDING_MANAGER_APPROVAL:
+            if actor_role != ROLE_MANAGER:
                 raise ValueError(
                     f"{decision!r} at PENDING_MANAGER_APPROVAL requires actor_role='manager', "
                     f"got {actor_role!r}"
                 )
-            if decision == "APPROVE":
-                return "APPROVED", True
-            if decision == "REJECT":
-                return "REJECTED", True
+            if decision == DECISION_APPROVE:
+                return STATUS_APPROVED, True
+            if decision == DECISION_REJECT:
+                return STATUS_REJECTED, True
             raise ValueError(f"invalid decision {decision!r} for manager")
 
         raise ValueError(
@@ -229,18 +244,18 @@ class LoanApplicationWorkflow:
                     "persist_decision",
                     PersistDecisionInput(
                         application_id=self._application_id,
-                        actor_role="customer",
-                        decision="CANCELLED",
+                        actor_role=ROLE_CUSTOMER,
+                        decision=DECISION_CANCELLED,
                         actor_name="temporal-admin",
                         comment="forced by temporal system",
-                        resulting_status="CANCELLED",
+                        resulting_status=STATUS_CANCELLED,
                         decided_at=workflow.now(),
                     ),
                     start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
                     retry_policy=DEFAULT_RETRY_POLICY,
                 )
                 self._finalized = True
-                self._status = "CANCELLED"
+                self._status = STATUS_CANCELLED
                 self._closed_by = "temporal-admin"
                 self._closed_comment = "forced by temporal system"
 

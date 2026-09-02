@@ -46,6 +46,8 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from loan_onboarding.workflow.task_queues import (
+    DEFAULT_TEMPORAL_HOST,
+    DEFAULT_TEMPORAL_NAMESPACE,
     KNOWN_PRODUCT_TYPES,
     task_queue_for_product_type,
 )
@@ -97,8 +99,8 @@ async def run_worker(
     """
     if client is None:
         client = await Client.connect(
-            os.environ.get("TEMPORAL_HOST", "localhost:7233"),
-            namespace=os.environ.get("TEMPORAL_NAMESPACE", "default"),
+            os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+            namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
         )
     workers = _build_workers(client, activities, worker_mode, product_type)
     print(
