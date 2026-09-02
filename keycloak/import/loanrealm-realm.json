@@ -1,0 +1,196 @@
+{
+  "realm": "loanrealm",
+  "enabled": true,
+  "sslRequired": "none",
+  "roles": {
+    "realm": [
+      {
+        "name": "Underwriter",
+        "description": "Reviews and decides PENDING_UNDERWRITING applications; escalates above-threshold approvals to a Manager.",
+        "composite": false
+      },
+      {
+        "name": "Manager",
+        "description": "Decides PENDING_MANAGER_APPROVAL applications escalated by an Underwriter.",
+        "composite": false
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "loan-onboarding-backoffice",
+      "name": "Loan Onboarding Back Office",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "dev-secret-change-me",
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8000/ui/callback",
+        "http://app:8000/ui/callback"
+      ],
+      "webOrigins": ["http://localhost:8000"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8000/ui/login##http://app:8000/ui/login"
+      },
+      "authorizationServicesEnabled": true,
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": true,
+        "policyEnforcementMode": "ENFORCING",
+        "decisionStrategy": "UNANIMOUS",
+        "resources": [
+          {
+            "name": "LoanApplication",
+            "displayName": "Loan Application",
+            "ownerManagedAccess": false,
+            "scopes": [
+              {"name": "UnderwriterApprove"},
+              {"name": "UnderwriterReject"},
+              {"name": "UnderwriterRequestMoreInfo"},
+              {"name": "ManagerApprove"},
+              {"name": "ManagerReject"}
+            ]
+          }
+        ],
+        "policies": [
+          {
+            "name": "Underwriter Policy",
+            "description": "Requires the Underwriter realm role.",
+            "type": "role",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "roles": "[{\"id\":\"Underwriter\",\"required\":true}]"
+            }
+          },
+          {
+            "name": "Manager Policy",
+            "description": "Requires the Manager realm role.",
+            "type": "role",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "roles": "[{\"id\":\"Manager\",\"required\":true}]"
+            }
+          },
+          {
+            "name": "UnderwriterApprove Permission",
+            "description": "Underwriter role may approve a PENDING_UNDERWRITING application.",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"LoanApplication\"]",
+              "scopes": "[\"UnderwriterApprove\"]",
+              "applyPolicies": "[\"Underwriter Policy\"]"
+            }
+          },
+          {
+            "name": "UnderwriterReject Permission",
+            "description": "Underwriter role may reject a PENDING_UNDERWRITING application.",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"LoanApplication\"]",
+              "scopes": "[\"UnderwriterReject\"]",
+              "applyPolicies": "[\"Underwriter Policy\"]"
+            }
+          },
+          {
+            "name": "UnderwriterRequestMoreInfo Permission",
+            "description": "Underwriter role may request more info on a PENDING_UNDERWRITING application.",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"LoanApplication\"]",
+              "scopes": "[\"UnderwriterRequestMoreInfo\"]",
+              "applyPolicies": "[\"Underwriter Policy\"]"
+            }
+          },
+          {
+            "name": "ManagerApprove Permission",
+            "description": "Manager role may approve a PENDING_MANAGER_APPROVAL application.",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"LoanApplication\"]",
+              "scopes": "[\"ManagerApprove\"]",
+              "applyPolicies": "[\"Manager Policy\"]"
+            }
+          },
+          {
+            "name": "ManagerReject Permission",
+            "description": "Manager role may reject a PENDING_MANAGER_APPROVAL application.",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"LoanApplication\"]",
+              "scopes": "[\"ManagerReject\"]",
+              "applyPolicies": "[\"Manager Policy\"]"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "underwriter1",
+      "firstName": "Underwriter",
+      "lastName": "One",
+      "email": "underwriter1@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Underwriter", "default-roles-loanrealm"]
+    },
+    {
+      "username": "underwriter2",
+      "firstName": "Underwriter",
+      "lastName": "Two",
+      "email": "underwriter2@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Underwriter", "default-roles-loanrealm"]
+    },
+    {
+      "username": "manager1",
+      "firstName": "Manager",
+      "lastName": "One",
+      "email": "manager1@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Manager", "default-roles-loanrealm"]
+    },
+    {
+      "username": "manager2",
+      "firstName": "Manager",
+      "lastName": "Two",
+      "email": "manager2@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": "password", "temporary": false}
+      ],
+      "realmRoles": ["Manager", "default-roles-loanrealm"]
+    }
+  ]
+}

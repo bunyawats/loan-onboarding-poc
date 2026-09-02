@@ -1226,7 +1226,7 @@ do this against an empty skeleton).
 parallel with Phases 2–8 if sessions overlap, though Phase 10 needs both
 this and Phase 7 done).
 
-- [ ] **P9-1** — `keycloak/import/loanrealm-realm.json`: realm roles
+- [x] **P9-1** — `keycloak/import/loanrealm-realm.json`: realm roles
       `Underwriter`/`Manager`; confidential client
       `loan-onboarding-backoffice`; Resource `LoanApplication` with five
       Scopes (`UnderwriterApprove`, `UnderwriterReject`,
@@ -1241,6 +1241,32 @@ this and Phase 7 done).
       shape as `review-approval-temporal`'s README) for `underwriter1`
       — confirm the returned scopes are exactly the three Underwriter
       ones, not all five.
+      > DONE: adapted directly from `review-approval-temporal`'s own
+      > `myrealm-realm.json` (fetched and read, not worked from memory)
+      > — same shape (confidential client, `authorizationServicesEnabled`,
+      > one Resource, role Policies, scope-type Permissions), swapped for
+      > this project's two roles/five scopes. **No `TemporalAdmin` role
+      > or conditional-auth-flow client** (that reference project's
+      > `temporal-ui` client + custom flow) — deliberately out of scope
+      > per `CLAUDE.md`'s "Deliberately not built" section. Every user
+      > includes `firstName`/`lastName` from the start, per this skill's
+      > own documented Keycloak 26 gotcha (missing them causes "Account
+      > is not fully set up" on password-grant login despite `enabled`/
+      > `emailVerified` being correct) — avoided the gotcha rather than
+      > hitting and then fixing it. Verified for real against a freshly
+      > created (not restarted — this skill's own "restart reuses H2
+      > state, silently skips import" gotcha) `keycloak` container:
+      > confirmed via `docker logs` that "Realm 'loanrealm' imported"
+      > actually printed (not skipped); ran the full raw-token +
+      > UMA-ticket-exchange `curl` sequence for **both** `underwriter1`
+      > (returned exactly `UnderwriterApprove`/`UnderwriterReject`/
+      > `UnderwriterRequestMoreInfo`, not all five) and `manager1`
+      > (returned exactly `ManagerApprove`/`ManagerReject`) — the
+      > symmetric check the DoD only asked for one side of, done for
+      > both to confirm neither role leaks the other's scopes. Also
+      > confirmed via the Admin REST API (equivalent to admin-console
+      > inspection, scriptable) that the realm's roles/client/users all
+      > match the import file exactly.
 - [ ] **P9-2** — `bff_backoffice/keycloak_auth.py`: JWT decode
       (`PyJWKClient`), `get_permissions()` (UMA ticket exchange,
       `response_mode=permissions`, read the per-resource `scopes`
