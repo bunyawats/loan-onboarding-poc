@@ -74,8 +74,8 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0, 1, and 2 — done** (Phase 2's CI addition not yet confirmed
-green on GitHub — needs an actual push, see P2-2's note). Start here:
+**Phases 0, 1, and 2 — done**, including CI confirmed green on GitHub
+Actions with the new Postgres service container. Start here:
 [P3-1](#phase-3--account-module) (Account Module) — no dependency on
 Phase 2, could equally have gone first.
 
@@ -248,9 +248,10 @@ assumption; until then treat it as provisional, not settled.)*
       > different event loop than the test body runs in and asyncpg
       > raises confusing mid-operation errors. Also added a Postgres
       > service container to `.github/workflows/ci.yml` so these tests
-      > actually run in CI, not just locally — **not yet confirmed
-      > green there**, only locally; needs an actual push to verify,
-      > same as P0-6.
+      > actually run in CI, not just locally — confirmed green via
+      > `gh run watch` (run `33581914340`, `unit-tests` passed in 30s,
+      > including "Apply database schema" and "Run unit tests" against
+      > the service container), not just verified locally.
 
 ---
 
@@ -800,8 +801,9 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- **2026-09-02** — Phase 2 complete, both tasks checked (P2-2's CI
-  addition still needs an actual push to confirm green, see its note).
+- **2026-09-02** — Phase 2 complete, both tasks checked, including
+  CI's new Postgres service container confirmed green on GitHub
+  Actions (`gh run watch`, run `33581914340`, 30s).
   `customer/models.py`, `db.py`, `service.py` built; `db.py`'s
   `get_or_create` uses atomic `INSERT ... ON CONFLICT DO NOTHING`
   rather than find-then-insert, closing the concurrency race
