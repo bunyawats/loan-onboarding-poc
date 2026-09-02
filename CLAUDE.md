@@ -481,18 +481,20 @@ modules.
   `payload` against the `product_type`'s Pydantic schema (owned here, in
   `application/schemas.py`), calls `document.service.check_completeness(...)`;
   if satisfied, calls `workflow.service.start_workflow(application_id,
-  product_type, payload, amount, applicant_identifier, customer_id)`.
-  **`amount` is passed to `start_workflow` as its own argument, never
-  folded into `payload`** — the workflow needs it to run PRD §6.3's
-  escalation-threshold check at the Approve transition, but `payload`
-  stays product-specific-fields-only and the workflow stays
-  payload-agnostic (never inspects `payload` itself — `amount` is the
-  one common field it *does* need to see, so it travels as a named
-  parameter, not a payload lookup). `applicant_identifier` and the
-  possibly-`None` `customer_id` travel the same way, purely so
-  `persist_application` (the workflow's first activity) has them to
-  write into the row — `workflow/` still never inspects either value,
-  just forwards them as opaque activity arguments. **The actual `applications` row isn't
+  product_type, payload, amount, applicant_identifier, applicant_name,
+  applicant_email, applicant_phone, customer_id)`. **`amount` is passed
+  to `start_workflow` as its own argument, never folded into `payload`**
+  — the workflow needs it to run PRD §6.3's escalation-threshold check
+  at the Approve transition, but `payload` stays
+  product-specific-fields-only and the workflow stays payload-agnostic
+  (never inspects `payload` itself — `amount` is the one common field it
+  *does* need to see, so it travels as a named parameter, not a payload
+  lookup). `applicant_identifier`, `applicant_name`, `applicant_email`,
+  `applicant_phone`, and the possibly-`None` `customer_id` travel the
+  same way, purely so `persist_application` (the workflow's first
+  activity) has them to write into the row — `workflow/` still never
+  inspects any of them, just forwards them as opaque activity arguments.
+  **The actual `applications` row isn't
   written by this function directly** — `persist_application` is one of
   the four activities in `application/activities.py` (see "Breaking
   the cycle"), invoked by the workflow's own `run()` method as its
@@ -656,27 +658,45 @@ reach into `application/`'s table or types," not "contains zero
 domain knowledge."
 
 - `service.start_workflow(application_id, product_type, payload, amount,
-  applicant_identifier, customer_id) -> workflow_id` — `amount` is a
-  plain `Decimal`/`float` argument, not read out of `payload`;
+  applicant_identifier, applicant_name, applicant_email,
+  applicant_phone, customer_id) -> workflow_id` — `amount` is a plain
+  `Decimal`/`float` argument, not read out of `payload`;
   `LoanApplicationWorkflow.run()` needs it to compare against
   `MANAGER_ESCALATION_THRESHOLD_USD` at the Approve transition (PRD
   §6.3). This is the one piece of loan-domain-shaped data `workflow/`
   handles directly — see the note on `workflow/`'s "generic" framing
-  below. `applicant_identifier` and the possibly-`None` `customer_id`
-  are opaque strings the workflow forwards to the `persist_application`
-  activity by name, exactly like `amount`, `product_type`, and
-  `payload` — `workflow/` never inspects any of them, it just carries
-  them from `start_workflow`'s caller through to the activity call.
+  below. `applicant_identifier`, `applicant_name`, `applicant_email`,
+  `applicant_phone`, and the possibly-`None` `customer_id` are opaque
+  strings the workflow forwards to the `persist_application` activity
+  by name, exactly like `amount`, `product_type`, and `payload` —
+  `workflow/` never inspects any of them, it just carries them from
+  `start_workflow`'s caller through to the activity call. **Corrected
+  from an earlier draft of this file**, which omitted
+  `applicant_name`/`applicant_email`/`applicant_phone` from this
+  signature entirely — an oversight caught while implementing Phase 4
+  (P4-2's `persist_application` activity input needs these three
+  denormalized fields to write into the row, same as
+  `applicant_identifier`/`customer_id` already did; there was no other
+  path for them to reach `persist_application` once `payload` stays
+  product-specific-fields-only per `application/`'s own module section
+  below).
 - `service.signal_decision(workflow_id, actor_role, decision,
   actor_name, comment)` — called directly by `bff_backoffice`
   (Approve/Reject/RequestMoreInfo) and `bff_customer` (Cancel).
 - `service.signal_resubmit(workflow_id, payload)` — called only by
   `application.service`.
-- `service.bulk_signal_decision(workflow_ids, decision, actor_name,
-  comment)` — fans out `asyncio.gather()` over the single-item signal
-  path, same shape as the reference project's `bulk_submit_decision()`,
-  cap at `_MAX_BULK_SIZE` (start at 50). Called only by
-  `bff_backoffice`.
+- `service.bulk_signal_decision(workflow_ids, actor_role, decision,
+  actor_name, comment)` — fans out `asyncio.gather()` over the
+  single-item signal path, same shape as the reference project's
+  `bulk_submit_decision()`, cap at `_MAX_BULK_SIZE` (start at 50).
+  Called only by `bff_backoffice`. **Also corrected from an earlier
+  draft**, which omitted `actor_role` — `submit_decision` needs it for
+  the same reason the single-item `signal_decision` above does (which
+  role is deciding is what `LoanApplicationWorkflow._resolve_transition`
+  validates against the application's current state), and every
+  application in one bulk-approve batch is decided by the same
+  signed-in staff member, so it travels once per batch, not once per
+  item.
 - **`workflows.py`** (`LoanApplicationWorkflow`) — payload-agnostic
   (`product_type: str` + `payload: dict[str, Any]`, never inspected),
   states per PRD §6.2, one `submit_decision(actor_role, decision,

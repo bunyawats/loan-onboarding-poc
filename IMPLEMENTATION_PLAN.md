@@ -74,10 +74,11 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 through 3 — done.** Start here:
-[P4-1](#phase-4--workflow-module-generic-orchestration-only) (Workflow
-Module) — depends only on Phase 0, next in phase order regardless of
-Phases 2/3 being done first.
+**Phases 0 through 4 — done.** Start here:
+[P5-1](#phase-5--document-module) (Document Module) — depends only on
+Phase 0, next in phase order. Phase 6 (Application Module) is next
+after that but is blocked on Phase 5 finishing (specifically P5-5, not
+just Phase 5's earlier tasks) *and* Phases 2/3 (already done).
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -315,10 +316,12 @@ name, so this phase does not need `application/activities.py` to exist).
 **Unblocks:** Phase 6 (application/schemas.py asserts against
 `task_queues.py`), Phase 7.
 
-- [ ] **P4-1** — `workflow/task_queues.py`: `KNOWN_PRODUCT_TYPES =
+- [x] **P4-1** — `workflow/task_queues.py`: `KNOWN_PRODUCT_TYPES =
       ("personal_loan", "auto_loan", "mortgage")` (PRD §6.1),
       `task_queue_for_product_type()`.
-- [ ] **P4-2** — `workflow/workflows.py`: `LoanApplicationWorkflow`.
+      > DONE: matches spec exactly, zero dependency on any other module
+      > (confirmed by inspection — no imports beyond nothing).
+- [x] **P4-2** — `workflow/workflows.py`: `LoanApplicationWorkflow`.
       States per PRD §6.2. Payload-agnostic (`product_type: str`,
       `payload: dict[str, Any]`, never inspected). `run()` starts by
       calling the `persist_application` activity **by string name**
@@ -346,7 +349,32 @@ name, so this phase does not need `application/activities.py` to exist).
       a forced `CancelledError`) only ever result in one terminal
       write — this is what actually tests `_claim_final()`, not just
       that it exists.
-- [ ] **P4-3** — `workflow/worker.py`: bootstrap function
+      > DONE: `tests/unit/workflow/test_workflows.py`, 11 tests, all via
+      > `WorkflowEnvironment.start_time_skipping()`, no real Temporal
+      > server or Postgres. Two real implementation traps found and
+      > fixed by actually running these, not assumed away: (1) fake
+      > activities' `inp` param needs an explicit type hint
+      > (`PersistApplicationInput`, etc.) or Temporal's default data
+      > converter hands back a plain `dict` instead of the dataclass;
+      > (2) a signal only confirms Temporal *accepted* it, not that the
+      > workflow finished processing it — an assertion immediately after
+      > `await handle.signal(...)` (a status query, or a second signal
+      > that depends on the first having landed) is a real race, not a
+      > hypothetical one; fixed with small `_wait_for_status`/
+      > `_wait_for_call_count` polling helpers, the same shape as
+      > `application/service.py`'s own planned `_wait_until()` (Phase
+      > 6). The "two near-simultaneous terminal transitions" DoD line
+      > is satisfied via two concurrent `submit_decision` signals
+      > (APPROVE vs REJECT) rather than racing a real
+      > `handle.cancel()` against an in-flight signal — the exact
+      > delivery timing of a Temporal-level cancel relative to an
+      > in-flight signal handler's activity call isn't something a test
+      > can control deterministically, and both are terminal transitions
+      > guarded by the same `_busy` flag, so either race proves the same
+      > invariant. The native-cancel path is covered separately
+      > (`test_native_cancel_lands_on_cancelled_via_fake_persist_decision`),
+      > deterministically, with no signal in flight.
+- [x] **P4-3** — `workflow/worker.py`: bootstrap function
       `run_worker(activities: list[Callable], worker_mode: str,
       product_type: str | None)` — takes the concrete activity list as
       a parameter (supplied later by `worker_main.py`, Phase 7), reads
@@ -356,7 +384,18 @@ name, so this phase does not need `application/activities.py` to exist).
       trivial fake activities and confirms it starts polling without
       error against a `WorkflowEnvironment`'s local server (don't need
       real activities to prove the bootstrap logic itself works).
-- [ ] **P4-4** — `workflow/service.py`: `start_workflow(application_id,
+      > DONE: `run_worker()` itself reads `TEMPORAL_HOST`/
+      > `TEMPORAL_NAMESPACE` only as a fallback when no `client` is
+      > injected (production path); the actual worker-construction logic
+      > is factored into `_build_workers()` so tests can hand it a
+      > `WorkflowEnvironment`'s client directly instead of connecting to
+      > a real server. `tests/unit/workflow/test_worker.py`, 7 tests:
+      > `async with worker:` entering/exiting cleanly is what "starts
+      > polling without error" means here, covered for `both`/
+      > `workflow`/`activity` modes and both an explicit `product_type`
+      > and `None` (polls every `KNOWN_PRODUCT_TYPES`), plus the two
+      > `ValueError` validation paths.
+- [x] **P4-4** — `workflow/service.py`: `start_workflow(application_id,
       product_type, payload, amount, applicant_identifier, customer_id)
       -> workflow_id` (`amount`/`applicant_identifier`/`customer_id` are
       named arguments, not read out of `payload` — the workflow needs
@@ -372,6 +411,33 @@ name, so this phase does not need `application/activities.py` to exist).
       these functions against a real local Temporal server (not just
       `WorkflowEnvironment`) at least once manually, confirm the
       execution appears in Temporal Web UI at `localhost:8233`.
+      > DONE: real gap found in `CLAUDE.md`'s own documented signature
+      > while implementing this — `start_workflow` was missing
+      > `applicant_name`/`applicant_email`/`applicant_phone` (no other
+      > path gets them to `persist_application`, since `payload` stays
+      > product-fields-only) and `bulk_signal_decision` was missing
+      > `actor_role` (needed for the same reason the single-item
+      > `signal_decision` needs it). Both fixed in the actual signatures
+      > and in `CLAUDE.md` itself (marked "Corrected from an earlier
+      > draft," same convention the file already uses elsewhere).
+      > `docker compose up -d temporal temporal-ui`, then ran
+      > `start_workflow` → `signal_decision` (Approve) end-to-end against
+      > the real server with fake `persist_*` activities (Phase 6 doesn't
+      > exist yet); confirmed `WORKFLOW_EXECUTION_STATUS_COMPLETED` via
+      > Temporal Web UI's own API at `localhost:8233` (the same data
+      > source the UI itself renders — `curl
+      > localhost:8233/api/v1/namespaces/default/workflows?query=...`),
+      > not just asserted in the driving script. Separately also
+      > exercised `signal_resubmit` (REQUEST_MORE_INFO → resubmit →
+      > APPROVE) and `bulk_signal_decision` (3 concurrent REJECTs, all
+      > `ok=True`, plus one bogus workflow id correctly surfacing as a
+      > per-item `ok=False`) against the same real server — more than the
+      > DoD's literal "at least once," done because "run these functions"
+      > reads as all four, not just `start_workflow`. Verification
+      > scripts were throwaway (scratchpad, not committed).
+      > `tests/unit/workflow/test_service.py` additionally covers the
+      > synchronous validation paths (`_validate_bulk_ids`, unknown
+      > `actor_role`/`decision`) with no server needed.
 
 ---
 
@@ -821,6 +887,53 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 4 complete, all four tasks checked (created
+  `.venv` and `pip install -e ".[dev]"` for the first time this
+  session — no venv existed yet in this checkout). `workflow/`'s four
+  files built in order (`task_queues.py`, `workflows.py`, `worker.py`,
+  `service.py`), closely modeled on `review-approval-temporal`'s own
+  `workflow/` package (fetched and read directly, not worked from
+  memory), extended for two roles (Underwriter/Manager) instead of one
+  and for the two extra non-terminal transitions that implies
+  (PENDING_UNDERWRITING → PENDING_MANAGER_APPROVAL on escalation;
+  MORE_INFO_REQUESTED → PENDING_UNDERWRITING on resubmit) — generalized
+  the reference project's `_claim_final()` terminal-only guard into
+  `_claim_transition()`, guarding every state transition, not just
+  terminal ones, since two of this workflow's transitions aren't
+  terminal. Found and fixed two real `CLAUDE.md` documentation gaps
+  while implementing (not just noticed and deferred): `start_workflow`
+  was missing `applicant_name`/`applicant_email`/`applicant_phone`, and
+  `bulk_signal_decision` was missing `actor_role` — both are now fixed
+  in the actual code *and* in `CLAUDE.md`'s own signatures, marked
+  "Corrected from an earlier draft" per this file's own conventions
+  (see P4-4's note for the full reasoning). All 25
+  `tests/unit/workflow/` tests pass via
+  `temporalio.testing.WorkflowEnvironment` (no real server needed for
+  those) plus a separate manual integration-verify against a real local
+  `docker compose up -d temporal` for P4-4's DoD specifically — start,
+  signal (single + bulk), resubmit, and a bogus-id bulk failure all
+  confirmed working, with the workflow's `COMPLETED` status confirmed
+  via Temporal Web UI's own API (`localhost:8233`). Two real
+  temporalio-1.32-specific traps hit and fixed while writing
+  `tests/unit/workflow/test_workflows.py`, documented in P4-2's note so
+  a future session doesn't have to rediscover them: fake activities need
+  a type-hinted `inp` param or the data converter hands back a plain
+  `dict`; and a signal only confirms Temporal *accepted* it, not that
+  the workflow has finished processing it, so an assertion immediately
+  after `await handle.signal(...)` is a real, hit-in-practice race, not
+  a hypothetical one (fixed with small polling helpers in the test
+  file, the same shape application/service.py's own `_wait_until()`
+  will need in Phase 6). Local-environment-only note (same class of
+  issue as every prior phase): native Postgres on 5432 collides with
+  `db`'s Docker port mapping, so `tests/unit/customer`/`tests/unit/account`
+  couldn't be re-verified this session (unrelated to Phase 4's own
+  changes — confirmed by running everything *except* those two
+  directories, all passing). Next: Phase 5 (Document Module) — needs
+  Mayan brought up per P5-1's compose rename-pass note, and a session
+  working it should read `mayan-edms-customer-archive`'s
+  `docs/document-hierarchy-setup.md` before touching the index template,
+  per this file's own P5-2 instruction.
 
 - **2026-09-02** — Phase 3 complete, both tasks checked.
   `account/models.py`, `db.py`, `service.py` built, same conventions as
