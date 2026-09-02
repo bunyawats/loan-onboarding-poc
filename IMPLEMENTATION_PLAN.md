@@ -74,9 +74,10 @@ Every task below, in addition to its own listed acceptance criteria:
 
 ## Current Status
 
-**Phases 0 and 1 — done.** Start here: [P2-1](#phase-2--customer-module)
-(Customer Module) — can run in parallel with Phase 3 (Account Module)
-if two sessions ever overlap, no dependency between them.
+**Phases 0, 1, and 2 — done** (Phase 2's CI addition not yet confirmed
+green on GitHub — needs an actual push, see P2-2's note). Start here:
+[P3-1](#phase-3--account-module) (Account Module) — no dependency on
+Phase 2, could equally have gone first.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -206,9 +207,18 @@ assumption; until then treat it as provisional, not settled.)*
 
 **Depends on:** Phase 1. **Unblocks:** Phase 11 (bff_customer).
 
-- [ ] **P2-1** — `customer/models.py`, `customer/db.py` (the only code
+- [x] **P2-1** — `customer/models.py`, `customer/db.py` (the only code
       touching the `customers` table).
-- [ ] **P2-2** — `customer/service.py`:
+      > DONE: `db.py`'s `get_or_create` uses `INSERT ... ON CONFLICT
+      > (applicant_identifier) DO NOTHING RETURNING *` + a fallback
+      > `SELECT`, not a naive find-then-insert — closes the race
+      > `CLAUDE.md` already calls out (two concurrent calls for a
+      > brand-new identifier must never create two rows). Each domain
+      > module owns a lazily-initialized `asyncpg` pool of its own
+      > (`_get_pool()`), not a shared one — no shared-pool utility
+      > exists anywhere in the architecture, so this keeps each
+      > module's `db.py` self-contained.
+- [x] **P2-2** — `customer/service.py`:
       `find_by_identifier(applicant_identifier) -> Customer | None`
       (read-only, no side effects), `get_or_create(applicant_identifier)
       -> Customer` (find-or-create, idempotent — see `CLAUDE.md`'s
@@ -220,6 +230,27 @@ assumption; until then treat it as provisional, not settled.)*
       (call it twice with the same identifier, assert the second call
       returns the same `customer_id`, and that no second row was
       created).
+      > DONE: `tests/unit/customer/test_service.py`, 7 tests, all
+      > passing against a real local Postgres (`docker compose up -d
+      > db`) — **a real database, not a mock**, since "no second row
+      > was created" is a database-state claim a mock can't verify (see
+      > `CLAUDE.md`'s Testing section, updated with this reasoning as a
+      > named exception). Added a concurrency test beyond what the DoD
+      > literally asks for
+      > (`test_get_or_create_concurrent_calls_create_exactly_one_row`,
+      > 10 truly-concurrent `asyncio.gather`ed calls) to actually prove
+      > the atomic `ON CONFLICT` path, not just the sequential
+      > call-it-twice case. Also had to fix a real
+      > `pytest-asyncio` config bug caught by running these tests, not
+      > assumed away: `asyncio_default_fixture_loop_scope` and
+      > `asyncio_default_test_loop_scope` must both be `"session"` and
+      > match, or a fixture-created `asyncpg` pool gets used from a
+      > different event loop than the test body runs in and asyncpg
+      > raises confusing mid-operation errors. Also added a Postgres
+      > service container to `.github/workflows/ci.yml` so these tests
+      > actually run in CI, not just locally — **not yet confirmed
+      > green there**, only locally; needs an actual push to verify,
+      > same as P0-6.
 
 ---
 
@@ -768,6 +799,26 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-02** — Phase 2 complete, both tasks checked (P2-2's CI
+  addition still needs an actual push to confirm green, see its note).
+  `customer/models.py`, `db.py`, `service.py` built; `db.py`'s
+  `get_or_create` uses atomic `INSERT ... ON CONFLICT DO NOTHING`
+  rather than find-then-insert, closing the concurrency race
+  `CLAUDE.md` already flags for this exact function. Real
+  deviation from the plan's testing philosophy, made deliberately and
+  documented in `CLAUDE.md`'s Testing section: P2-2's DoD needs a real
+  Postgres to verify idempotency/uniqueness, not a mock, so these
+  "unit" tests hit a live database — added a Postgres service container
+  to CI so that's still true there, not just locally. Caught and fixed
+  a real `pytest-asyncio` config bug in the process (fixture vs. test
+  loop scope mismatch corrupting the shared `asyncpg` pool) by actually
+  running the tests, not by reasoning about it in the abstract. Also
+  hit two more local-environment-only port collisions while verifying
+  (5432 has a native Postgres running on this machine, same class of
+  issue as Phase 0's 8080/Keycloak collision) — worked around with
+  temporary remaps, reverted before committing. Next: Phase 3 (Account
+  Module) or push to confirm P2-2's CI change.
 
 - **2026-09-02** — Phase 1 complete, both tasks checked. `db/schema.sql`
   and `db/init/01-init.sh` already existed from an earlier design

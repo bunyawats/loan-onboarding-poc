@@ -1087,6 +1087,25 @@ for a module under test, the in-process equivalent of the reference
 project's `respx`-mocked HTTP calls) and `tests/integration/` (needs the
 real local stack, marked `@pytest.mark.integration`).
 
+**One deliberate exception**: a module's own `db.py` tests (e.g.
+`customer/db.py`'s `get_or_create`) run against a **real Postgres**, not
+a mock — "no live services" is about not needing to fake *other*
+modules' HTTP/service calls, not about a module faking its own
+database. Idempotency and uniqueness guarantees (e.g. "two concurrent
+`get_or_create` calls for the same identifier create exactly one row")
+are statements about database state; a mock recording call order can't
+verify them, only assert that `service.py` called `db.py` in some
+order. These still live under `tests/unit/<module>/` (mirrors module
+structure, matches each such task's own DoD, which isn't tagged
+"integration-verify") — they just need `DATABASE_URL` pointing at a
+database with `db/schema.sql` applied, not the *full* local stack
+`tests/integration/` needs (Temporal, Keycloak, Mayan). CI provisions a
+real Postgres service container for exactly this reason (see
+`.github/workflows/ci.yml`) — these tests are not integration tests in
+the "needs the whole stack" sense, but they were never really "unit"
+tests in the "no I/O at all" sense either; call them what they are
+rather than mislabeling either way.
+
 Prefer `temporalio.testing.WorkflowEnvironment` (time-skipping) over a
 real Temporal server for `workflow/`'s workflow/activity tests — inject
 a fake/in-memory version of `application/activities.py`'s functions
