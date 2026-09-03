@@ -168,6 +168,18 @@ async def list_documents(application_id: str) -> list[DocumentRef]:
     return await _documents_matching({"application_id": application_id})
 
 
+async def list_all_documents() -> list[DocumentRef]:
+    """Read-only -- every document in the Mayan instance, regardless of
+    which application/account/customer (if any) it's tagged to. An
+    empty filter dict already matches every document via
+    `_documents_matching`; this just exposes that path under a real
+    name instead of a leading-underscore function. Used only by
+    `loan_onboarding/reconcile.py`'s cross-system orphan scan (see
+    CLAUDE.md's "Document/database reconciliation") -- no other caller
+    needs an unfiltered listing."""
+    return await _documents_matching({})
+
+
 async def check_completeness(
     application_id: str, product_type: str, exclude_categories: list[str] | None = None
 ) -> list[str]:

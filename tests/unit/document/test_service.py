@@ -47,6 +47,18 @@ async def test_list_documents_filters_by_application_id(fake_client):
     assert docs[0].applicant_identifier == "alice@example.com"
 
 
+async def test_list_all_documents_returns_everything_regardless_of_metadata(fake_client):
+    ref_a = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("a.pdf", b"1"))
+    ref_b = await service.upload("bob@example.com", "app-2", "Government ID", UploadedFile("b.pdf", b"2"))
+    # A document with zero metadata attached at all -- proves the empty
+    # filter dict doesn't silently require *some* metadata to match.
+    doc_type_ids = await fake_client.document_type_ids()
+    bare = await fake_client.create_document(doc_type_ids["Application Document"], "bare.pdf")
+
+    docs = await service.list_all_documents()
+    assert {d.document_id for d in docs} == {ref_a.document_id, ref_b.document_id, bare["id"]}
+
+
 @pytest.mark.parametrize(
     "product_type,expected_missing",
     [

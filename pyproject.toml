@@ -50,7 +50,7 @@ root_packages = ["loan_onboarding"]
 name = "Overall layering (leaves -> application -> BFFs -> composition roots)"
 type = "layers"
 layers = [
-    "(app) | worker_main",
+    "(app) | worker_main | reconcile",
     "bff_customer | bff_backoffice",
     "application",
     "customer | account | document | workflow",
@@ -70,6 +70,7 @@ forbidden_modules = [
     "loan_onboarding.bff_customer",
     "loan_onboarding.bff_backoffice",
     "loan_onboarding.worker_main",
+    "loan_onboarding.reconcile",
 ]
 
 [[tool.importlinter.contracts]]
@@ -84,6 +85,7 @@ forbidden_modules = [
     "loan_onboarding.bff_customer",
     "loan_onboarding.bff_backoffice",
     "loan_onboarding.worker_main",
+    "loan_onboarding.reconcile",
 ]
 
 [[tool.importlinter.contracts]]
@@ -99,6 +101,7 @@ forbidden_modules = [
     "loan_onboarding.bff_customer",
     "loan_onboarding.bff_backoffice",
     "loan_onboarding.worker_main",
+    "loan_onboarding.reconcile",
 ]
 
 [[tool.importlinter.contracts]]

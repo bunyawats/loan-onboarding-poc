@@ -192,9 +192,33 @@ tag correctly superseded) on the third. Full unit suite (225 tests) and
 three product types, direct approve, escalation-then-manager-approve,
 reject, more-info-then-resubmit) confirmed nothing in Phases 0–13
 regressed. `CLAUDE.md` and `PRD.md` updated from "planned"/"not built
-yet" to reflect built status throughout. **This plan's own backlog is
-empty again** — remaining work is only the Known Gaps in `CLAUDE.md`
-(unchanged by this phase).
+yet" to reflect built status throughout.
+
+**Phase 15 (Document/database reconciliation) added after Phase 14
+closed** — found live, not brainstormed: Postgres's `customers`/
+`accounts`/`applications` tables were cleared by something outside this
+app entirely while Mayan's documents were unaffected, leaving real
+orphaned documents with no way for the codebase to detect it.
+`CLAUDE.md`'s "Document/database reconciliation" section describes the
+target design (a new `reconcile.py` composition root, `--report`/`--fix`
+modes) and the deliberate reconciliation-vs-cascade-on-delete split —
+cascade-on-delete is out of scope for this phase, since no delete
+operation exists yet for `customer`/`account`/`application` at all.
+**All four tasks (P15-1 through P15-4) are now done.**
+`document.service.list_all_documents()` added; `reconcile.py`'s
+`scan()` distinguishes orphaned documents (primary owner — `application_id`
+or `account_id` — gone) from stale `customer_id` tags (secondary
+reference only, document itself still validly owned); `--fix` trashes
+orphans and strips stale tags, rebuilding the index once. Live-verified
+against the real, already-orphaned state this session had itself
+observed (27 real documents, not synthetic) plus a deliberately
+constructed stale-tag case (a real approval, then `DELETE FROM customers`
+for just that one row) — `--report` correctly identified every case,
+`--fix` correctly resolved all of them, confirmed via the Mayan REST
+API and both indexes' document counts. Full unit suite (238 tests) and
+`lint-imports` both green. **This plan's own backlog is empty again** —
+cascade-on-delete remains a deliberately open question (`CLAUDE.md`'s
+Known Gaps), not a queued task.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2475,6 +2499,142 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
 
 ---
 
+## Phase 15 — Document/database reconciliation
+
+**Depends on:** everything above (needs `customer/`, `account/`,
+`application/`, `document/` all in their current, post-Phase-14 shape).
+**Not part of the original build-out** — found live this session: the
+`loan_onboarding` Postgres tables were cleared by something outside
+this app entirely (direct database access, not any code path this
+codebase owns), while Mayan's documents were completely unaffected,
+leaving real orphaned documents with nothing in the codebase able to
+detect it. `CLAUDE.md`'s new "Document/database reconciliation" section
+(written first, per this project's own convention) describes the target
+design and the two-problems distinction (reconciliation vs.
+cascade-on-delete) each task below implements.
+
+Reconciliation only — cascade-on-delete is explicitly out of scope for
+this phase (see `CLAUDE.md`'s Known Gaps: no delete operation exists
+for `customer`/`account`/`application` yet, and whether one should is
+its own open product question).
+
+- [x] **P15-1** — `document/service.py` gains
+      `list_all_documents() -> list[DocumentRef]`, a thin public wrapper
+      over the existing private `_documents_matching({})` (an empty
+      filter dict already matches every document — this just exposes
+      that path under a real name instead of reaching into a
+      leading-underscore function from outside the module).
+      DoD: `tests/unit/document/test_service.py` covers it returning
+      every document regardless of metadata (including a document with
+      no `application_id`/`account_id`/`customer_id` at all, to prove
+      the empty-filter path doesn't silently require *some* metadata to
+      match).
+      > DONE: exactly as planned, one new test added, passes.
+- [x] **P15-2** — New composition root `loan_onboarding/reconcile.py`
+      (see `CLAUDE.md`'s "Document/database reconciliation" for why this
+      needs to be a composition root, not code inside any single leaf
+      module). `scan() -> tuple[list[tuple[DocumentRef, str]], list[DocumentRef]]`
+      — returns `(orphaned, stale_tags)`. For every document from
+      `document.service.list_all_documents()`: if `application_id` is
+      set, resolve via `application.service.get(...)`, catching
+      `ApplicationNotFound`; if `account_id` is set, resolve via
+      `account.service.get(...)`, catching `AccountNotFound`; either
+      missing means **orphaned** (primary owner gone) — append
+      `(doc, reason)` and skip the rest of that document's checks. If
+      neither was missing and `customer_id` is set, resolve via
+      `customer.service.get(...)`, catching `CustomerNotFound`; missing
+      means a **stale tag** (secondary reference only) — append `doc`
+      to `stale_tags`, the document itself is *not* orphaned.
+      `argparse` CLI: `python -m loan_onboarding.reconcile` (report-only
+      by default) prints `scan()`'s findings, mutating nothing.
+      DoD: a new `tests/unit/test_reconcile.py` (mocking
+      `document.service`/`application.service`/`account.service`/
+      `customer.service` at the function-call boundary, same convention
+      as every other cross-module test in this codebase) covers: an
+      Application Document whose `application_id` doesn't resolve is
+      orphaned; an Account Document whose `account_id` doesn't resolve
+      is orphaned; a document whose `application_id` *does* resolve but
+      whose `customer_id` doesn't is a stale tag, not orphaned; a
+      document with no `application_id`/`account_id`/`customer_id` at
+      all is neither (nothing to check); report mode prints without
+      calling any mutating function.
+      > DONE: `pyproject.toml`'s `.importlinter` contracts also needed
+      > updating (not called out in this task's own text, caught while
+      > implementing) — `reconcile` added to the "layers" contract's top
+      > layer alongside `app`/`worker_main`, and to `customer/`/
+      > `account/`/`idgen/`'s own `forbidden_modules` lists, same as
+      > `worker_main` already was. 6 new tests, all pass.
+- [x] **P15-3** — `reconcile.py` gains `--fix`: calls a new `fix(orphaned,
+      stale_tags)` that trashes every orphaned document
+      (`mayan_client.delete(f"/documents/{doc.document_id}/")` — soft
+      delete, Mayan's own trash semantics, same as this project's
+      existing "moves to Mayan's trash, not a hard delete" note) and
+      strips every stale `customer_id` tag (`mayan_client.get_document_metadata`
+      to find that document's `customer_id` entry's own id, then
+      `mayan_client.delete_metadata_entry` — already built in Phase 14
+      for exactly this shape of operation), then rebuilds the index once
+      at the end, only if there was anything to fix.
+      DoD: `tests/unit/test_reconcile.py` covers `fix()` calling delete
+      for every orphaned document's id, calling
+      `delete_metadata_entry` for every stale tag's `customer_id` entry
+      (not some other metadata entry on the same document), and
+      rebuilding the index exactly once regardless of how many documents
+      were fixed — and *not* rebuilding at all when both lists are
+      empty.
+      > DONE: exactly as planned, 4 new tests, all pass. Also covers
+      > `main()`'s `--fix` flag actually forwarding `scan()`'s results
+      > into `fix()`, and report mode (`main()` with no flag) never
+      > calling `fix` at all.
+- [x] **P15-4** — Live verification against the real stack, using
+      today's actual repro as the test case: with the local stack up,
+      manually clear the three `loan_onboarding` tables directly via
+      `psql` (simulating the exact external-drift scenario this phase
+      exists for) while leaving Mayan's documents from an earlier
+      session untouched, then run `python -m loan_onboarding.reconcile`
+      (report mode) and confirm it correctly lists every now-orphaned
+      document with an accurate reason, and every stale `customer_id`
+      tag (if any promoted `id_photo` document survives the table clear
+      while its application doesn't — construct this case deliberately
+      if the ambient state doesn't happen to produce one). Then run
+      `--fix` and confirm via the Mayan REST API: orphaned documents
+      moved to trash (no longer in the active documents list), stale
+      `customer_id` tags stripped (the document's other metadata
+      untouched), and the index rebuilt (spot-check the "Loan Onboarding
+      Archive" index tree no longer shows the fixed documents). Full
+      unit suite and `lint-imports` both green (a new composition root
+      importing every domain module needs `.importlinter`'s contracts
+      checked — confirm nothing needs updating, since composition roots
+      are already the documented exception to every "never imports"
+      contract). Update `CLAUDE.md`'s "Document/database reconciliation"
+      section with the live-verification result. Commit, push, confirm
+      CI green.
+      > DONE: didn't need to manually clear the tables — the ambient
+      > drift this whole phase exists because of was already live (27
+      > real orphaned documents across 6 applications and 3 accounts,
+      > cleared by the same external process this session has now
+      > observed repeatedly). `--report` correctly listed all 27 with
+      > accurate reasons, zero stale tags (nothing promoted survived the
+      > clear at that point). Deliberately constructed the stale-tag
+      > case per this task's own fallback: submitted and approved a
+      > fresh real application through the actual browser flow, then
+      > `DELETE FROM customers WHERE customer_id = ...` for just that
+      > one row via `psql`, leaving its `applications`/`accounts` rows
+      > intact — `--report` then correctly showed exactly one stale tag
+      > (the promoted `id_photo`) while its three sibling Application
+      > Documents and its account's Welcome Letter, none carrying a
+      > `customer_id`, appeared in neither list. `--fix` confirmed via
+      > the Mayan REST API: all 27 orphans gone from the active document
+      > list, the stale tag's `customer_id` entry stripped with every
+      > other metadata field untouched, both indexes' document counts
+      > dropped from 27/28 to exactly 5. Full unit suite: 238 passed
+      > (225 + 13 new: 1 in `test_service.py`, 12 in the new
+      > `test_reconcile.py`). `lint-imports`: 8/8 contracts kept, the
+      > new composition root's layer/forbidden-module additions verified
+      > clean. `CLAUDE.md` updated with the live-verification paragraph
+      > above.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -2483,6 +2643,56 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-03** — Phase 15 (Document/database reconciliation) complete,
+  all four tasks (P15-1 through P15-4) done in one session. Not
+  brainstormed -- found live, in the same session, while reviewing
+  Mayan's document/index structure after Phase 14 closed: Postgres's
+  three domain tables kept coming back empty (confirmed via `psql`
+  multiple times across the session) while Mayan's documents from
+  earlier in the *same* session survived untouched, something outside
+  this app entirely clearing the tables directly. Discussed the
+  reconciliation-vs-cascade-on-delete split with the user before writing
+  anything (cascade-on-delete needs a delete operation that doesn't
+  exist yet, and is its own open product question -- deliberately out of
+  scope here); confirmed reconciliation first. `CLAUDE.md`'s new
+  "Document/database reconciliation" section written before any code,
+  per this project's own convention. P15-1:
+  `document.service.list_all_documents()`, a thin public wrapper over
+  the existing private `_documents_matching({})`. P15-2: new composition
+  root `loan_onboarding/reconcile.py` (a third one, alongside `app.py`/
+  `worker_main.py` -- `.importlinter`'s `layers` contract and
+  `customer/`/`account/`/`idgen/`'s `forbidden_modules` lists all needed
+  updating too, caught while implementing, not called out in the task's
+  own text). `scan()` distinguishes a document's primary owner
+  (`application_id` for an Application Document, `account_id` for an
+  Account Document -- either missing means orphaned) from its secondary
+  `customer_id` tag (only ever present on a promoted `id_photo`
+  document -- missing means a narrower "stale tag," not orphaned, since
+  the document's real ownership is still intact). P15-3: `--fix` trashes
+  orphans (Mayan's own soft-delete) and strips stale tags via
+  `delete_metadata_entry` (already built in Phase 14), rebuilding the
+  index once. P15-4: live-verified against the real, already-orphaned
+  state this session had been observing all along (27 genuine orphaned
+  documents, not synthetic test data) -- `--report` correctly listed
+  every one with an accurate reason. No stale-tag case existed naturally
+  at that moment (nothing promoted had survived the clear), so
+  constructed one deliberately per the task's own fallback: submitted
+  and approved a real application through the actual browser flow, then
+  `DELETE FROM customers` for just that one row via `psql`, leaving its
+  `application`/`account` rows intact -- `--report` then correctly
+  identified exactly the one promoted document as a stale tag while its
+  three sibling documents and its account's Welcome Letter (still
+  validly owned, no `customer_id` to check) appeared in neither list.
+  `--fix` confirmed via the Mayan REST API: all 27 orphans gone from the
+  active document list, the stale tag's `customer_id` entry stripped
+  with every other metadata field untouched, both indexes' document
+  counts dropped from 27/28 to exactly 5. Full unit suite: 238 passed
+  (225 + 13 new). `lint-imports`: 8/8 contracts kept. Next: no open
+  Phase 15 work; cascade-on-delete remains a deliberately open product
+  question (`CLAUDE.md`'s Known Gaps), not a queued task -- pick it up
+  only if the user decides hard-delete of an approved
+  customer/account/application actually belongs in this product.
 
 - **2026-09-03** — Phase 14 (Returning-customer profile refresh & ID
   reuse) complete, all five tasks (P14-1 through P14-5) done in one
