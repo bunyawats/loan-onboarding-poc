@@ -147,9 +147,53 @@ async def test_promote_government_id_retags_without_creating_new_document(fake_c
     assert stored.metadata["application_id"] == "app-1"
 
 
-async def test_promote_government_id_raises_when_none_found(fake_client):
-    with pytest.raises(service.DocumentNotFound):
-        await service.promote_government_id_to_customer_photo("app-missing", "cust-1")
+async def test_promote_government_id_is_a_no_op_when_none_found(fake_client):
+    """Changed from this function's original behavior (raise
+    DocumentNotFound) -- the reuse path (CLAUDE.md's "Returning-customer
+    profile refresh and ID reuse") means a just-approved application can
+    legitimately have no Government ID document of its own."""
+    await service.promote_government_id_to_customer_photo("app-missing", "cust-1")
+    assert fake_client.rebuild_count == 0
+
+
+async def test_promote_government_id_supersedes_and_untags_previous_id_photo(fake_client):
+    """Exactly one current id_photo per customer, enforced for real:
+    promoting a second, fresh Government ID upload for the same
+    customer must strip the customer_id metadata from the first
+    document, not just tag the second."""
+    first = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id1.pdf", b"1"))
+    await service.promote_government_id_to_customer_photo("app-1", "cust-1")
+    assert fake_client.documents[first.document_id].metadata["customer_id"] == "cust-1"
+
+    second = await service.upload("alice@example.com", "app-2", "Government ID", UploadedFile("id2.pdf", b"2"))
+    await service.promote_government_id_to_customer_photo("app-2", "cust-1")
+
+    assert "customer_id" not in fake_client.documents[first.document_id].metadata
+    assert fake_client.documents[second.document_id].metadata["customer_id"] == "cust-1"
+
+
+async def test_has_id_photo_true_after_promotion_false_before(fake_client):
+    assert await service.has_id_photo("cust-1") is False
+
+    await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))
+    await service.promote_government_id_to_customer_photo("app-1", "cust-1")
+
+    assert await service.has_id_photo("cust-1") is True
+
+
+async def test_check_completeness_excludes_categories_when_asked():
+    for category in ["Proof of Income", "Bank Statements", "Credit Report"]:
+        await service.upload("alice@example.com", "app-1", category, UploadedFile(f"{category}.pdf", b"x"))
+
+    # Government ID never uploaded, but excluded -- the reuse path.
+    missing = await service.check_completeness(
+        "app-1", "personal_loan", exclude_categories=[service.CATEGORY_GOVERNMENT_ID]
+    )
+    assert missing == []
+
+    # Without the exclusion, it's still reported missing.
+    missing = await service.check_completeness("app-1", "personal_loan")
+    assert missing == ["Government ID"]
 
 
 async def test_generate_welcome_letter_uploads_tagged_to_account(fake_client):

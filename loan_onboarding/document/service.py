@@ -95,6 +95,18 @@ async def _metadata_map_for_id(document_id: int) -> dict[str, str] | None:
     return {entry["metadata_type"]["name"]: entry["value"] for entry in entries}
 
 
+async def _metadata_entry_id(document_id: int, field: str) -> int | None:
+    """The metadata *entry*'s own id (needed for
+    `delete_metadata_entry`/`update_metadata_entry`, which address an
+    entry by id, not by field name) -- `None` if `document_id` has no
+    entry for `field` at all."""
+    entries = await mayan_client.get_document_metadata(document_id)
+    for entry in entries:
+        if entry["metadata_type"]["name"] == field:
+            return entry["id"]
+    return None
+
+
 async def _documents_matching(filters: dict[str, str]) -> list[DocumentRef]:
     """Exact-match on every (field, value) pair in `filters`, filtered in
     Python against each candidate's real metadata -- NEVER via Mayan's
@@ -156,13 +168,21 @@ async def list_documents(application_id: str) -> list[DocumentRef]:
     return await _documents_matching({"application_id": application_id})
 
 
-async def check_completeness(application_id: str, product_type: str) -> list[str]:
+async def check_completeness(
+    application_id: str, product_type: str, exclude_categories: list[str] | None = None
+) -> list[str]:
     """Missing required categories, empty if satisfied. Queries Mayan's
     document/metadata search directly (via `_documents_matching`) --
     never the Index Template tree, whose rebuild is async and would risk
     a false "still missing" result immediately after the customer's last
-    upload (CLAUDE.md's "Document hierarchy")."""
-    required = REQUIRED_CATEGORIES[product_type]
+    upload (CLAUDE.md's "Document hierarchy").
+
+    `exclude_categories` is a small, general parameter rather than a
+    Government-ID-specific special case, even though Government ID is
+    the only category `application.service.create_application`'s
+    returning-customer reuse path excludes today (CLAUDE.md's
+    "Returning-customer profile refresh and ID reuse")."""
+    required = [c for c in REQUIRED_CATEGORIES[product_type] if c not in (exclude_categories or [])]
     documents = await _documents_matching({"application_id": application_id})
     present = {doc.category for doc in documents}
     return [category for category in required if category not in present]
@@ -197,15 +217,50 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     One Mayan document ends up satisfying two leaf paths in the index at
     once (`<application_id>/Government ID` and
     `<applicant_identifier>/id_photo`) -- confirmed against a real
-    instance in P5-2, see CLAUDE.md's "Document hierarchy"."""
+    instance in P5-2, see CLAUDE.md's "Document hierarchy".
+
+    **Two paths, per "Returning-customer profile refresh and ID reuse"**:
+    if no Government ID document exists under `application_id` (the
+    reuse path -- the customer chose to reuse their existing `id_photo`
+    instead of uploading a new one), this is a no-op -- **changed from
+    this function's original behavior, which `raise`d `DocumentNotFound`
+    unconditionally in this case**; that was written under the old
+    assumption that every approved application always has its own
+    Government ID document, no longer true once reuse exists. If one
+    *does* exist (a fresh upload), first strip `customer_id` metadata
+    from any *other* document currently carrying it for this customer
+    (Mayan holds exactly one value per (document, metadata_type) --
+    re-tagging without stripping first would leave two documents
+    claiming the same `id_photo` leaf), then tag the new one --
+    "exactly one current `id_photo` per customer", enforced for real."""
     matches = await _documents_matching({"application_id": application_id, "category": CATEGORY_GOVERNMENT_ID})
     if not matches:
-        raise DocumentNotFound(f"no Government ID document found for application {application_id}")
+        return
+
+    new_doc_ids = {doc.document_id for doc in matches}
+    existing_id_photo_docs = await _documents_matching({"customer_id": customer_id})
+    for doc in existing_id_photo_docs:
+        if doc.document_id in new_doc_ids:
+            continue
+        entry_id = await _metadata_entry_id(doc.document_id, "customer_id")
+        if entry_id is not None:
+            await mayan_client.delete_metadata_entry(doc.document_id, entry_id)
 
     metadata_type_ids = await mayan_client.metadata_type_ids()
     for doc in matches:
         await mayan_client.attach_metadata(doc.document_id, metadata_type_ids["customer_id"], customer_id)
     await mayan_client.rebuild_index()
+
+
+async def has_id_photo(customer_id: str) -> bool:
+    """Read-only -- a thin wrapper over `list_customer_documents`, since
+    any result *is* the `id_photo` (the one-per-customer invariant
+    `promote_government_id_to_customer_photo` now enforces). Called by
+    `application.service.create_application` to decide whether reuse is
+    even offerable, and by `bff_customer` to decide whether to show the
+    "already on file" choice at all."""
+    documents = await list_customer_documents(customer_id)
+    return len(documents) > 0
 
 
 async def generate_welcome_letter(

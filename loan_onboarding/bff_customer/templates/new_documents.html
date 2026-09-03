@@ -5,11 +5,36 @@
 <h1 class="text-xl font-semibold mb-1">Upload documents</h1>
 <p class="text-sm text-gray-600 mb-6">Step 3 of 4 &middot; take a photo or choose a file for each item below.</p>
 
+{% if can_reuse_id_photo %}
+<div class="rounded-lg border border-blue-200 bg-blue-50 p-4 mb-4">
+  <p class="text-sm text-blue-900 mb-3">We already have a Government ID on file for you.</p>
+  <form method="post" action="/apply/new/documents/reuse-id-photo" class="flex flex-col gap-2">
+    <label class="flex items-center gap-2 text-sm">
+      <input type="radio" name="reuse" value="true" onchange="this.form.requestSubmit()" {% if reuse_existing_id_photo %}checked{% endif %}>
+      Use the one on file
+    </label>
+    <label class="flex items-center gap-2 text-sm">
+      <input type="radio" name="reuse" value="false" onchange="this.form.requestSubmit()" {% if not reuse_existing_id_photo %}checked{% endif %}>
+      Upload a new one instead
+    </label>
+  </form>
+</div>
+{% endif %}
+
 <div class="space-y-3">
   {% for c in categories %}
+  {% if c.hidden_by_reuse %}
+  <div class="rounded-lg border border-gray-200 bg-white p-4">
+    <div class="flex items-center justify-between">
+      <span class="font-medium text-sm">{{ c.category }}</span>
+      <span class="text-xs text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full">Using ID on file</span>
+    </div>
+  </div>
+  {% else %}
   {% with category=c.category, documents=c.documents, upload_url=c.upload_url, capture=c.capture %}
   {% include "_document_category.html" %}
   {% endwith %}
+  {% endif %}
   {% endfor %}
 </div>
 

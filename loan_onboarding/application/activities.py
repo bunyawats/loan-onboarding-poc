@@ -117,9 +117,26 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
 
     if inp.resulting_status == STATUS_APPROVED and existing_account is None:
         if record["customer_id"] is not None:
+            # A since-approved sibling application already resolved
+            # this applicant to a customer -- unconditionally refresh
+            # the profile from *this* application's own submitted
+            # fields (CLAUDE.md's "Returning-customer profile refresh
+            # and ID reuse": the most recently approved application's
+            # details always win, not a fill-blanks-only merge).
             customer_id = record["customer_id"]
+            await customer_service.update_profile(
+                customer_id, record["applicant_name"], record["applicant_email"], record["applicant_phone"]
+            )
         else:
-            customer = await customer_service.get_or_create(record["applicant_identifier"])
+            # First-ever approval for this applicant -- seed the new
+            # row from this application's own fields instead of
+            # leaving name/email/phone NULL forever.
+            customer = await customer_service.get_or_create(
+                record["applicant_identifier"],
+                record["applicant_name"],
+                record["applicant_email"],
+                record["applicant_phone"],
+            )
             customer_id = customer.customer_id
 
         try:

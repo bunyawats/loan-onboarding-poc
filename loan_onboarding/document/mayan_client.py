@@ -234,6 +234,17 @@ class MayanClient:
         )
         response.raise_for_status()
 
+    async def delete_metadata_entry(self, document_id: int, metadata_entry_id: int) -> None:
+        """A plain wrapper over the already-generic `self.delete(...)` --
+        mirrors `attach_metadata`/`update_metadata_entry`'s shape. Never
+        needed until Phase 14's `promote_government_id_to_customer_photo`
+        rewrite, which has to strip a customer's old `id_photo` document's
+        `customer_id` metadata entry before tagging a fresh one (Mayan
+        holds exactly one value per (document, metadata_type) -- see
+        CLAUDE.md's "Returning-customer profile refresh and ID reuse")."""
+        response = await self.delete(f"/documents/{document_id}/metadata/{metadata_entry_id}/")
+        response.raise_for_status()
+
     async def rebuild_index(self) -> None:
         index_id = await self.index_template_id()
         response = await self.post(f"/index_templates/{index_id}/rebuild/")

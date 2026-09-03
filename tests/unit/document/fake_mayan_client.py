@@ -65,10 +65,19 @@ class FakeMayanClient:
 
     async def get_document_metadata(self, document_id: int) -> list[dict[str, Any]]:
         doc = self.documents[document_id]
+        # "id" here is the metadata *entry*'s id -- real Mayan holds
+        # exactly one value per (document, metadata_type), so the
+        # metadata_type_id doubles as a stable per-(document, field)
+        # entry id in this fake, same as it would functionally behave
+        # against a real instance.
         return [
-            {"metadata_type": {"name": name}, "value": value}
+            {"id": self._metadata_type_ids[name], "metadata_type": {"name": name}, "value": value}
             for name, value in doc.metadata.items()
         ]
+
+    async def delete_metadata_entry(self, document_id: int, metadata_entry_id: int) -> None:
+        name = self._metadata_id_to_name[metadata_entry_id]
+        self.documents[document_id].metadata.pop(name, None)
 
     async def get_document(self, document_id: int) -> dict[str, Any]:
         doc = self.documents[document_id]

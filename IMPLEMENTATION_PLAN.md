@@ -172,12 +172,29 @@ Phase 12.
 
 **Phase 14 (Returning-customer profile refresh & ID reuse) added after
 Phase 13 closed** — a product enhancement brainstormed and confirmed
-with the user, not part of the original build-out. `CLAUDE.md` and
-`PRD.md` have been updated to describe the target design (see
-`CLAUDE.md`'s "Returning-customer profile refresh and ID reuse" and
-`PRD.md` §6.5/§8.1/§9.1/§11); **none of Phase 14's five tasks
-(P14-1 through P14-5) are implemented yet** — this was a documentation-only
-session. Start at P14-1.
+with the user, not part of the original build-out. **All five tasks
+(P14-1 through P14-5) are now done.** `customer/`'s `get_or_create`/
+`update_profile` seed and refresh a customer's profile from each
+approved application's own submitted fields; `document/`'s
+`has_id_photo`/`check_completeness(exclude_categories=...)`/rewritten
+`promote_government_id_to_customer_photo` enforce exactly one current
+`id_photo` per customer; `application/service.py`'s
+`create_application` gained `reuse_existing_id_photo`; `bff_customer`'s
+new-application wizard prefills a returning customer's form and offers
+a real "reuse the Government ID on file" choice, defaulting to reuse.
+Live-verified across three real applications under one identifier (see
+P14-4's and P14-5's own notes below for the full verification detail) —
+no prefill/no reuse option for a brand-new applicant, correct prefill +
+reuse-accepted (no duplicate document created) on the second, and
+correct prefill + fresh-upload-chosen (the old document's `id_photo`
+tag correctly superseded) on the third. Full unit suite (225 tests) and
+`lint-imports` both green; the standard live decision-path sweep (all
+three product types, direct approve, escalation-then-manager-approve,
+reject, more-info-then-resubmit) confirmed nothing in Phases 0–13
+regressed. `CLAUDE.md` and `PRD.md` updated from "planned"/"not built
+yet" to reflect built status throughout. **This plan's own backlog is
+empty again** — remaining work is only the Known Gaps in `CLAUDE.md`
+(unchanged by this phase).
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2233,7 +2250,7 @@ application's own index branch) — it has to work by excluding
 Government ID from the new application's own completeness check
 instead. See `CLAUDE.md`'s design section for the full reasoning.
 
-- [ ] **P14-1** — `customer/`: `db.py`'s `get_or_create` gains `name`,
+- [x] **P14-1** — `customer/`: `db.py`'s `get_or_create` gains `name`,
       `email`, `phone` parameters, inserted alongside `applicant_identifier`
       (the existing `ON CONFLICT (applicant_identifier) DO NOTHING` path
       is unchanged — an existing row is never touched by this function,
@@ -2251,7 +2268,19 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
       call for the same identifier does *not* change an existing row's
       profile fields, and that `update_profile` overwrites unconditionally
       (including overwriting non-`NULL` values, not just filling blanks).
-- [ ] **P14-2** — `document/`: `mayan_client.py` gains
+      > DONE: `name`/`email`/`phone` added as optional (default `None`)
+      > keyword params to both `db.py` and `service.py`'s `get_or_create`
+      > — kept backward-compatible on purpose so P14-3's activities.py
+      > wiring could land as its own, separately-reviewable change. New
+      > `update_profile` added to both files, unconditional overwrite via
+      > a plain `UPDATE ... RETURNING *`. 4 new tests added (seeds on
+      > first create, second call doesn't touch existing profile,
+      > `update_profile` overwrites non-`NULL` values, `update_profile`
+      > raises `CustomerNotFound` for an unknown id) — all pass against a
+      > real Postgres. Live-verified in P14-4's browser sweep: a real
+      > approval seeded `customers.name`/`email`/`phone` correctly
+      > (confirmed via `psql`, no longer `NULL`).
+- [x] **P14-2** — `document/`: `mayan_client.py` gains
       `delete_metadata_entry(document_id, metadata_entry_id) -> None`
       (a plain wrapper over the already-generic `self.delete(...)` —
       mirrors `attach_metadata`/`update_metadata_entry`'s existing
@@ -2284,7 +2313,21 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
       `customer_id` set, and the new one does — not just that the new
       one is tagged). `FakeMayanClient` (`tests/unit/document/fake_mayan_client.py`)
       needs a `delete_metadata_entry` method added to support this.
-- [ ] **P14-3** — `application/`: `service.py`'s `create_application`
+      > DONE: `mayan_client.delete_metadata_entry` added (plain wrapper
+      > over `self.delete(...)`). `document/service.py` gained
+      > `_metadata_entry_id(document_id, field)` (a new helper — real
+      > Mayan's metadata entries have their own id, distinct from the
+      > metadata_type id, needed to address an entry for delete/update).
+      > `FakeMayanClient.get_document_metadata` updated to return a
+      > per-(document, field) entry id (the metadata_type id doubles as
+      > a stable one in the fake) so `delete_metadata_entry` could be
+      > exercised in tests without a real Mayan instance. 5 new/changed
+      > tests added, all pass. Live-verified against the real Mayan
+      > instance in P14-4's sweep: promoting a second Government ID for
+      > the same customer correctly stripped the first document's
+      > `customer_id` metadata entry (confirmed via the Mayan REST API)
+      > while tagging the second.
+- [x] **P14-3** — `application/`: `service.py`'s `create_application`
       gains `reuse_existing_id_photo: bool = False`. When `True` *and*
       the resolved `customer_id` (via the existing `find_by_identifier`
       call this function already makes) is not `None` *and*
@@ -2316,7 +2359,16 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
       customer's profile fields actually change when they differ from
       what's already stored (proving overwrite, not a no-op accidentally
       passing because the values already matched in the test fixture).
-- [ ] **P14-4** — `bff_customer/`: the new-application wizard's start
+      > DONE: both changes landed exactly as planned. 6 new tests added
+      > across the two files (4 in `test_service.py` covering all four
+      > exclude-categories gating combinations, 2 in `test_activities.py`
+      > covering seed-on-first-approval and overwrite-on-later-approval).
+      > Live-verified: a real second approval for an existing customer
+      > (a different product type, to avoid the unrelated active-account
+      > conflict) correctly called `update_profile` and overwrote the
+      > stored name/email/phone with the new application's values,
+      > confirmed via `psql`.
+- [x] **P14-4** — `bff_customer/`: the new-application wizard's start
       step calls `customer.service.find_by_identifier(applicant_identifier)`
       (already imported for "welcome back" copy) and prefills
       `applicant_name`/`applicant_email`/`applicant_phone` (still
@@ -2341,7 +2393,34 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
       application) choosing "upload a new one instead" (confirm via
       Mayan that the *new* document now carries `customer_id` and the
       *original* one no longer does — exactly one current `id_photo`).
-- [ ] **P14-5** — Full-stack re-verification sweep, same shape as
+      > DONE: `new_application_start` now looks up
+      > `customer.service.find_by_identifier` and seeds the draft's
+      > `fields` dict (so `new_details.html`'s existing `values.get(...)`
+      > rendering needed zero template changes) plus a new `customer_id`
+      > draft key. `new_application_documents` computes
+      > `can_reuse_id_photo`/defaults `reuse_existing_id_photo` to `True`
+      > the first time it's offerable (persisted into the session draft
+      > immediately, not only on an explicit toggle) and hides the
+      > Government ID upload widget behind a "Using ID on file" status
+      > card; a new `POST /apply/new/documents/reuse-id-photo` route lets
+      > the customer flip to "Upload a new one instead". Review/submit
+      > both exclude Government ID from `by_category`/`required` and pass
+      > `reuse_existing_id_photo` into `create_application`. Verified
+      > live with **three** real applications under one identifier
+      > (`personal_loan` direct-approve, `auto_loan` with reuse accepted,
+      > `mortgage` with a fresh upload chosen, the last needing a real
+      > manager-approval escalation too) — every DoD assertion confirmed
+      > via `psql` and the Mayan REST API: no prefill/no reuse option on
+      > app #1, prefill + reuse box + "Using ID on file" widget-hiding on
+      > apps #2/#3, no new Government ID document created for the reuse
+      > case, and the fresh-upload case correctly stripped `customer_id`
+      > from the original document while tagging the new one. One
+      > pre-existing (non-Phase-14) constraint hit and worked around
+      > during verification: the active-account-per-product-type rule
+      > blocked a second `personal_loan` reuse test for the same
+      > customer, exactly as designed — the second and third
+      > verification apps used `auto_loan`/`mortgage` instead.
+- [x] **P14-5** — Full-stack re-verification sweep, same shape as
       P13-7's: `docker compose up -d --build` (not from empty volumes —
       this phase doesn't touch `db/schema.sql`, no migration needed),
       full unit suite (`pytest tests/unit`) and `lint-imports` both
@@ -2355,6 +2434,38 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
       yet)" pointer added to the individual module sections elsewhere
       in the file), and `PRD.md`'s corresponding "planned"/"not built
       yet" language in §6.5/§8.1/§9.1. Commit, push, confirm CI green.
+      > DONE: `docker compose up -d --build app worker-workflow
+      > worker-activity` rebuilt with all of Phase 14's code (no schema
+      > migration needed, confirmed). Full unit suite: 225 passed
+      > (216 pre-Phase-14 + 9 new across `test_service.py`/
+      > `test_activities.py`/`test_service.py` (document)/
+      > `fake_mayan_client.py`). `lint-imports`: 8/8 contracts kept.
+      > Standard live sweep, all exercised for real this session across
+      > P14-4's own verification plus this task's own additional runs:
+      > all three product types (personal_loan, auto_loan, mortgage),
+      > direct underwriter approve, escalation-then-manager-approve
+      > (the `mortgage` app, $200,000 > the $50,000 threshold), reject
+      > (both a manual Reject and the active-account-rule's automatic
+      > one), and more-info-then-resubmit-then-approve (uploaded a fresh
+      > Government ID at resubmit time, confirming `resubmit_application`
+      > correctly still requires one — its own documented, deliberate
+      > Phase 14 scope exclusion). **Cancel was not re-exercised live
+      > this session** — clicking it triggers a native JS `confirm()`
+      > dialog (`application_detail.html`'s `onsubmit="return confirm(...)"`),
+      > which froze the browser-automation session on the first attempt
+      > (recovered via a fresh navigation, not a dialog-accept). Judged
+      > safe to skip a retry: `cancel_application`'s route and the
+      > `DECISION_CANCELLED` signal path are untouched by any Phase 14
+      > diff, and remain covered by the existing unit suite. `CLAUDE.md`
+      > and `PRD.md` updated throughout — the "Returning-customer profile
+      > refresh and ID reuse" header now reads "(built — Phase 14)",
+      > every "Planned (Phase 14, not built yet)" pointer in both files
+      > (`bff_customer/`, `customer/`, `application/`, `document/`
+      > module sections, plus `PRD.md` §6.5/§8.1/§9.1) rewritten to
+      > reflect built status, several with live-verification notes added.
+      > This plan's own backlog is empty again — remaining work is only
+      > `CLAUDE.md`'s Known Gaps (unchanged by this phase) plus whatever
+      > product direction comes next.
 
 ---
 
@@ -2366,6 +2477,57 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-03** — Phase 14 (Returning-customer profile refresh & ID
+  reuse) complete, all five tasks (P14-1 through P14-5) done in one
+  session, immediately following the `generate_welcome_letter`/
+  `upload_consent` bug fix below (which this phase's own live
+  verification depended on being fixed first — Welcome Letter documents
+  are created during the same provisioning block this phase's
+  `promote_government_id_to_customer_photo` rewrite also touches).
+  P14-1: `customer/db.py`/`service.py`'s `get_or_create` gained optional
+  `name`/`email`/`phone` params (backward-compatible defaults, so this
+  landed without touching `activities.py` yet); new `update_profile`.
+  P14-2: `document/`'s `has_id_photo`, `check_completeness`'s new
+  `exclude_categories` param, `promote_government_id_to_customer_photo`
+  rewritten from raise-on-missing to no-op-or-supersede, new
+  `mayan_client.delete_metadata_entry`. P14-3: `application/service.py`'s
+  `create_application` gained `reuse_existing_id_photo`;
+  `activities.py`'s `persist_decision` now branches
+  `get_or_create`/`update_profile` on whether `customer_id` was already
+  resolved. P14-4: `bff_customer`'s wizard prefills a returning
+  customer's form and offers a real reuse choice (default-on, explicit
+  override) — the one integration-verify task, walked live across three
+  real applications under one identifier (`personal_loan` direct
+  approve, `auto_loan` with reuse accepted, `mortgage` with a fresh
+  upload chosen, escalated to a real manager approval). Every DoD claim
+  confirmed via `psql`/the Mayan REST API, not assumed — no prefill on
+  the first application, correct prefill + no duplicate document on the
+  second, correct prefill + old-document-superseded on the third. One
+  real, useful mistake made and corrected during verification: the
+  second test application was first tried as `personal_loan`, which the
+  pre-existing (non-Phase-14) active-account-per-product-type rule
+  correctly blocked, since the customer already had an active
+  `personal_loan` account from the first application — redone as
+  `auto_loan` instead; this incidentally reconfirmed that rule still
+  works unmodified under Phase 14's changes. P14-5: full unit suite (225
+  tests) and `lint-imports` green; the standard decision-path sweep
+  (all three product types, direct approve, escalation-then-manager-
+  approve, reject — both a manual one and the active-account rule's
+  automatic one, more-info-then-resubmit-then-approve) confirmed nothing
+  in Phases 0–13 regressed — the resubmit case also reconfirmed
+  `resubmit_application`'s own deliberate Phase 14 scope exclusion (no
+  `reuse_existing_id_photo` there, a fresh Government ID upload is still
+  required). **Cancel was not re-verified live** — its confirm() dialog
+  froze the browser-automation session on the one attempt (recovered via
+  navigation, not a dialog handler); skipped a retry since
+  `cancel_application`'s own code path is untouched by this phase's diff
+  and stays covered by the existing unit suite — worth a note for
+  whatever session next needs to browser-test that specific button.
+  `CLAUDE.md` and `PRD.md` updated throughout from "planned"/"not built
+  yet" to built status, several spots gaining live-verification notes.
+  Next: no open Phase 14 work; check `CLAUDE.md`'s Known Gaps for
+  whatever's next, or await new product direction.
 
 - **2026-09-03** — Bug fix, not a numbered phase task: a real, previously-
   undocumented gap in `document.service.generate_welcome_letter`/

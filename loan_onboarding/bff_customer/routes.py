@@ -33,6 +33,7 @@ from loan_onboarding.application import schemas as application_schemas
 from loan_onboarding.application import service as application_service
 from loan_onboarding.application.models import Application, ApplicationNotFound
 from loan_onboarding.bff_customer import identity, notifications
+from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.document.models import UploadedFile
 from loan_onboarding.document.service import CATEGORY_GOVERNMENT_ID
@@ -466,14 +467,30 @@ async def new_application_picker(request: Request, applicant_identifier: str = D
 async def new_application_start(
     request: Request, product_type: str = Form(...), applicant_identifier: str = Depends(_require_applicant)
 ):
+    """CLAUDE.md's "Returning-customer profile refresh and ID reuse": a
+    returning applicant's form is prefilled from their existing
+    profile, still editable. `find_by_identifier` is read-only (the
+    same call already used for "welcome back" copy elsewhere) -- a
+    brand-new applicant simply gets an empty draft, same as today."""
     if product_type not in PRODUCT_FIELDS:
         raise HTTPException(status_code=400, detail=f"unknown product_type {product_type!r}")
+
+    customer = await customer_service.find_by_identifier(applicant_identifier)
+    fields = {}
+    if customer is not None:
+        fields = {
+            "applicant_name": customer.name or "",
+            "applicant_email": customer.email or "",
+            "applicant_phone": customer.phone or "",
+        }
+
     request.session[_DRAFT_KEY] = {
         "product_type": product_type,
         "application_id": idgen_service.generate_id(
             application_service.APPLICATION_ID_PREFIX, application_service.APPLICATION_ID_LENGTH
         ),
-        "fields": {},
+        "fields": fields,
+        "customer_id": customer.customer_id if customer is not None else None,
     }
     return RedirectResponse(url="/apply/new/details", status_code=303)
 
@@ -538,6 +555,13 @@ async def new_application_details_submit(request: Request, applicant_identifier:
     return RedirectResponse(url="/apply/new/documents", status_code=303)
 
 
+async def _can_reuse_id_photo(draft: dict) -> bool:
+    customer_id = draft.get("customer_id")
+    if customer_id is None:
+        return False
+    return await document_service.has_id_photo(customer_id)
+
+
 @router.get("/new/documents", response_class=HTMLResponse)
 async def new_application_documents(request: Request, applicant_identifier: str = Depends(_require_applicant)):
     draft = request.session.get(_DRAFT_KEY)
@@ -545,6 +569,17 @@ async def new_application_documents(request: Request, applicant_identifier: str 
         return RedirectResponse(url="/apply/new", status_code=303)
     application_id = draft["application_id"]
     product_type = draft["product_type"]
+
+    can_reuse = await _can_reuse_id_photo(draft)
+    if can_reuse and "reuse_existing_id_photo" not in draft:
+        # Reuse selected by default the first time this step is
+        # reached -- an explicit choice surfaced in the UI, not a
+        # silent skip, but the customer shouldn't have to click
+        # anything to get the default (CLAUDE.md's "Returning-customer
+        # profile refresh and ID reuse").
+        draft["reuse_existing_id_photo"] = True
+        request.session[_DRAFT_KEY] = draft
+    reuse_selected = can_reuse and draft.get("reuse_existing_id_photo", False)
 
     documents = await document_service.list_documents(application_id)
     required = document_service.REQUIRED_CATEGORIES[product_type]
@@ -556,10 +591,33 @@ async def new_application_documents(request: Request, applicant_identifier: str 
             # Camera-capture hint (PRD §6.4/§8.1) only makes sense for a
             # physical ID card, not a multi-page bank statement/report.
             "capture": category == CATEGORY_GOVERNMENT_ID,
+            # The reuse choice replaces this category's own upload
+            # widget with a status card instead (below) -- never both.
+            "hidden_by_reuse": category == CATEGORY_GOVERNMENT_ID and reuse_selected,
         }
         for category in required
     ]
-    return templates.TemplateResponse(request, "new_documents.html", {"categories": categories})
+    return templates.TemplateResponse(
+        request,
+        "new_documents.html",
+        {
+            "categories": categories,
+            "can_reuse_id_photo": can_reuse,
+            "reuse_existing_id_photo": reuse_selected,
+        },
+    )
+
+
+@router.post("/new/documents/reuse-id-photo", response_class=RedirectResponse)
+async def new_application_set_reuse_id_photo(
+    request: Request, reuse: str = Form(...), applicant_identifier: str = Depends(_require_applicant)
+):
+    draft = request.session.get(_DRAFT_KEY)
+    if draft is None:
+        raise HTTPException(status_code=400, detail="no application in progress")
+    draft["reuse_existing_id_photo"] = reuse == "true"
+    request.session[_DRAFT_KEY] = draft
+    return RedirectResponse(url="/apply/new/documents", status_code=303)
 
 
 @router.post("/new/documents/upload", response_class=HTMLResponse)
@@ -589,6 +647,10 @@ async def new_application_upload(
     )
 
 
+async def _reuse_active(draft: dict) -> bool:
+    return bool(draft.get("reuse_existing_id_photo")) and await _can_reuse_id_photo(draft)
+
+
 @router.get("/new/review", response_class=HTMLResponse)
 async def new_application_review(request: Request, applicant_identifier: str = Depends(_require_applicant)):
     draft = request.session.get(_DRAFT_KEY)
@@ -596,10 +658,15 @@ async def new_application_review(request: Request, applicant_identifier: str = D
         return RedirectResponse(url="/apply/new", status_code=303)
     product_type = draft["product_type"]
     application_id = draft["application_id"]
+    reused = await _reuse_active(draft)
 
     documents = await document_service.list_documents(application_id)
     required = document_service.REQUIRED_CATEGORIES[product_type]
-    by_category = {category: [d for d in documents if d.category == category] for category in required}
+    by_category = {
+        category: [d for d in documents if d.category == category]
+        for category in required
+        if not (category == CATEGORY_GOVERNMENT_ID and reused)
+    }
     return templates.TemplateResponse(
         request,
         "new_review.html",
@@ -608,6 +675,7 @@ async def new_application_review(request: Request, applicant_identifier: str = D
             "product_fields": PRODUCT_FIELDS[product_type],
             "values": draft["fields"],
             "by_category": by_category,
+            "reused_id_photo": reused,
         },
     )
 
@@ -622,6 +690,7 @@ async def new_application_submit(request: Request, applicant_identifier: str = D
     values = draft["fields"]
     product_field_names = [name for name, _, _ in PRODUCT_FIELDS[product_type]]
     payload = {name: values[name] for name in product_field_names}
+    reused = await _reuse_active(draft)
 
     result = await application_service.create_application(
         applicant_identifier=applicant_identifier,
@@ -632,12 +701,17 @@ async def new_application_submit(request: Request, applicant_identifier: str = D
         applicant_phone=values["applicant_phone"],
         amount=Decimal(values["amount"]),
         application_id=application_id,
+        reuse_existing_id_photo=reused,
     )
 
     if result.missing_categories:
         documents = await document_service.list_documents(draft["application_id"])
         required = document_service.REQUIRED_CATEGORIES[product_type]
-        by_category = {category: [d for d in documents if d.category == category] for category in required}
+        by_category = {
+            category: [d for d in documents if d.category == category]
+            for category in required
+            if not (category == CATEGORY_GOVERNMENT_ID and reused)
+        }
         return templates.TemplateResponse(
             request,
             "new_review.html",
@@ -646,6 +720,7 @@ async def new_application_submit(request: Request, applicant_identifier: str = D
                 "product_fields": PRODUCT_FIELDS[product_type],
                 "values": values,
                 "by_category": by_category,
+                "reused_id_photo": reused,
                 "error": "Missing required documents: " + ", ".join(result.missing_categories),
             },
             status_code=400,

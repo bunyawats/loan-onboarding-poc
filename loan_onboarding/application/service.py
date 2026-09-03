@@ -97,6 +97,7 @@ async def create_application(
     applicant_phone: str,
     amount: Decimal,
     application_id: Optional[str] = None,
+    reuse_existing_id_photo: bool = False,
 ) -> ApplicationSubmissionResult:
     """No `customer_id`/`account_id` params -- neither is guaranteed to
     exist yet (CLAUDE.md's "Applying without being a customer yet").
@@ -105,7 +106,18 @@ async def create_application(
     parameter (corrected from an earlier draft that gave this function
     no way to accept a pre-minted id, which conflicted with
     `bff_customer`'s document-upload-before-submit flow). Generates a
-    fresh one via `idgen` if not given."""
+    fresh one via `idgen` if not given.
+
+    `reuse_existing_id_photo` (CLAUDE.md's "Returning-customer profile
+    refresh and ID reuse") is a customer choice surfaced in the UI, not
+    an automatic silent skip -- `bff_customer` only passes `True` when
+    the customer actually left reuse selected. Only takes effect when
+    *all three* hold: `reuse_existing_id_photo` is `True`, the applicant
+    resolves to an existing customer (the `find_by_identifier` call
+    below), and that customer actually has an `id_photo` on file --
+    otherwise this falls through to the bare `check_completeness` call,
+    same as today, so a brand-new applicant with no `customer_id` at all
+    can never mistakenly skip Government ID."""
     application_id = application_id or idgen_service.generate_id(APPLICATION_ID_PREFIX, APPLICATION_ID_LENGTH)
 
     validated_payload = schemas.validate_payload(product_type, payload)
@@ -113,7 +125,14 @@ async def create_application(
     customer = await customer_service.find_by_identifier(applicant_identifier)
     customer_id = customer.customer_id if customer is not None else None
 
-    missing = await document_service.check_completeness(application_id, product_type)
+    exclude_categories: list[str] | None = None
+    if reuse_existing_id_photo and customer_id is not None:
+        if await document_service.has_id_photo(customer_id):
+            exclude_categories = [document_service.CATEGORY_GOVERNMENT_ID]
+
+    missing = await document_service.check_completeness(
+        application_id, product_type, exclude_categories=exclude_categories
+    )
     if missing:
         return ApplicationSubmissionResult(
             application_id=application_id, application=None, missing_categories=missing

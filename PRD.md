@@ -243,7 +243,7 @@ terminal `APPROVED` (§6.2, §9.2):
   existing `id_photo` is untouched — or upload a new one, which then
   supersedes it once that application is approved. See `CLAUDE.md`'s
   "Returning-customer profile refresh and ID reuse" for the mechanism
-  (planned, not built yet as of this revision) and for why this was
+  (built and live-verified in Phase 14) and for why this was
   found to be a real, previously-unenforced gap rather than a
   deliberate choice: nothing in the code has ever actually stopped a
   second `id_photo` from being tagged, "the first one stands" was
@@ -368,7 +368,7 @@ the concrete Resource/Scope/Policy layout and Docker Compose wiring.
   common + product-specific fields → upload required documents (camera
   capture for ID, file picker for statements/reports) → review & submit.
   Blocked (with a specific, actionable message) until required documents
-  are present. **Planned (Phase 14, not built yet)**: for a returning
+  are present. **(Phase 14, built)**: for a returning
   customer (identified by `applicant_identifier` already matching a
   `customers` row), the common fields (name/email/phone) are prefilled
   from their current profile, still editable — a correction made here
@@ -456,11 +456,11 @@ identifier is approved**. An applicant can submit and even complete
 several applications with no `customers` row existing for them at all.
 
 **`name`/`email`/`phone` are seeded and kept current from approved
-applications, not left permanently blank — planned (Phase 14, not built
-yet).** The row created on first approval is seeded from that
-application's own submitted name/email/phone (today's actual behavior
-leaves them `NULL` forever — a real gap, not a deliberate one, found
-while designing this). Every *later* approved application under the
+applications, not left permanently blank — built in Phase 14.** The row
+created on first approval is seeded from that application's own
+submitted name/email/phone (the original behavior left them `NULL`
+forever — a real gap, not a deliberate one, found while designing
+this). Every *later* approved application under the
 same identifier unconditionally overwrites them with its own submitted
 values — the most recently approved application always wins, on the
 reasoning that `customer/` is this project's source of truth for the

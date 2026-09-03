@@ -382,9 +382,9 @@ the *outcome* of an approved loan, not something that pre-exists it.**
   Application level, by a different code path (provisioning, not
   submission).
 
-### Returning-customer profile refresh and ID reuse (planned — Phase 14)
+### Returning-customer profile refresh and ID reuse (built — Phase 14)
 
-**Not built yet** — this section describes the target design for
+Built and live-verified. This section describes the design behind
 `IMPLEMENTATION_PLAN.md`'s Phase 14, written first per this project's
 own convention (architecture doc before implementation). Confirmed with
 the user as a deliberate enhancement to "Applying without being a
@@ -395,10 +395,10 @@ permanently `NULL`, and (2) a *returning* customer gets a materially
 better experience — a prefilled form and the option to skip
 re-uploading a Government ID they already have on file.
 
-- **Customer profile is currently write-once-never-filled, a real gap
+- **Customer profile used to be write-once-never-filled, a real gap
   found while designing this**: `customer.service.get_or_create(applicant_identifier)`
-  takes *only* the identifier — `customers.name`/`email`/`phone` are
-  `NULL` forever, for every customer, today. Phase 14 fixes this two
+  used to take *only* the identifier — `customers.name`/`email`/`phone`
+  stayed `NULL` forever, for every customer. Phase 14 fixed this two
   ways:
   1. `customer.service.get_or_create` gains three new parameters —
      `get_or_create(applicant_identifier, name, email, phone) ->
@@ -477,23 +477,23 @@ re-uploading a Government ID they already have on file.
 - **`id_photo` is refreshed by a later approved application's fresh
   upload, not fixed forever — corrects a real, previously-undocumented
   gap found while designing this feature, not something this feature
-  introduces.** `PRD.md` §6.5 currently states "the first one stands,"
-  but `document.service.promote_government_id_to_customer_photo` has
-  never actually enforced that — it unconditionally re-tags whatever
-  Government ID document exists under the just-approved application,
-  with no check for a prior `id_photo`. This was invisible until now
-  because nothing exercised a *second* approval, for an
+  introduces.** `PRD.md` §6.5 used to state "the first one stands," but
+  `document.service.promote_government_id_to_customer_photo` never
+  actually enforced that — it unconditionally re-tagged whatever
+  Government ID document existed under the just-approved application,
+  with no check for a prior `id_photo`. This was invisible before Phase
+  14 because nothing exercised a *second* approval, for an
   already-a-customer applicant, with a fresh Government ID upload —
-  exactly the case this phase makes reachable. Phase 14 resolves the
-  tension in favor of the new intent (refreshable, not frozen) and
-  makes the enforcement real:
+  exactly the case this phase makes reachable. Phase 14 resolved the
+  tension in favor of the new intent (refreshable, not frozen) and made
+  the enforcement real:
   1. If no Government ID document exists under the just-approved
      `application_id` (the reuse path — nothing was uploaded), `promote_government_id_to_customer_photo`
-     returns early, a no-op — **changed from today's behavior, which
-     `raise`s `DocumentNotFound`** in this case; that exception was
-     written under the old assumption that every approved application
-     always has its own Government ID document, no longer true once
-     reuse exists.
+     returns early, a no-op — **changed from this function's original
+     behavior, which `raise`d `DocumentNotFound`** in this case; that
+     exception was written under the old assumption that every approved
+     application always has its own Government ID document, no longer
+     true once reuse exists.
   2. If one *does* exist (a fresh upload — either a first-time
      applicant, or a returning customer who chose "upload a new one
      instead"), the function first finds any *other* document
@@ -573,18 +573,24 @@ the domain modules' `service.py` functions.
   `account.service` call** — there's nothing for this BFF to
   find-or-create anymore; account creation happens only inside
   `application/activities.py` on approval.
-- **Planned (Phase 14, not built yet)**: the new-application wizard's
-  start step calls `customer.service.find_by_identifier(...)` (the same
-  read-only call already used for "welcome back" copy above) to
-  prefill `applicant_name`/`applicant_email`/`applicant_phone`, and —
-  when that resolves *and* `document.service.has_id_photo(customer_id)`
-  is `True` — shows a "We already have a Government ID on file"
+- **(Phase 14, built)**: the new-application wizard's start step calls
+  `customer.service.find_by_identifier(...)` (the same read-only call
+  already used for "welcome back" copy above) to prefill
+  `applicant_name`/`applicant_email`/`applicant_phone` into the draft's
+  `fields`, and — when that resolves *and*
+  `document.service.has_id_photo(customer_id)` is `True` — the
+  documents step shows a "We already have a Government ID on file"
   choice, defaulting to reuse with an explicit "Upload a new one
   instead" override, wiring the result into
-  `application.service.create_application(...)`'s new
+  `application.service.create_application(...)`'s
   `reuse_existing_id_photo` parameter. See "Returning-customer profile
   refresh and ID reuse" above for the full design and why reuse can't
-  be silent.
+  be silent. Live-verified across three consecutive applications under
+  one identifier: no prefill/no reuse offer on the first (no customer
+  row yet), prefilled + reuse offered and accepted on the second (no
+  new Government ID document created), prefilled + "upload a new one
+  instead" chosen on the third (confirmed via Mayan that the new
+  document superseded the old one's `customer_id` tag).
 
 ### 2. `bff_backoffice/` — Back-Office BFF (the "LOS")
 
@@ -665,23 +671,23 @@ at 10 attempts.
   link an application to an existing customer if one matches; also
   usable by `bff_customer` (e.g. to show "welcome back" copy) without
   ever writing a row.
-- `service.get_or_create(applicant_identifier) -> Customer` —
-  find-or-create, idempotent. **Called only from
-  `application/activities.py`'s `persist_decision`**, at the moment an
-  application resolves to terminal `APPROVED` and no existing customer
-  was already linked. Not called by `bff_customer`'s identify step —
-  the session cookie itself needs no database write at all now, it just
-  holds whatever `applicant_identifier` the customer typed.
-  **Planned (Phase 14, not built yet)**: gains three new parameters —
-  `get_or_create(applicant_identifier, name, email, phone) ->
-  Customer` — so the row it creates is seeded from the approving
-  application's own denormalized fields instead of leaving
-  `name`/`email`/`phone` `NULL` forever (today's actual behavior,
-  found to be a real gap while designing Phase 14). See
+- `service.get_or_create(applicant_identifier, name=None, email=None,
+  phone=None) -> Customer` — find-or-create, idempotent. **Called only
+  from `application/activities.py`'s `persist_decision`**, at the
+  moment an application resolves to terminal `APPROVED` and no existing
+  customer was already linked. Not called by `bff_customer`'s identify
+  step — the session cookie itself needs no database write at all now,
+  it just holds whatever `applicant_identifier` the customer typed.
+  **(Phase 14, built)**: `name`/`email`/`phone` seed the row on a
+  genuine first create — `persist_decision` passes the approving
+  application's own denormalized fields, so a customer's profile no
+  longer stays `NULL` forever (a real gap found while designing this).
+  An existing row (the `ON CONFLICT ... DO NOTHING` path) is never
+  touched by this function, no matter what's passed. See
   "Returning-customer profile refresh and ID reuse" above.
 - `service.get(customer_id) -> Customer`.
-- **Planned (Phase 14, not built yet)**: `service.update_profile(customer_id,
-  name, email, phone) -> Customer` — a write path, called instead of
+- **(Phase 14, built)**: `service.update_profile(customer_id, name,
+  email, phone) -> Customer` — a write path, called instead of
   `get_or_create` when `persist_decision` finds `applications.customer_id`
   already set (an existing customer's later application being
   approved). Unconditional overwrite, not fill-blanks-only — see
@@ -822,18 +828,26 @@ modules.
   (a BFF) immediately wants to show the created application. If
   documents are missing, return the specific missing categories without
   ever calling `workflow.service` — never start a workflow for an
-  incomplete application. **Planned (Phase 14, not built yet)**: gains
-  a `reuse_existing_id_photo: bool = False` parameter — when `True`
+  incomplete application. **(Phase 14, built)**: takes a
+  `reuse_existing_id_photo: bool = False` parameter — when `True`
   *and* the resolved `customer_id` isn't `None` *and*
   `document.service.has_id_photo(customer_id)` is `True`, the
   `check_completeness` call above passes
   `exclude_categories=[document_service.CATEGORY_GOVERNMENT_ID]`
-  instead of the bare call. See "Returning-customer profile refresh
-  and ID reuse" above for why this can't be a silent, automatic skip.
+  instead of the bare call; otherwise it falls through to the bare call
+  unchanged. See "Returning-customer profile refresh and ID reuse"
+  above for why this can't be a silent, automatic skip. Note:
+  `resubmit_application` below does *not* get this parameter — deferred
+  on purpose, see that function's own note.
 - `service.resubmit_application(application_id, payload)` — same gate
   re-check, then `workflow.service.signal_resubmit(...)` against the
   *existing* `workflow_id` (the same running execution, still waiting
-  from `MORE_INFO_REQUESTED` — not a new workflow start).
+  from `MORE_INFO_REQUESTED` — not a new workflow start). **Does not
+  take `reuse_existing_id_photo`, deliberately deferred in Phase 14**
+  (see `PRD.md` §11's open question) — a customer resubmitting from
+  `MORE_INFO_REQUESTED` who never uploaded a Government ID for *this*
+  application still has to upload one, even if they're a known
+  returning customer with one already on file.
 - `service.check_decision_allowed(application_id, decision) ->
   list[str]` — blocking-reason strings, `[]` if the decision may
   proceed (same shape as `check_completeness`). A no-op (`[]`
@@ -885,14 +899,13 @@ modules.
   terminal `APPROVED` transition (see "Applying without being a
   customer yet" above for the exact sequence and its idempotency
   requirement) — the one file in this module allowed to import
-  `customer/` and `account/`. **Planned (Phase 14, not built yet)**:
-  the provisioning block's customer step branches on
-  `record["customer_id"]` — `customer.service.get_or_create(...,
-  name, email, phone)` when `None` (first-ever customer, now seeded
-  from this application's own fields), `customer.service.update_profile(...)`
-  when already set (an existing customer, unconditionally refreshed
-  from this application's fields). See "Returning-customer profile
-  refresh and ID reuse" above.
+  `customer/` and `account/`. **(Phase 14, built)**: the provisioning
+  block's customer step branches on `record["customer_id"]` —
+  `customer.service.get_or_create(..., name, email, phone)` when `None`
+  (first-ever customer, seeded from this application's own fields),
+  `customer.service.update_profile(...)` when already set (an existing
+  customer, unconditionally refreshed from this application's fields).
+  See "Returning-customer profile refresh and ID reuse" above.
 
 **Denormalized applicant fields, on purpose**: `applicant_name`/
 `applicant_email`/`applicant_phone` are captured on the application
@@ -929,23 +942,23 @@ No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
   caller (`bff_customer`, which already has it from the session cookie)
   passes it straight through.
 - `service.list_documents(application_id)`.
-- `service.check_completeness(application_id, product_type) ->
-  list[str]` (missing categories, empty if satisfied) — called by
-  `application.service` at create/resubmit time. **A category is
-  satisfied by one or more documents, not exactly one** — a customer
-  can upload three separate PDFs under "Bank Statements" and the gate
-  is satisfied the same as if they'd uploaded one; `upload()` is safe
-  to call repeatedly for the same `application_id`/`category`, each
-  call creating a distinct Mayan document, never overwriting a prior
-  one. (This resolves "an application can have multiple financial-proof
-  documents" — no renaming, no new category: "Proof of Income" already
-  works this way and always was meant to.) **Planned (Phase 14, not
-  built yet)**: gains an `exclude_categories: list[str] | None = None`
-  parameter — `application.service.create_application`'s new
-  `reuse_existing_id_photo` path passes `[CATEGORY_GOVERNMENT_ID]`
-  through it instead of requiring a fresh upload from a returning
-  customer who already has one on file. See "Returning-customer
-  profile refresh and ID reuse" above.
+- `service.check_completeness(application_id, product_type,
+  exclude_categories=None) -> list[str]` (missing categories, empty if
+  satisfied) — called by `application.service` at create/resubmit time.
+  **A category is satisfied by one or more documents, not exactly
+  one** — a customer can upload three separate PDFs under "Bank
+  Statements" and the gate is satisfied the same as if they'd uploaded
+  one; `upload()` is safe to call repeatedly for the same
+  `application_id`/`category`, each call creating a distinct Mayan
+  document, never overwriting a prior one. (This resolves "an
+  application can have multiple financial-proof documents" — no
+  renaming, no new category: "Proof of Income" already works this way
+  and always was meant to.) **`exclude_categories` (Phase 14, built)**:
+  `application.service.create_application`'s `reuse_existing_id_photo`
+  path passes `[CATEGORY_GOVERNMENT_ID]` through it instead of
+  requiring a fresh upload from a returning customer who already has
+  one on file. See "Returning-customer profile refresh and ID reuse"
+  above.
 - `service.preview(application_id, document_id)` — streams the file
   from Mayan for in-app viewing, so neither BFF template needs its own
   Mayan credentials.
@@ -959,31 +972,31 @@ through the application flow:
   `application/activities.py`'s `persist_decision`**, as one more step
   of the same APPROVE-provisioning sequence described in "Applying
   without being a customer yet" (guarded by the same `account_id IS
-  NOT NULL` idempotency check — this whole block only runs once). Finds
-  the just-approved application's "Government ID" document and attaches
-  `customer_id` metadata to it (**re-tags the existing document, does
-  not copy it** — one Mayan document, findable from both the
-  application's node and the customer's `id_photo` node once the index
-  rebuilds) rather than asking a brand-new customer to upload the same
-  photo twice. **Planned (Phase 14, not built yet)**: today this always
-  assumes a Government ID document exists for the just-approved
-  application and `raise`s `DocumentNotFound` if not — no longer safe
-  once `reuse_existing_id_photo` exists. Phase 14 changes this to (1)
-  return early, a no-op, if no Government ID document exists under this
-  `application_id` (the reuse path — nothing to promote, the existing
-  `id_photo` stands untouched), or (2) if one does exist, first strip
-  `customer_id` metadata from any *other* document already carrying it
-  for this customer (via a new `mayan_client.delete_metadata_entry`),
-  then tag the new one — enforcing "exactly one current `id_photo` per
-  customer" for real, which nothing does today (see
-  "Returning-customer profile refresh and ID reuse" above for why this
-  is a correction of a real, previously-unenforced gap, not new
-  behavior this feature introduces).
-- **Planned (Phase 14, not built yet)**: `service.has_id_photo(customer_id)
-  -> bool` — **read-only**, a thin wrapper over
-  `list_customer_documents(customer_id)` (any result *is* the
-  `id_photo`, per the one-per-customer invariant above). Called by
-  `application.service.create_application` to decide whether reuse is
+  NOT NULL` idempotency check — this whole block only runs once).
+  **Two paths (Phase 14, built)**: if no Government ID document exists
+  under the just-approved `application_id` (the reuse path — nothing
+  was uploaded), this is a no-op — **changed from this function's
+  original behavior, which unconditionally `raise`d `DocumentNotFound`
+  in this case**; that assumed every approved application always has
+  its own Government ID document, no longer true once reuse exists. If
+  one *does* exist (a fresh upload), it first strips `customer_id`
+  metadata from any *other* document already carrying it for this
+  customer (via `mayan_client.delete_metadata_entry`), then attaches
+  `customer_id` metadata to the new one (**re-tags, does not copy** —
+  one Mayan document, findable from both the application's node and the
+  customer's `id_photo` node once the index rebuilds) — enforcing
+  "exactly one current `id_photo` per customer" for real, which nothing
+  did before this (see "Returning-customer profile refresh and ID
+  reuse" above for why this is a correction of a real,
+  previously-unenforced gap, not new behavior this feature
+  introduces). Live-verified: promoting a second, fresh Government ID
+  upload for the same customer stripped the first document's
+  `customer_id` metadata entry while tagging the second.
+- **(Phase 14, built)**: `service.has_id_photo(customer_id) -> bool` —
+  **read-only**, a thin wrapper over `list_customer_documents(customer_id)`
+  (any result *is* the `id_photo`, per the one-per-customer invariant
+  above). Called by `application.service.create_application` to decide
+  whether reuse is
   even offerable, and by `bff_customer` to decide whether to show the
   "already on file" choice at all.
 - `service.generate_welcome_letter(applicant_identifier, account_id,

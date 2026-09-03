@@ -33,7 +33,12 @@ async def find_by_identifier(applicant_identifier: str) -> asyncpg.Record | None
     )
 
 
-async def get_or_create(applicant_identifier: str) -> asyncpg.Record:
+async def get_or_create(
+    applicant_identifier: str,
+    name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+) -> asyncpg.Record:
     """Atomic find-or-create -- INSERT ... ON CONFLICT DO NOTHING closes
     the race a naive find-then-insert would have (two concurrent calls
     for the same identifier must never create two rows; see CLAUDE.md's
@@ -45,20 +50,30 @@ async def get_or_create(applicant_identifier: str) -> asyncpg.Record:
     concurrent caller for the same identifier) and a freshly-generated
     `customer_id` colliding with an unrelated row's primary key --
     handled by regenerating and retrying, bounded at
-    `_MAX_ID_COLLISION_RETRIES` attempts."""
+    `_MAX_ID_COLLISION_RETRIES` attempts.
+
+    `name`/`email`/`phone` seed the row on a genuine first create only
+    -- `ON CONFLICT ... DO NOTHING` means an existing row's profile
+    fields are never touched by this function, no matter what's passed
+    here. Update an existing customer's profile via `update_profile`
+    instead (CLAUDE.md's "Returning-customer profile refresh and ID
+    reuse" -- unconditional overwrite there, seed-once here)."""
     pool = await _get_pool()
     for _ in range(_MAX_ID_COLLISION_RETRIES):
         customer_id = idgen_service.generate_id(_ID_PREFIX, _ID_LENGTH)
         try:
             record = await pool.fetchrow(
                 """
-                INSERT INTO customers (customer_id, applicant_identifier)
-                VALUES ($1, $2)
+                INSERT INTO customers (customer_id, applicant_identifier, name, email, phone)
+                VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (applicant_identifier) DO NOTHING
                 RETURNING *
                 """,
                 customer_id,
                 applicant_identifier,
+                name,
+                email,
+                phone,
             )
         except asyncpg.exceptions.UniqueViolationError as exc:
             if exc.constraint_name == "customers_pkey":
@@ -83,4 +98,28 @@ async def get(customer_id: str) -> asyncpg.Record | None:
     return await pool.fetchrow(
         "SELECT * FROM customers WHERE customer_id = $1",
         customer_id,
+    )
+
+
+async def update_profile(
+    customer_id: str, name: str | None, email: str | None, phone: str | None
+) -> asyncpg.Record | None:
+    """Unconditional overwrite, not fill-blanks-only -- the most
+    recently *approved* application's submitted details always win (see
+    CLAUDE.md's "Returning-customer profile refresh and ID reuse").
+    Unlike `get_or_create`'s seed-once-on-insert behavior, every call
+    here replaces whatever the row currently holds, including
+    non-`NULL` values."""
+    pool = await _get_pool()
+    return await pool.fetchrow(
+        """
+        UPDATE customers
+        SET name = $2, email = $3, phone = $4
+        WHERE customer_id = $1
+        RETURNING *
+        """,
+        customer_id,
+        name,
+        email,
+        phone,
     )

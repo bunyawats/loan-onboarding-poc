@@ -28,6 +28,12 @@
 <div class="rounded-lg border border-gray-200 bg-white p-4 mb-6">
   <div class="text-sm font-medium text-gray-500 mb-2">Documents</div>
   <dl class="text-sm space-y-1">
+    {% if reused_id_photo %}
+    <div class="flex justify-between">
+      <dt class="text-gray-500">Government ID</dt>
+      <dd class="text-blue-700">using ID on file</dd>
+    </div>
+    {% endif %}
     {% for category, documents in by_category.items() %}
     <div class="flex justify-between">
       <dt class="text-gray-500">{{ category }}</dt>

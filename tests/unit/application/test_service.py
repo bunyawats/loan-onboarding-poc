@@ -86,10 +86,14 @@ def start_workflow_calls(monkeypatch):
 
 
 def _mock_completeness(monkeypatch, missing=None):
-    async def fake_check_completeness(application_id, product_type):
+    calls = []
+
+    async def fake_check_completeness(application_id, product_type, exclude_categories=None):
+        calls.append(dict(application_id=application_id, product_type=product_type, exclude_categories=exclude_categories))
         return missing or []
 
     monkeypatch.setattr(service.document_service, "check_completeness", fake_check_completeness)
+    return calls
 
 
 def _personal_loan_payload(**overrides):
@@ -196,6 +200,99 @@ async def test_new_applicant_passes_none_customer_id(monkeypatch, start_workflow
     )
 
     assert start_workflow_calls[0]["customer_id"] is None
+
+
+async def test_reuse_excludes_government_id_when_all_three_conditions_hold(monkeypatch, start_workflow_calls):
+    completeness_calls = _mock_completeness(monkeypatch, missing=[])
+    existing = await customer_db.get_or_create("reuse-me@example.com")
+
+    async def fake_has_id_photo(customer_id):
+        assert customer_id == existing["customer_id"]
+        return True
+
+    monkeypatch.setattr(service.document_service, "has_id_photo", fake_has_id_photo)
+
+    await service.create_application(
+        applicant_identifier="reuse-me@example.com",
+        product_type="personal_loan",
+        payload=_personal_loan_payload(),
+        applicant_name="Reuse Me",
+        applicant_email="reuse-me@example.com",
+        applicant_phone="555-0100",
+        amount=Decimal("10000"),
+        reuse_existing_id_photo=True,
+    )
+
+    assert completeness_calls[0]["exclude_categories"] == [service.document_service.CATEGORY_GOVERNMENT_ID]
+
+
+async def test_reuse_flag_true_but_new_applicant_falls_through_to_bare_check(monkeypatch, start_workflow_calls):
+    """No customer_id at all resolves -- must never exclude Government
+    ID for someone with no id_photo to reuse, regardless of the flag."""
+    completeness_calls = _mock_completeness(monkeypatch, missing=[])
+
+    async def fail_if_called(customer_id):
+        raise AssertionError("has_id_photo must not be called with no resolved customer_id")
+
+    monkeypatch.setattr(service.document_service, "has_id_photo", fail_if_called)
+
+    await service.create_application(
+        applicant_identifier="brand-new-2@example.com",
+        product_type="personal_loan",
+        payload=_personal_loan_payload(),
+        applicant_name="New Applicant",
+        applicant_email="brand-new-2@example.com",
+        applicant_phone="555-0100",
+        amount=Decimal("10000"),
+        reuse_existing_id_photo=True,
+    )
+
+    assert completeness_calls[0]["exclude_categories"] is None
+
+
+async def test_reuse_flag_true_but_no_id_photo_on_file_falls_through(monkeypatch, start_workflow_calls):
+    completeness_calls = _mock_completeness(monkeypatch, missing=[])
+    await customer_db.get_or_create("no-photo@example.com")
+
+    async def fake_has_id_photo(customer_id):
+        return False
+
+    monkeypatch.setattr(service.document_service, "has_id_photo", fake_has_id_photo)
+
+    await service.create_application(
+        applicant_identifier="no-photo@example.com",
+        product_type="personal_loan",
+        payload=_personal_loan_payload(),
+        applicant_name="No Photo",
+        applicant_email="no-photo@example.com",
+        applicant_phone="555-0100",
+        amount=Decimal("10000"),
+        reuse_existing_id_photo=True,
+    )
+
+    assert completeness_calls[0]["exclude_categories"] is None
+
+
+async def test_reuse_flag_false_never_excludes_even_with_id_photo_on_file(monkeypatch, start_workflow_calls):
+    completeness_calls = _mock_completeness(monkeypatch, missing=[])
+    await customer_db.get_or_create("default-flag@example.com")
+
+    async def fail_if_called(customer_id):
+        raise AssertionError("has_id_photo must not be called when reuse_existing_id_photo is False")
+
+    monkeypatch.setattr(service.document_service, "has_id_photo", fail_if_called)
+
+    await service.create_application(
+        applicant_identifier="default-flag@example.com",
+        product_type="personal_loan",
+        payload=_personal_loan_payload(),
+        applicant_name="Default Flag",
+        applicant_email="default-flag@example.com",
+        applicant_phone="555-0100",
+        amount=Decimal("10000"),
+    )
+
+    assert completeness_calls[0]["exclude_categories"] is None
 
 
 async def test_uses_provided_application_id_when_given(monkeypatch, start_workflow_calls):

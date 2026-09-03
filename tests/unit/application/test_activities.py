@@ -14,7 +14,7 @@ import pytest
 
 from loan_onboarding.account import db as account_db, service as account_service
 from loan_onboarding.application import activities, db as application_db
-from loan_onboarding.customer import db as customer_db
+from loan_onboarding.customer import db as customer_db, service as customer_service
 from loan_onboarding.workflow.workflows import (
     PersistApplicationInput,
     PersistDecisionInput,
@@ -163,6 +163,67 @@ async def test_persist_decision_approve_provisions_customer_and_account(_mock_do
     assert len(_mock_document_service["welcome_letter"]) == 1
     assert _mock_document_service["welcome_letter"][0][0] == record["applicant_identifier"]
     assert _mock_document_service["welcome_letter"][0][1] == account.account_id
+
+
+async def test_persist_decision_approve_seeds_new_customer_profile(_mock_document_service):
+    """First-ever approval for an applicant: get_or_create (new
+    four-arg form) seeds the row from this application's own submitted
+    fields instead of leaving name/email/phone NULL forever."""
+    application_id = await _seed_application(
+        applicant_name="Grace Hopper", applicant_email="grace@example.com", applicant_phone="555-0199"
+    )
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+
+    record = await application_db.get(application_id)
+    customer = await customer_service.get(record["customer_id"])
+    assert customer.name == "Grace Hopper"
+    assert customer.email == "grace@example.com"
+    assert customer.phone == "555-0199"
+
+
+async def test_persist_decision_approve_overwrites_returning_customer_profile(_mock_document_service):
+    """A since-approved sibling application's later Approve calls
+    update_profile, not get_or_create -- and it's an unconditional
+    overwrite, proven by seeding the existing customer with different
+    values than this application submits, then asserting the profile
+    actually changed to the new values (not accidentally passing
+    because the old and new values already matched)."""
+    existing_customer = await customer_db.get_or_create(
+        "returning2@example.com", "Old Name", "old-email@example.com", "555-0000"
+    )
+    application_id = await _seed_application(
+        applicant_identifier="returning2@example.com",
+        customer_id=existing_customer["customer_id"],
+        applicant_name="New Name",
+        applicant_email="new-email@example.com",
+        applicant_phone="555-1111",
+    )
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="manager",
+            decision="APPROVE",
+            actor_name="m1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+
+    customer = await customer_service.get(existing_customer["customer_id"])
+    assert customer.name == "New Name"
+    assert customer.email == "new-email@example.com"
+    assert customer.phone == "555-1111"
 
 
 async def test_persist_decision_approve_reuses_existing_customer_id_without_calling_get_or_create(monkeypatch):
