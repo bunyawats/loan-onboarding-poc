@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 from temporalio.client import Client
 
+from loan_onboarding.account import service as account_service
 from loan_onboarding.application import activities
 from loan_onboarding.application import db as application_db
 from loan_onboarding.application import service
@@ -135,7 +136,7 @@ async def test_escalation_path_underwriter_then_manager_approve(worker, temporal
     )
     record = await _poll_status(result.application_id, "PENDING_MANAGER_APPROVAL")
     assert record["underwriter_name"] == "underwriter1"
-    assert record["account_id"] is None
+    assert await account_service.get_by_application_id(result.application_id) is None
 
     await workflow_service.signal_decision(
         temporal_client, result.application.workflow_id, "manager", "APPROVE", "manager1", "approved"
@@ -155,7 +156,7 @@ async def test_reject_reaches_rejected(worker, temporal_client):
 
     record = await _poll_status(result.application_id, "REJECTED")
     assert record["underwriter_name"] == "underwriter1"
-    assert record["account_id"] is None
+    assert await account_service.get_by_application_id(result.application_id) is None
 
 
 async def test_request_more_info_then_resubmit_then_approve(worker, temporal_client):
@@ -192,5 +193,5 @@ async def test_cancel_from_non_terminal_state(worker, temporal_client):
     )
 
     record = await _poll_status(result.application_id, "CANCELLED")
-    assert record["account_id"] is None
+    assert await account_service.get_by_application_id(result.application_id) is None
     assert record["underwriter_name"] is None
