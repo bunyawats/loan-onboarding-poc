@@ -817,6 +817,9 @@ and the Mayan Index Template definition.
 
 ### 7. `workflow/` — Workflow module
 
+*(Rendered version of the state machine:
+[`docs/diagrams/loan-workflow-state-machine.md`](docs/diagrams/loan-workflow-state-machine.md).)*
+
 The direct promotion of `review-approval-temporal`'s `workflow/`
 package, deliberately kept **generic** now that `application/` owns the
 concrete activity implementations (see "Breaking the cycle" above) —
