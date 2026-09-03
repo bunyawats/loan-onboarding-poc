@@ -2449,14 +2449,20 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
       > one), and more-info-then-resubmit-then-approve (uploaded a fresh
       > Government ID at resubmit time, confirming `resubmit_application`
       > correctly still requires one — its own documented, deliberate
-      > Phase 14 scope exclusion). **Cancel was not re-exercised live
-      > this session** — clicking it triggers a native JS `confirm()`
-      > dialog (`application_detail.html`'s `onsubmit="return confirm(...)"`),
-      > which froze the browser-automation session on the first attempt
-      > (recovered via a fresh navigation, not a dialog-accept). Judged
-      > safe to skip a retry: `cancel_application`'s route and the
-      > `DECISION_CANCELLED` signal path are untouched by any Phase 14
-      > diff, and remain covered by the existing unit suite. `CLAUDE.md`
+      > Phase 14 scope exclusion). **Cancel initially skipped, then
+      > re-verified in a follow-up check**: clicking it triggers a native
+      > JS `confirm()` dialog (`application_detail.html`'s
+      > `onsubmit="return confirm(...)"`), which froze the
+      > browser-automation session on the first attempt (recovered via a
+      > fresh navigation, not a dialog-accept) — the retry instead
+      > overrode `window.confirm = () => true` via injected JS *before*
+      > clicking the button, which bypassed the native dialog entirely
+      > and completed cleanly: a fresh application walked
+      > `Submitted → Under Review → Cancelled`, confirmed both in the UI
+      > timeline and via `psql` (`status = 'CANCELLED'`). No code change
+      > needed — `cancel_application`'s route and the `DECISION_CANCELLED`
+      > signal path were untouched by any Phase 14 diff all along, as
+      > expected. `CLAUDE.md`
       > and `PRD.md` updated throughout — the "Returning-customer profile
       > refresh and ID reuse" header now reads "(built — Phase 14)",
       > every "Planned (Phase 14, not built yet)" pointer in both files
@@ -2518,14 +2524,19 @@ is.)*
   in Phases 0–13 regressed — the resubmit case also reconfirmed
   `resubmit_application`'s own deliberate Phase 14 scope exclusion (no
   `reuse_existing_id_photo` there, a fresh Government ID upload is still
-  required). **Cancel was not re-verified live** — its confirm() dialog
-  froze the browser-automation session on the one attempt (recovered via
-  navigation, not a dialog handler); skipped a retry since
-  `cancel_application`'s own code path is untouched by this phase's diff
-  and stays covered by the existing unit suite — worth a note for
-  whatever session next needs to browser-test that specific button.
-  `CLAUDE.md` and `PRD.md` updated throughout from "planned"/"not built
-  yet" to built status, several spots gaining live-verification notes.
+  required). **Cancel was not re-verified live in this same pass** — its
+  confirm() dialog froze the browser-automation session on the one
+  attempt (recovered via navigation, not a dialog handler); skipped a
+  retry at the time since `cancel_application`'s own code path is
+  untouched by this phase's diff and stays covered by the existing unit
+  suite. **Resolved in an immediate follow-up, same day**: overriding
+  `window.confirm = () => true` via injected JS before clicking the
+  button bypasses the native dialog entirely — a fresh application
+  walked `Submitted → Under Review → Cancelled` cleanly, confirmed via
+  `psql` (`status = 'CANCELLED'`). No code change needed; this was
+  purely a browser-automation limitation, not a product gap. `CLAUDE.md`
+  and `PRD.md` updated throughout from "planned"/"not built yet" to
+  built status, several spots gaining live-verification notes.
   Next: no open Phase 14 work; check `CLAUDE.md`'s Known Gaps for
   whatever's next, or await new product direction.
 
