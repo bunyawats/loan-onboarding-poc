@@ -2367,6 +2367,38 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-03** — Bug fix, not a numbered phase task: a real, previously-
+  undocumented gap in `document.service.generate_welcome_letter`/
+  `upload_consent`, found live during a manual end-to-end run that
+  actually uploaded real documents to Mayan and walked a personal_loan
+  application through underwriter approval (something no prior session's
+  verification had done against this pair of functions specifically —
+  every earlier live sweep either mocked `document.service` entirely or
+  didn't inspect the Mayan index tree UI afterward). Both functions
+  attached only `account_id`/`category` metadata, never
+  `applicant_identifier` -- but the index's account branch
+  (`<applicant_identifier> -> <account_id> -> category`) is nested under
+  the applicant node, so a document missing that field landed under a
+  top-level "None" bucket in Mayan's UI instead of its applicant's own
+  branch. Invisible to every existing unit test, since `FakeMayanClient`
+  doesn't enforce Mayan's own required-metadata rules the way the real
+  server does. Fixed by adding `applicant_identifier` as both functions'
+  first parameter and attaching it alongside the existing fields;
+  `application/activities.py`'s `persist_decision` call site updated to
+  pass `record["applicant_identifier"]`. Re-verified live: called the
+  fixed `generate_welcome_letter` directly against the real running
+  Mayan instance, confirmed via the Mayan UI that the new document filed
+  correctly under `<applicant_identifier> -> <account_id>` while the
+  pre-fix document (created earlier in the same session, before the fix)
+  stayed orphaned under `None` -- not retroactively backfilled, a small
+  accepted gap for existing data, consistent with this project's other
+  rare-enough-to-accept-for-a-POC calls. Full unit suite (212 tests) and
+  `lint-imports` both green after the fix; `app`/`worker-workflow`/
+  `worker-activity` images rebuilt via `docker compose up -d --build`.
+  `CLAUDE.md`'s `document/` module section and provisioning-sequence
+  bullet updated with the corrected signatures and the bug's own note.
+  Next: Phase 14 still not started -- P14-1 is still the next real task.
+
 - **2026-09-03** — Documentation-only session, no code changed. User
   brainstormed a set of returning-customer enhancements (profile
   backfill, application-form prefill, optional Government ID reuse

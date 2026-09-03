@@ -154,6 +154,7 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
         else:
             await document_service.promote_government_id_to_customer_photo(application_id, customer_id)
             await document_service.generate_welcome_letter(
+                record["applicant_identifier"],
                 account.account_id,
                 customer_id,
                 record["applicant_name"],

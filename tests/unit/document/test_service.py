@@ -153,12 +153,19 @@ async def test_promote_government_id_raises_when_none_found(fake_client):
 
 
 async def test_generate_welcome_letter_uploads_tagged_to_account(fake_client):
-    ref = await service.generate_welcome_letter("acct-1", "cust-1", "Alice", "personal_loan", "10000")
+    ref = await service.generate_welcome_letter("alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000")
 
     assert ref.category == "Welcome Letter"
+    assert ref.applicant_identifier == "alice@example.com"
     assert ref.account_id == "acct-1"
     stored = fake_client.documents[ref.document_id]
     assert stored.document_type_label == "Account Document"
+    # Regression: an earlier version only attached account_id/category,
+    # which left the document with nothing for the index's applicant_id
+    # ancestor node to evaluate -- it landed under a top-level "None"
+    # bucket instead of the applicant's own branch (found live against a
+    # real Mayan instance).
+    assert stored.metadata["applicant_identifier"] == "alice@example.com"
     assert stored.metadata["account_id"] == "acct-1"
     assert stored.metadata["category"] == "Welcome Letter"
     assert len(stored.file_versions) == 1
@@ -167,17 +174,18 @@ async def test_generate_welcome_letter_uploads_tagged_to_account(fake_client):
 
 
 async def test_upload_consent_creates_document_on_first_call(fake_client):
-    ref = await service.upload_consent("acct-1", UploadedFile("consent.pdf", b"v1"))
+    ref = await service.upload_consent("alice@example.com", "acct-1", UploadedFile("consent.pdf", b"v1"))
 
     stored = fake_client.documents[ref.document_id]
     assert stored.metadata["category"] == "Consent"
+    assert stored.metadata["applicant_identifier"] == "alice@example.com"
     assert stored.metadata["account_id"] == "acct-1"
     assert stored.file_versions == [b"v1"]
 
 
 async def test_upload_consent_versions_same_document_on_second_call(fake_client):
-    first = await service.upload_consent("acct-1", UploadedFile("consent.pdf", b"v1"))
-    second = await service.upload_consent("acct-1", UploadedFile("consent_v2.pdf", b"v2"))
+    first = await service.upload_consent("alice@example.com", "acct-1", UploadedFile("consent.pdf", b"v1"))
+    second = await service.upload_consent("alice@example.com", "acct-1", UploadedFile("consent_v2.pdf", b"v2"))
 
     assert first.document_id == second.document_id
     stored = fake_client.documents[first.document_id]
@@ -189,7 +197,7 @@ async def test_list_customer_documents_and_list_account_documents(fake_client):
         (await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))).application_id,
         "cust-1",
     )
-    await service.generate_welcome_letter("acct-1", "cust-1", "Alice", "personal_loan", "10000")
+    await service.generate_welcome_letter("alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000")
 
     customer_docs = await service.list_customer_documents("cust-1")
     assert len(customer_docs) == 1

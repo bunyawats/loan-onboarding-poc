@@ -46,8 +46,10 @@ def _mock_document_service(monkeypatch):
     async def fake_promote(application_id, customer_id):
         calls["promote"].append((application_id, customer_id))
 
-    async def fake_generate_welcome_letter(account_id, customer_id, applicant_name, product_type, amount):
-        calls["welcome_letter"].append((account_id, customer_id, applicant_name, product_type, amount))
+    async def fake_generate_welcome_letter(applicant_identifier, account_id, customer_id, applicant_name, product_type, amount):
+        calls["welcome_letter"].append(
+            (applicant_identifier, account_id, customer_id, applicant_name, product_type, amount)
+        )
 
     monkeypatch.setattr(activities.document_service, "promote_government_id_to_customer_photo", fake_promote)
     monkeypatch.setattr(activities.document_service, "generate_welcome_letter", fake_generate_welcome_letter)
@@ -159,7 +161,8 @@ async def test_persist_decision_approve_provisions_customer_and_account(_mock_do
 
     assert _mock_document_service["promote"] == [(application_id, record["customer_id"])]
     assert len(_mock_document_service["welcome_letter"]) == 1
-    assert _mock_document_service["welcome_letter"][0][0] == account.account_id
+    assert _mock_document_service["welcome_letter"][0][0] == record["applicant_identifier"]
+    assert _mock_document_service["welcome_letter"][0][1] == account.account_id
 
 
 async def test_persist_decision_approve_reuses_existing_customer_id_without_calling_get_or_create(monkeypatch):

@@ -79,7 +79,7 @@ def _stub_document_service(monkeypatch):
     async def fake_promote(application_id, customer_id):
         pass
 
-    async def fake_generate_welcome_letter(account_id, customer_id, applicant_name, product_type, amount):
+    async def fake_generate_welcome_letter(applicant_identifier, account_id, customer_id, applicant_name, product_type, amount):
         pass
 
     monkeypatch.setattr(service.document_service, "check_completeness", fake_check_completeness)

@@ -308,8 +308,8 @@ the *outcome* of an approved loan, not something that pre-exists it.**
      that job now, one step earlier and with nothing to get out of
      order).
   3. Call `document.service.promote_government_id_to_customer_photo(application_id,
-     customer_id)` and `document.service.generate_welcome_letter(account_id,
-     customer_id, applicant_name, product_type, amount)` — see
+     customer_id)` and `document.service.generate_welcome_letter(applicant_identifier,
+     account_id, customer_id, applicant_name, product_type, amount)` — see
      `document/`'s module section for what each does. **A retry that
      finds an account already provisioned (the check above) skips both
      of these calls entirely, permanently** — a smaller,
@@ -986,20 +986,38 @@ through the application flow:
   `application.service.create_application` to decide whether reuse is
   even offerable, and by `bff_customer` to decide whether to show the
   "already on file" choice at all.
-- `service.generate_welcome_letter(account_id, customer_id,
-  applicant_name, product_type, amount) -> DocumentRef` — **called only
-  from `application/activities.py`'s `persist_decision`**, immediately
-  after `account.service.create_account(...)` succeeds, same
+- `service.generate_welcome_letter(applicant_identifier, account_id,
+  customer_id, applicant_name, product_type, amount) -> DocumentRef` —
+  **called only from `application/activities.py`'s `persist_decision`**,
+  immediately after `account.service.create_account(...)` succeeds, same
   provisioning block. Renders a simple templated PDF (no live data
   beyond the plain arguments passed in — `document/` doesn't import
   `application/`, `customer/`, or `account/` to go get anything itself)
   and uploads it tagged to the new `account_id`. System-generated, no
-  human in the loop, exactly one per account.
-- `service.upload_consent(account_id, file) -> DocumentRef` — **true
-  Mayan document versioning, not a new document per call**: if the
-  account already has a "consent" document, this uploads a new *file
-  version* of that same document (Mayan retains the version history
-  natively); if not, it creates the document first. Not restricted to
+  human in the loop, exactly one per account. **`applicant_identifier`
+  was added to this signature after a real bug, found live**: the
+  account branch (`<applicant_identifier> -> <account_id> -> category`,
+  "Document hierarchy" below) is nested under the applicant node, whose
+  own index expression evaluates `applicant_identifier` metadata — an
+  earlier version of this function attached only `account_id`/`category`,
+  which `scripts/setup_document_hierarchy.sh`'s gotcha #1 (leaf
+  conditions don't inherit an ancestor's match) turned into a document
+  landing under a top-level "None" bucket in the Mayan UI instead of the
+  applicant's own branch. Confirmed against a real instance (not caught
+  by any unit test — `FakeMayanClient` doesn't enforce Mayan's own
+  required-metadata rules, so this was invisible until a genuine
+  end-to-end run actually looked at the index tree); fixed by attaching
+  `applicant_identifier` alongside the existing two fields. A document
+  created before this fix stays orphaned under `None` — not
+  retroactively backfilled.
+- `service.upload_consent(applicant_identifier, account_id, file) ->
+  DocumentRef` — **true Mayan document versioning, not a new document
+  per call**: if the account already has a "consent" document, this
+  uploads a new *file version* of that same document (Mayan retains the
+  version history natively); if not, it creates the document first
+  (attaching `applicant_identifier` too, same reasoning and same fix as
+  `generate_welcome_letter` above — the new-version path doesn't
+  re-attach metadata at all, so it needs nothing new). Not restricted to
   one caller — either BFF can call it once `account_id` exists (both
   already import `document/`); which surface actually exposes a UI for
   this is not yet designed — see `PRD.md`'s open questions.

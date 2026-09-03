@@ -209,12 +209,23 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
 
 
 async def generate_welcome_letter(
-    account_id: str, customer_id: str, applicant_name: str, product_type: str, amount: str
+    applicant_identifier: str, account_id: str, customer_id: str, applicant_name: str, product_type: str, amount: str
 ) -> DocumentRef:
     """Renders a simple templated PDF and uploads it tagged to
     `account_id` -- system-generated, no human in the loop, exactly one
     per account. Plain-argument signature only, no `application/`/
-    `customer/`/`account/` imports (`document/` is a leaf module)."""
+    `customer/`/`account/` imports (`document/` is a leaf module).
+
+    `applicant_identifier` is required here too, not just `account_id` --
+    the index template's account branch (`<applicant_identifier> ->
+    <account_id> -> category`, CLAUDE.md's "Document hierarchy") is
+    nested *under* the applicant node, whose own expression evaluates
+    `applicant_identifier` metadata. Found live: an earlier version of
+    this function attached only `account_id`/`category`, which Mayan's
+    index-tree gotcha #1 (leaf conditions don't inherit) turned into a
+    real, confirmed bug -- the document landed under a top-level "None"
+    bucket instead of the applicant's own branch, because the ancestor
+    `applicant_identifier` node had nothing to evaluate."""
     content = _render_welcome_letter_pdf(applicant_name, product_type, amount)
     filename = f"welcome_letter_{account_id}.pdf"
 
@@ -227,6 +238,7 @@ async def generate_welcome_letter(
     await mayan_client.upload_file(document_id, filename, content, action_name="replace")
 
     for field, value in [
+        ("applicant_identifier", applicant_identifier),
         ("account_id", account_id),
         ("category", "Welcome Letter"),
     ]:
@@ -234,7 +246,13 @@ async def generate_welcome_letter(
 
     await mayan_client.rebuild_index()
 
-    return DocumentRef(document_id=document_id, filename=filename, category="Welcome Letter", account_id=account_id)
+    return DocumentRef(
+        document_id=document_id,
+        filename=filename,
+        category="Welcome Letter",
+        applicant_identifier=applicant_identifier,
+        account_id=account_id,
+    )
 
 
 def _render_welcome_letter_pdf(applicant_name: str, product_type: str, amount: str) -> bytes:
@@ -268,12 +286,18 @@ def _render_welcome_letter_pdf(applicant_name: str, product_type: str, amount: s
     return out
 
 
-async def upload_consent(account_id: str, file: UploadedFile) -> DocumentRef:
+async def upload_consent(applicant_identifier: str, account_id: str, file: UploadedFile) -> DocumentRef:
     """True Mayan document versioning: if the account already has a
     "consent" document, uploads a new *file version* of that same
     document; creates the document first if none exists yet. Not
     restricted to one caller -- either BFF can call this once
     `account_id` exists.
+
+    `applicant_identifier` is only used on the create-first-version path
+    -- same reason `generate_welcome_letter` needs it (the index's
+    account branch is nested under the applicant node, see that
+    function's docstring). The new-file-version-of-an-existing-document
+    path doesn't re-attach metadata at all, so it needs nothing new.
 
     **`action_name="replace"` on both the first and every subsequent
     upload -- there is no "new" action.** Confirmed against Mayan's own
@@ -309,6 +333,7 @@ async def upload_consent(account_id: str, file: UploadedFile) -> DocumentRef:
     await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
 
     for field, value in [
+        ("applicant_identifier", applicant_identifier),
         ("account_id", account_id),
         ("category", "Consent"),
     ]:
@@ -316,7 +341,13 @@ async def upload_consent(account_id: str, file: UploadedFile) -> DocumentRef:
 
     await mayan_client.rebuild_index()
 
-    return DocumentRef(document_id=document_id, filename=file.filename, category="Consent", account_id=account_id)
+    return DocumentRef(
+        document_id=document_id,
+        filename=file.filename,
+        category="Consent",
+        applicant_identifier=applicant_identifier,
+        account_id=account_id,
+    )
 
 
 async def list_customer_documents(customer_id: str) -> list[DocumentRef]:
