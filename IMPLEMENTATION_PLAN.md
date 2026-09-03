@@ -216,9 +216,21 @@ constructed stale-tag case (a real approval, then `DELETE FROM customers`
 for just that one row) — `--report` correctly identified every case,
 `--fix` correctly resolved all of them, confirmed via the Mayan REST
 API and both indexes' document counts. Full unit suite (238 tests) and
-`lint-imports` both green. **This plan's own backlog is empty again** —
-cascade-on-delete remains a deliberately open question (`CLAUDE.md`'s
-Known Gaps), not a queued task.
+`lint-imports` both green.
+
+**Phase 16 (Document metadata assignment lifecycle) added after Phase
+15 closed** — a product design brainstormed and confirmed with the
+user, not part of the original build-out. `CLAUDE.md`'s new "Document
+metadata assignment lifecycle" section (written first, per this
+project's own convention) describes the four confirmed rules: uploads
+always get `application_id`; uploads from a resolved returning customer
+also get `customer_id` immediately; approval tags `account_id` +
+`customer_id` onto *every* document under the application (not just
+Government ID), including the generated Welcome Letter; rejected/
+cancelled/pending applications never get `account_id` (already true by
+construction). **This was a documentation-only session, per explicit
+user instruction — none of Phase 16's four tasks (P16-1 through P16-4)
+are implemented yet.** Start at P16-1.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2635,6 +2647,94 @@ its own open product question).
 
 ---
 
+## Phase 16 — Document metadata assignment lifecycle
+
+**Depends on:** Phase 14 (needs `bff_customer`'s wizard-draft
+`customer_id` resolution and `document/`'s Phase 14 metadata primitives)
+and Phase 15 (reconciliation already handles multi-id documents
+correctly with no changes needed — confirmed while designing this, not
+assumed). **Not part of the original build-out** — a product design
+brainstormed and confirmed with the user. `CLAUDE.md`'s new "Document
+metadata assignment lifecycle" section (written first, per this
+project's own convention) describes the four confirmed rules and the
+exact call sequence each task below implements.
+
+- [ ] **P16-1** — `document/service.py`: `upload(applicant_identifier,
+      application_id, category, file, customer_id=None)` — attaches
+      `customer_id` metadata alongside the existing three fields when
+      given, `None` behaves exactly as today (no fourth attach call).
+      `generate_welcome_letter(...)` — add `("customer_id", customer_id)`
+      to its existing metadata attach list (the parameter is already
+      part of its signature, just wasn't being attached as metadata).
+      DoD: `tests/unit/document/test_service.py` covers `upload(...,
+      customer_id="cust-1")` attaching all four fields, and
+      `upload(...)` with no `customer_id` still attaching only the
+      original three (backward-compatible default); `generate_welcome_letter`'s
+      existing test updated to assert `customer_id` is now present in
+      the stored metadata.
+- [ ] **P16-2** — `document/service.py` gains
+      `tag_application_documents(application_id, account_id, customer_id)
+      -> None` — finds every document under `application_id` (all
+      categories, via `_documents_matching({"application_id":
+      application_id})`) and attaches `account_id` + `customer_id` to
+      each, rebuilding the index once at the end (same "rebuild once,
+      not per-document" discipline every other multi-document operation
+      here follows). Deliberately separate from
+      `promote_government_id_to_customer_photo` — see `CLAUDE.md`'s
+      "Document metadata assignment lifecycle" for why both coexist
+      rather than one absorbing the other's job.
+      DoD: `tests/unit/document/test_service.py` covers: multiple
+      documents across multiple categories under one `application_id`
+      all receiving `account_id`+`customer_id`; a document under a
+      *different* `application_id` left untouched; the index rebuilt
+      exactly once regardless of how many documents were tagged.
+- [ ] **P16-3** — `application/activities.py`'s `persist_decision`
+      provisioning block gains one new call,
+      `document_service.tag_application_documents(application_id,
+      account.account_id, customer_id)`, alongside the existing
+      `promote_government_id_to_customer_photo`/`generate_welcome_letter`
+      calls (same `existing_account is None` idempotency guard already
+      covering the other two — see `CLAUDE.md`'s updated provisioning-
+      sequence bullet in "Applying without being a customer yet").
+      `bff_customer/routes.py`'s two upload routes pass `customer_id`
+      into `document.service.upload(...)`: `new_application_upload`
+      passes `draft.get("customer_id")` (already resolved and held in
+      the session draft since Phase 14's wizard prefill);
+      `upload_more_info_document` passes the owning application's own
+      already-resolved `customer_id` column (available from the
+      `_owned_application` call this route already makes).
+      DoD: `tests/unit/application/test_activities.py` covers
+      `persist_decision` calling `tag_application_documents` with the
+      correct `application_id`/`account_id`/`customer_id` on a terminal
+      APPROVED transition, and *not* calling it on any other outcome
+      (reject/escalation/cancel) or on a retry that finds the account
+      already provisioned. Route-level tests (wherever
+      `bff_customer/routes.py`'s upload routes are currently covered)
+      updated to assert `customer_id` is passed through correctly in
+      both the returning-customer case and the brand-new-applicant
+      (`None`) case.
+- [ ] **P16-4** — Live verification against the real stack: walk a real
+      browser through a returning customer's new application (an
+      identity that already resolves to an existing `customers` row from
+      an earlier approval) and confirm via the Mayan REST API that every
+      document uploaded during the wizard already carries `customer_id`
+      at upload time, before submission even happens. Approve the
+      application and confirm via the Mayan REST API that *every*
+      document under that `application_id` (not just the Government ID
+      one) now carries `account_id` + `customer_id`, and that the new
+      Welcome Letter document also carries `customer_id` alongside its
+      existing `account_id`. Separately, confirm a brand-new applicant's
+      documents carry no `customer_id` at upload time (nothing to
+      resolve yet), and gain it only after their application is
+      approved. Confirm a rejected application's documents never gain
+      `account_id` (the already-true-by-construction invariant, per
+      `CLAUDE.md`'s point 4 — verify, don't just assume). Full unit
+      suite and `lint-imports` both green. Update `CLAUDE.md`'s "Document
+      metadata assignment lifecycle" section with the live-verification
+      result. Commit, push, confirm CI green.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -2643,6 +2743,36 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-03** — Documentation-only session, no code changed, per
+  explicit user instruction ("not start implement in this session").
+  User walked through exactly four rules for when document metadata
+  should be assigned during onboarding -- application_id always at
+  upload; customer_id at upload too, when the applicant already
+  resolves to an existing customer; account_id + customer_id on *every*
+  application document (not just Government ID) once approved,
+  including the generated Welcome Letter; a rejected application never
+  gets account_id. Two of the four were already true (application_id at
+  upload, and rejected-never-gets-account_id is true by construction);
+  the other two are real gaps -- customer_id is currently only ever
+  attached to the one Government ID document at approval time, never at
+  upload time, and never to the other application documents or the
+  Welcome Letter at all. Confirmed the design maps cleanly onto the
+  existing provisioning sequence: the new
+  `document.service.tag_application_documents(application_id,
+  account_id, customer_id)` sits alongside (not instead of)
+  `promote_government_id_to_customer_photo`, whose own job -- stripping
+  a *different* application's stale id_photo tag -- is orthogonal, so
+  both coexist with a harmless redundant re-attach on the Government ID
+  document. Checked reconciliation compatibility before writing anything
+  (Phase 15 just landed) -- `reconcile.py`'s `scan()` already checks
+  `application_id`/`account_id`/`customer_id` independently via separate
+  `if`s, not `elif`, so a document carrying all three after approval
+  needs no changes there. `CLAUDE.md`'s new "Document metadata
+  assignment lifecycle" section and this file's new Phase 16 (P16-1
+  through P16-4, all unchecked) written to capture the confirmed design.
+  Next: P16-1 (`document/service.py`'s `upload`/`generate_welcome_letter`
+  signature changes).
 
 - **2026-09-03** — Phase 15 (Document/database reconciliation) complete,
   all four tasks (P15-1 through P15-4) done in one session. Not

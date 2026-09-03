@@ -310,19 +310,22 @@ the *outcome* of an approved loan, not something that pre-exists it.**
      to check; `accounts.application_id`'s own `UNIQUE` constraint does
      that job now, one step earlier and with nothing to get out of
      order).
-  3. Call `document.service.promote_government_id_to_customer_photo(application_id,
-     customer_id)` and `document.service.generate_welcome_letter(applicant_identifier,
-     account_id, customer_id, applicant_name, product_type, amount)` — see
-     `document/`'s module section for what each does. **A retry that
-     finds an account already provisioned (the check above) skips both
-     of these calls entirely, permanently** — a smaller,
-     manually-recoverable gap (a missing Welcome Letter) than a
-     duplicated account, and consistent with this project's existing
-     rare-enough-to-accept-for-a-POC stance elsewhere in this section.
-     (This is the same tradeoff an earlier draft of this file already
-     accepted; only the mechanism that makes the retry recognize
-     "already provisioned" has moved, from a column on `applications`
-     to the `accounts` row itself.)
+  3. Call `document.service.tag_application_documents(application_id,
+     account_id, customer_id)`,
+     `document.service.promote_government_id_to_customer_photo(application_id,
+     customer_id)`, and `document.service.generate_welcome_letter(applicant_identifier,
+     account_id, customer_id, applicant_name, product_type, amount)` —
+     see `document/`'s module section and "Document metadata assignment
+     lifecycle" below for what each does and why all three, not just
+     one. **A retry that finds an account already provisioned (the check
+     above) skips all three of these calls entirely, permanently** — a
+     smaller, manually-recoverable gap (some documents short a few
+     metadata fields, no Welcome Letter) than a duplicated account, and
+     consistent with this project's existing rare-enough-to-accept-for-
+     a-POC stance elsewhere in this section. (This is the same tradeoff
+     an earlier draft of this file already accepted; only the mechanism
+     that makes the retry recognize "already provisioned" has moved,
+     from a column on `applications` to the `accounts` row itself.)
   4. Write `status` and the underwriter/manager decision columns on
      `applications` — `customer_id` travels along in this same
      `UPDATE` (harmless if it's already set: `COALESCE` preserves it
@@ -929,17 +932,24 @@ The direct promotion of `mayan-edms-customer-archive`'s
 No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
 "Data storage") is the only persistence behind it.
 
-- `service.upload(applicant_identifier, application_id, category,
-  file)` — create-document → upload-file (`action_name=replace`) →
-  attach metadata (`applicant_identifier`, `application_id`, `category`)
-  → rebuild index. Same four-step sequence, and the same gotchas #1-4
-  below, as the reference project's upload path. **No `account_id` or
-  `customer_id` param** — the document hierarchy is two levels now
+- `service.upload(applicant_identifier, application_id, category, file,
+  customer_id=None)` — create-document → upload-file
+  (`action_name=replace`) → attach metadata (`applicant_identifier`,
+  `application_id`, `category`, and `customer_id` when given) → rebuild
+  index. Same four-step sequence, and the same gotchas #1-4 below, as
+  the reference project's upload path. **No `account_id` param** — the
+  document hierarchy's application branch is still two levels
   (`<applicant_identifier> -> <application_id> -> category`, see
-  "Document hierarchy" below): there's no `account_id` to organize
-  under at upload time (uploads happen before submission, before any
-  account can possibly exist — see "Applying without being a customer
-  yet") and `customer_id` may not exist yet either.
+  "Document hierarchy" below): there's no `account_id` to organize under
+  at upload time, uploads happen before submission, before any account
+  can possibly exist (see "Applying without being a customer yet").
+  **`customer_id` (see "Document metadata assignment lifecycle" below)**
+  is optional and caller-supplied, not resolved internally — same
+  "`document/` is a leaf module, never imports `application/`" reasoning
+  `applicant_identifier` already follows: the caller (`bff_customer`)
+  already knows it, when it's knowable at all (a returning applicant who
+  already resolves to an existing customer), and passes it straight
+  through; `None` for a brand-new applicant, same as today.
   `applicant_identifier` is required here, not resolved internally —
   `document/` is a leaf module and never imports `application/`, so the
   caller (`bff_customer`, which already has it from the session cookie)
@@ -970,6 +980,22 @@ No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
 categories above** — all system-triggered, none uploaded by a customer
 through the application flow:
 
+- **`service.tag_application_documents(application_id, account_id,
+  customer_id) -> None`** — **called only from
+  `application/activities.py`'s `persist_decision`**, the first of the
+  three approve-provisioning document calls (see "Document metadata
+  assignment lifecycle" below for the full design). Finds *every*
+  document under `application_id` (all categories — Government ID,
+  Proof of Income, Bank Statements, Credit Report, and whichever
+  product-specific ones apply) and attaches `account_id` + `customer_id`
+  to each, rebuilding the index once at the end. Deliberately separate
+  from `promote_government_id_to_customer_photo` below, whose own job
+  (re-tagging one specific document, possibly stripping a tag from a
+  *different* application's document) is orthogonal — this function
+  never looks outside `application_id`'s own documents, and re-attaching
+  `customer_id` to the Government ID document a second time (once here,
+  once via `promote_government_id_to_customer_photo`) is a harmless
+  idempotent no-op, not a conflict.
 - `service.promote_government_id_to_customer_photo(application_id,
   customer_id) -> None` — **called only from
   `application/activities.py`'s `persist_decision`**, as one more step
@@ -1009,9 +1035,13 @@ through the application flow:
   provisioning block. Renders a simple templated PDF (no live data
   beyond the plain arguments passed in — `document/` doesn't import
   `application/`, `customer/`, or `account/` to go get anything itself)
-  and uploads it tagged to the new `account_id`. System-generated, no
-  human in the loop, exactly one per account. **`applicant_identifier`
-  was added to this signature after a real bug, found live**: the
+  and uploads it tagged to the new `account_id` (**and `customer_id`,
+  see "Document metadata assignment lifecycle" below** — every other
+  document tied to this account/application carries `customer_id` too;
+  leaving the Welcome Letter as the one exception would have been
+  inconsistent). System-generated, no human in the loop, exactly one per
+  account. **`applicant_identifier` was added to this signature after a
+  real bug, found live**: the
   account branch (`<applicant_identifier> -> <account_id> -> category`,
   "Document hierarchy" below) is nested under the applicant node, whose
   own index expression evaluates `applicant_identifier` metadata — an
@@ -1233,6 +1263,63 @@ about index-template mechanics, not the specific number of levels):
 `DELETE /api/v4/documents/{id}/` moves to Mayan's trash, not a hard
 delete — confirmed via the endpoint's own OPTIONS description in the
 reference project.
+
+## Document metadata assignment lifecycle
+
+**Four rules, confirmed with the user, that together describe exactly
+which of `applicant_identifier`/`application_id`/`account_id`/
+`customer_id` a document carries at every point in its life** — the
+"Document hierarchy" section above describes the resulting tree shape;
+this section describes *when* each metadata field actually gets
+attached to make that shape happen.
+
+1. **At upload time, `application_id` (and `applicant_identifier`,
+   `category`) are always attached** — true since Phase 6, unchanged
+   here. `document.service.upload(...)`'s first three metadata fields
+   are never optional.
+2. **At upload time, `customer_id` is attached too, but only when the
+   applicant already resolves to an existing customer.** A returning
+   applicant's `bff_customer` wizard already resolves `customer_id` via
+   the read-only `customer.service.find_by_identifier(...)` lookup
+   (Phase 14's prefill step) and holds it in the session draft —
+   `new_application_upload` now passes it straight into
+   `document.service.upload(...)`'s new `customer_id` parameter. The
+   resubmit path (`upload_more_info_document`) passes the application
+   row's own already-resolved `customer_id` column the same way. A
+   brand-new applicant has no `customer_id` to pass — `None`, same as
+   every upload before this existed — so their documents stay
+   `customer_id`-less until approval, same as today.
+3. **On approval, every document under the application — not just the
+   Government ID one — gets `account_id` and `customer_id` attached.**
+   `document.service.tag_application_documents(application_id,
+   account_id, customer_id)` (new — see the `document/` module section
+   above) does this in one pass across every category. This runs
+   alongside, not instead of, `promote_government_id_to_customer_photo`
+   (which additionally strips a *different* application's stale
+   `id_photo` tag — a job `tag_application_documents` doesn't do) and
+   `generate_welcome_letter` (whose own new document now gets
+   `customer_id` too, for the same consistency reason). All three calls
+   sit inside `persist_decision`'s existing `account_id IS NOT NULL`
+   idempotency guard — a Temporal retry that finds the account already
+   provisioned skips all three, permanently, same accepted
+   smaller-than-a-duplicated-account gap this file already documents for
+   the other two.
+4. **A rejected, cancelled, or still-pending application's documents
+   never get `account_id` — this was already true by construction, not
+   new behavior.** `account_id` is only ever attached inside the
+   terminal-`APPROVED` branch of `persist_decision`'s provisioning
+   block; no other decision outcome creates an account or calls
+   `document/` for account-tagging at all. Stated explicitly here
+   because it was asked about directly, not because anything had to
+   change to make it true.
+
+**Deliberately out of scope**: no backfill of documents belonging to
+applications approved *before* this lifecycle existed — same "forward-
+looking only" scope boundary Phase 14 already accepted for not
+backfilling existing customer profiles. An application approved before
+this shipped keeps whatever metadata its documents already had; only
+approvals from this point forward get the full `account_id`/
+`customer_id` tagging on every document.
 
 ## Identity
 
