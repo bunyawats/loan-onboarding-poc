@@ -84,8 +84,7 @@ for entry in \
   "application_id:Application ID" \
   "account_id:Account ID" \
   "customer_id:Customer ID" \
-  "category:Category" \
-  "creation_date:Creation date"
+  "category:Category"
 do
   name="${entry%%:*}"
   label="${entry#*:}"
@@ -120,14 +119,14 @@ attach_metadata() {
 }
 
 log "Attaching metadata to document types"
-for m in applicant_identifier application_id category creation_date; do
+for m in applicant_identifier application_id category; do
   attach_metadata "${DOCUMENT_TYPE_ID['Application Document']}" "$m" "true"
 done
 # customer_id is attached later, per-document, only on promotion -- not
 # required at upload time (most Application Documents never get it).
 attach_metadata "${DOCUMENT_TYPE_ID['Application Document']}" "customer_id" "false"
 
-for m in applicant_identifier account_id category creation_date; do
+for m in applicant_identifier account_id category; do
   attach_metadata "${DOCUMENT_TYPE_ID['Account Document']}" "$m" "true"
 done
 
@@ -213,3 +212,44 @@ log "Rebuilding index"
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 
 log "Done. Index template id=$INDEX_ID, slug=loan-onboarding-archive"
+
+# ---------------------------------------------------------------------------
+# 4. Second index template: "Creation date" -- groups documents by year then
+#    month using Mayan's own native `document.datetime_created` field (no
+#    custom metadata field involved -- a separate custom `creation_date`
+#    metadata field was tried first and deliberately removed in favor of
+#    this, since Mayan's built-in timestamp already covers it). Found
+#    broken when first hand-built directly against a live instance: it was
+#    attached only to Mayan's default "Default" document type, which none
+#    of this project's real documents use (they're always "Application
+#    Document" or "Account Document") -- so every rebuild silently
+#    produced zero results no matter how many times it was run. Attaching
+#    the two real document types here from the start is what actually
+#    fixed it.
+# ---------------------------------------------------------------------------
+log "Creating index template 'Creation date'"
+CREATION_DATE_INDEX_RESPONSE=$(api POST "/index_templates/" '{"label":"Creation date","slug":"creation_date","enabled":true}')
+INDEX_ID=$(echo "$CREATION_DATE_INDEX_RESPONSE" | json_get "['id']")
+CREATION_DATE_ROOT_NODE_ID=$(echo "$CREATION_DATE_INDEX_RESPONSE" | json_get "['index_template_root_node_id']")
+log "  index id=$INDEX_ID root_node_id=$CREATION_DATE_ROOT_NODE_ID"
+
+log "Attaching document types to the Creation date index"
+for label in "Application Document" "Account Document"; do
+  api POST "/index_templates/$INDEX_ID/document_types/add/" \
+    "{\"document_type\":${DOCUMENT_TYPE_ID[$label]}}" > /dev/null
+done
+
+NODE_YEAR=$(post_node "$CREATION_DATE_ROOT_NODE_ID" \
+  '{{ document.datetime_created|date:"Y" }}' \
+  "false")
+log "  year node -> id=$NODE_YEAR"
+
+NODE_MONTH=$(post_node "$NODE_YEAR" \
+  '{{ document.datetime_created|date:"m" }}' \
+  "true")
+log "  month node (leaf) -> id=$NODE_MONTH"
+
+log "Rebuilding Creation date index"
+api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
+
+log "Done. Index template id=$INDEX_ID, slug=creation_date"

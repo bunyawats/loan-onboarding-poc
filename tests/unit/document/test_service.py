@@ -1,5 +1,3 @@
-import re
-
 import pytest
 
 from loan_onboarding.document import service
@@ -15,16 +13,13 @@ def fake_client(monkeypatch):
     return fake
 
 
-async def test_upload_attaches_all_metadata_fields_and_rebuilds(fake_client):
+async def test_upload_attaches_all_three_metadata_fields_and_rebuilds(fake_client):
     ref = await service.upload(
         "alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"content")
     )
 
     assert ref.document_id in fake_client.documents
     stored = fake_client.documents[ref.document_id]
-    creation_date = stored.metadata.pop("creation_date")
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", creation_date)
-    assert ref.creation_date == creation_date
     assert stored.metadata == {
         "applicant_identifier": "alice@example.com",
         "application_id": "app-1",

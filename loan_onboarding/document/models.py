@@ -27,7 +27,6 @@ class DocumentRef:
     application_id: str | None = None
     account_id: str | None = None
     customer_id: str | None = None
-    creation_date: str | None = None
 
     @staticmethod
     def from_mayan(document: dict, metadata: dict[str, str]) -> "DocumentRef":
@@ -39,7 +38,6 @@ class DocumentRef:
             application_id=metadata.get("application_id"),
             account_id=metadata.get("account_id"),
             customer_id=metadata.get("customer_id"),
-            creation_date=metadata.get("creation_date"),
         )
 
 
