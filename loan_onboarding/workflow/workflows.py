@@ -309,7 +309,7 @@ class LoanApplicationWorkflow:
 
     @workflow.signal
     async def resubmit(self, payload: dict[str, Any]) -> None:
-        if self._finalized or self._status != "MORE_INFO_REQUESTED":
+        if self._finalized or self._status != STATUS_MORE_INFO_REQUESTED:
             return  # not awaiting a resubmission -- ignore
         if not self._claim_transition():
             return
@@ -321,7 +321,7 @@ class LoanApplicationWorkflow:
             retry_policy=DEFAULT_RETRY_POLICY,
         )
         self._payload = payload
-        self._status = "PENDING_UNDERWRITING"
+        self._status = STATUS_PENDING_UNDERWRITING
         self._busy = False
 
     @workflow.query

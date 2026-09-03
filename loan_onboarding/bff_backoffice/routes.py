@@ -27,6 +27,7 @@ decisions/permissions apply, not in structure.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Optional
 
@@ -131,15 +132,21 @@ _RETARGET_DIALOG_HEADERS = {
 }
 
 _temporal_client: Optional[Client] = None
+_temporal_client_lock = asyncio.Lock()
 
 
 async def _get_temporal_client() -> Client:
+    # Locked, same as application/service.py's own lazy-singleton client --
+    # without it, two concurrent first requests can each observe
+    # _temporal_client as None and open a second, orphaned connection.
     global _temporal_client
     if _temporal_client is None:
-        _temporal_client = await Client.connect(
-            os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
-            namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
-        )
+        async with _temporal_client_lock:
+            if _temporal_client is None:
+                _temporal_client = await Client.connect(
+                    os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+                    namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
+                )
     return _temporal_client
 
 
@@ -303,13 +310,13 @@ async def _staff_page(request: Request, user: dict[str, Any], role: str) -> HTML
 
 
 @router.get("/underwriter", response_class=HTMLResponse)
-async def underwriter_page(request: Request, user: dict = Depends(_role_dependency("underwriter"))):
-    return await _staff_page(request, user, "underwriter")
+async def underwriter_page(request: Request, user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))):
+    return await _staff_page(request, user, ROLE_UNDERWRITER)
 
 
 @router.get("/manager", response_class=HTMLResponse)
-async def manager_page(request: Request, user: dict = Depends(_role_dependency("manager"))):
-    return await _staff_page(request, user, "manager")
+async def manager_page(request: Request, user: dict = Depends(_role_dependency(ROLE_MANAGER))):
+    return await _staff_page(request, user, ROLE_MANAGER)
 
 
 async def _staff_list(request: Request, user: dict[str, Any], role: str, page: int, query_id: str) -> HTMLResponse:
@@ -330,16 +337,16 @@ async def _staff_list(request: Request, user: dict[str, Any], role: str, page: i
 
 @router.post("/underwriter/list", response_class=HTMLResponse)
 async def underwriter_list(
-    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency("underwriter"))
+    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))
 ):
-    return await _staff_list(request, user, "underwriter", page, query_id)
+    return await _staff_list(request, user, ROLE_UNDERWRITER, page, query_id)
 
 
 @router.post("/manager/list", response_class=HTMLResponse)
 async def manager_list(
-    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency("manager"))
+    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency(ROLE_MANAGER))
 ):
-    return await _staff_list(request, user, "manager", page, query_id)
+    return await _staff_list(request, user, ROLE_MANAGER, page, query_id)
 
 
 async def _staff_rows(request: Request, user: dict[str, Any], role: str, page: int, query_id: str) -> HTMLResponse:
@@ -353,16 +360,16 @@ async def _staff_rows(request: Request, user: dict[str, Any], role: str, page: i
 
 @router.post("/underwriter/rows", response_class=HTMLResponse)
 async def underwriter_rows(
-    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency("underwriter"))
+    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))
 ):
-    return await _staff_rows(request, user, "underwriter", page, query_id)
+    return await _staff_rows(request, user, ROLE_UNDERWRITER, page, query_id)
 
 
 @router.post("/manager/rows", response_class=HTMLResponse)
 async def manager_rows(
-    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency("manager"))
+    request: Request, page: int = Form(1), query_id: str = Form(""), user: dict = Depends(_role_dependency(ROLE_MANAGER))
 ):
-    return await _staff_rows(request, user, "manager", page, query_id)
+    return await _staff_rows(request, user, ROLE_MANAGER, page, query_id)
 
 
 async def _staff_bulk_select(
@@ -395,9 +402,9 @@ async def underwriter_bulk_select(
     checked: bool = Form(...),
     page: int = Form(1),
     query_id: str = Form(""),
-    user: dict = Depends(_role_dependency("underwriter")),
+    user: dict = Depends(_role_dependency(ROLE_UNDERWRITER)),
 ):
-    return await _staff_bulk_select(request, user, "underwriter", application_ids, checked, page, query_id)
+    return await _staff_bulk_select(request, user, ROLE_UNDERWRITER, application_ids, checked, page, query_id)
 
 
 @router.post("/manager/bulk-select", response_class=HTMLResponse)
@@ -407,9 +414,9 @@ async def manager_bulk_select(
     checked: bool = Form(...),
     page: int = Form(1),
     query_id: str = Form(""),
-    user: dict = Depends(_role_dependency("manager")),
+    user: dict = Depends(_role_dependency(ROLE_MANAGER)),
 ):
-    return await _staff_bulk_select(request, user, "manager", application_ids, checked, page, query_id)
+    return await _staff_bulk_select(request, user, ROLE_MANAGER, application_ids, checked, page, query_id)
 
 
 # --------------------------------------------------------- detail dialog ----
@@ -424,14 +431,14 @@ async def _staff_detail(request: Request, application_id: str, role: str, user: 
 
 @router.get("/underwriter/{application_id}/detail", response_class=HTMLResponse)
 async def underwriter_detail(
-    request: Request, application_id: str, user: dict = Depends(_role_dependency("underwriter"))
+    request: Request, application_id: str, user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))
 ):
-    return await _staff_detail(request, application_id, "underwriter", user)
+    return await _staff_detail(request, application_id, ROLE_UNDERWRITER, user)
 
 
 @router.get("/manager/{application_id}/detail", response_class=HTMLResponse)
-async def manager_detail(request: Request, application_id: str, user: dict = Depends(_role_dependency("manager"))):
-    return await _staff_detail(request, application_id, "manager", user)
+async def manager_detail(request: Request, application_id: str, user: dict = Depends(_role_dependency(ROLE_MANAGER))):
+    return await _staff_detail(request, application_id, ROLE_MANAGER, user)
 
 
 async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
@@ -456,14 +463,14 @@ async def _document_preview(application_id: str, document_id: int) -> StreamingR
 
 @router.get("/underwriter/{application_id}/documents/{document_id}/preview")
 async def underwriter_document_preview(
-    application_id: str, document_id: int, user: dict = Depends(_role_dependency("underwriter"))
+    application_id: str, document_id: int, user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))
 ):
     return await _document_preview(application_id, document_id)
 
 
 @router.get("/manager/{application_id}/documents/{document_id}/preview")
 async def manager_document_preview(
-    application_id: str, document_id: int, user: dict = Depends(_role_dependency("manager"))
+    application_id: str, document_id: int, user: dict = Depends(_role_dependency(ROLE_MANAGER))
 ):
     return await _document_preview(application_id, document_id)
 
@@ -506,7 +513,7 @@ async def underwriter_decision(
     comment: str = Form(""),
     user: dict = Depends(_session_user_dependency),
 ):
-    return await _staff_decision(request, application_id, "underwriter", decision, comment, user)
+    return await _staff_decision(request, application_id, ROLE_UNDERWRITER, decision, comment, user)
 
 
 @router.post("/manager/{application_id}/decision", response_class=HTMLResponse)
@@ -517,7 +524,7 @@ async def manager_decision(
     comment: str = Form(""),
     user: dict = Depends(_session_user_dependency),
 ):
-    return await _staff_decision(request, application_id, "manager", decision, comment, user)
+    return await _staff_decision(request, application_id, ROLE_MANAGER, decision, comment, user)
 
 
 # -------------------------------------------------------------- bulk decision ----
@@ -558,9 +565,9 @@ async def underwriter_bulk_decision_form(
     decision: str = Form(...),
     page: int = Form(1),
     query_id: str = Form(""),
-    user: dict = Depends(_role_dependency("underwriter")),
+    user: dict = Depends(_role_dependency(ROLE_UNDERWRITER)),
 ):
-    return await _bulk_decision_form(request, "underwriter", decision, page, query_id, user)
+    return await _bulk_decision_form(request, ROLE_UNDERWRITER, decision, page, query_id, user)
 
 
 @router.post("/manager/bulk-decision-form", response_class=HTMLResponse)
@@ -569,9 +576,9 @@ async def manager_bulk_decision_form(
     decision: str = Form(...),
     page: int = Form(1),
     query_id: str = Form(""),
-    user: dict = Depends(_role_dependency("manager")),
+    user: dict = Depends(_role_dependency(ROLE_MANAGER)),
 ):
-    return await _bulk_decision_form(request, "manager", decision, page, query_id, user)
+    return await _bulk_decision_form(request, ROLE_MANAGER, decision, page, query_id, user)
 
 
 async def _bulk_decision_execute(
@@ -671,9 +678,9 @@ async def underwriter_bulk_decision(
     comment: str = Form(""),
     page: int = Form(1),
     query_id: str = Form(""),
-    user: dict = Depends(_role_dependency("underwriter")),
+    user: dict = Depends(_role_dependency(ROLE_UNDERWRITER)),
 ):
-    return await _bulk_decision_execute(request, "underwriter", decision, comment, page, query_id, user)
+    return await _bulk_decision_execute(request, ROLE_UNDERWRITER, decision, comment, page, query_id, user)
 
 
 @router.post("/manager/bulk-decision", response_class=HTMLResponse)
@@ -683,6 +690,6 @@ async def manager_bulk_decision(
     comment: str = Form(""),
     page: int = Form(1),
     query_id: str = Form(""),
-    user: dict = Depends(_role_dependency("manager")),
+    user: dict = Depends(_role_dependency(ROLE_MANAGER)),
 ):
-    return await _bulk_decision_execute(request, "manager", decision, comment, page, query_id, user)
+    return await _bulk_decision_execute(request, ROLE_MANAGER, decision, comment, page, query_id, user)
