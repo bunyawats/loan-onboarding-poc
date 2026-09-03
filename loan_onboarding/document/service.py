@@ -20,6 +20,7 @@ if that assumption stops holding.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -68,6 +69,15 @@ _MAX_SEARCH_CANDIDATES = 1000
 
 class DocumentNotFound(Exception):
     pass
+
+
+def _today() -> str:
+    """UTC calendar date, ISO 8601 (`YYYY-MM-DD`) -- attached as the
+    `creation_date` metadata field at document-creation time only (never
+    updated on a later file version, e.g. `upload_consent`'s replace
+    path), so it always reflects when the Mayan document itself was
+    first created, not when its content last changed."""
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 async def _fetch_all_documents(cap: int = _MAX_SEARCH_CANDIDATES) -> list[dict[str, Any]]:
@@ -134,10 +144,12 @@ async def upload(applicant_identifier: str, application_id: str, category: str, 
     # Sequential, not concurrent: each attach call re-triggers async
     # index evaluation server-side (gotcha #2) -- firing them
     # concurrently would make the race worse, not better.
+    creation_date = _today()
     for field, value in [
         ("applicant_identifier", applicant_identifier),
         ("application_id", application_id),
         ("category", category),
+        ("creation_date", creation_date),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
@@ -149,6 +161,7 @@ async def upload(applicant_identifier: str, application_id: str, category: str, 
         category=category,
         applicant_identifier=applicant_identifier,
         application_id=application_id,
+        creation_date=creation_date,
     )
 
 
@@ -226,15 +239,23 @@ async def generate_welcome_letter(
 
     await mayan_client.upload_file(document_id, filename, content, action_name="replace")
 
+    creation_date = _today()
     for field, value in [
         ("account_id", account_id),
         ("category", "Welcome Letter"),
+        ("creation_date", creation_date),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
     await mayan_client.rebuild_index()
 
-    return DocumentRef(document_id=document_id, filename=filename, category="Welcome Letter", account_id=account_id)
+    return DocumentRef(
+        document_id=document_id,
+        filename=filename,
+        category="Welcome Letter",
+        account_id=account_id,
+        creation_date=creation_date,
+    )
 
 
 def _render_welcome_letter_pdf(applicant_name: str, product_type: str, amount: str) -> bytes:
@@ -308,15 +329,23 @@ async def upload_consent(account_id: str, file: UploadedFile) -> DocumentRef:
 
     await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
 
+    creation_date = _today()
     for field, value in [
         ("account_id", account_id),
         ("category", "Consent"),
+        ("creation_date", creation_date),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
     await mayan_client.rebuild_index()
 
-    return DocumentRef(document_id=document_id, filename=file.filename, category="Consent", account_id=account_id)
+    return DocumentRef(
+        document_id=document_id,
+        filename=file.filename,
+        category="Consent",
+        account_id=account_id,
+        creation_date=creation_date,
+    )
 
 
 async def list_customer_documents(customer_id: str) -> list[DocumentRef]:

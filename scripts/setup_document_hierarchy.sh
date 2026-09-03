@@ -84,7 +84,8 @@ for entry in \
   "application_id:Application ID" \
   "account_id:Account ID" \
   "customer_id:Customer ID" \
-  "category:Category"
+  "category:Category" \
+  "creation_date:Creation date"
 do
   name="${entry%%:*}"
   label="${entry#*:}"
@@ -119,14 +120,14 @@ attach_metadata() {
 }
 
 log "Attaching metadata to document types"
-for m in applicant_identifier application_id category; do
+for m in applicant_identifier application_id category creation_date; do
   attach_metadata "${DOCUMENT_TYPE_ID['Application Document']}" "$m" "true"
 done
 # customer_id is attached later, per-document, only on promotion -- not
 # required at upload time (most Application Documents never get it).
 attach_metadata "${DOCUMENT_TYPE_ID['Application Document']}" "customer_id" "false"
 
-for m in applicant_identifier account_id category; do
+for m in applicant_identifier account_id category creation_date; do
   attach_metadata "${DOCUMENT_TYPE_ID['Account Document']}" "$m" "true"
 done
 

@@ -31,6 +31,7 @@ class FakeMayanClient:
             "account_id": 3,
             "customer_id": 4,
             "category": 5,
+            "creation_date": 6,
         }
         self._metadata_id_to_name = {v: k for k, v in self._metadata_type_ids.items()}
 
