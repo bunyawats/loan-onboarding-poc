@@ -232,12 +232,23 @@ categories above — none of them customer-uploaded through the
 application flow, all of them consequences of an application reaching
 terminal `APPROVED` (§6.2, §9.2):
 
-- **`id_photo`** (customer, exactly one) — when a customer record is
-  created or matched at approval, the just-approved application's
-  "Government ID" document is re-tagged as this customer's `id_photo`
-  rather than asking them to upload it again. A returning customer
-  applying for a second loan doesn't get a second `id_photo` — the
-  first one stands.
+- **`id_photo`** (customer, exactly one at a time) — when a customer
+  record is created or matched at approval, the just-approved
+  application's "Government ID" document is re-tagged as this
+  customer's `id_photo` rather than asking them to upload it again.
+  **Refreshed by a later approved application's own fresh upload, not
+  frozen after the first one — corrected from an earlier draft of this
+  PRD**, which said "the first one stands." A returning customer can
+  choose to reuse the ID already on file (§8.1) — no new upload, the
+  existing `id_photo` is untouched — or upload a new one, which then
+  supersedes it once that application is approved. See `CLAUDE.md`'s
+  "Returning-customer profile refresh and ID reuse" for the mechanism
+  (planned, not built yet as of this revision) and for why this was
+  found to be a real, previously-unenforced gap rather than a
+  deliberate choice: nothing in the code has ever actually stopped a
+  second `id_photo` from being tagged, "the first one stands" was
+  simply never exercised until this feature made a second
+  fresh-upload approval for an existing customer reachable.
 - **`welcome_letter`** (account, exactly one) — generated automatically
   when the account is created at approval, no human involved. A simple
   templated document (applicant name, product type, amount, decision
@@ -357,7 +368,15 @@ the concrete Resource/Scope/Policy layout and Docker Compose wiring.
   common + product-specific fields → upload required documents (camera
   capture for ID, file picker for statements/reports) → review & submit.
   Blocked (with a specific, actionable message) until required documents
-  are present.
+  are present. **Planned (Phase 14, not built yet)**: for a returning
+  customer (identified by `applicant_identifier` already matching a
+  `customers` row), the common fields (name/email/phone) are prefilled
+  from their current profile, still editable — a correction made here
+  updates that profile once this application is approved (§9.1). If
+  they already have a Government ID on file, the document step shows
+  that instead of forcing a fresh upload, with an explicit "Upload a
+  new one instead" option — reuse is always the customer's choice, not
+  an automatic skip.
 - **Application detail / status** — current status, a simple timeline
   (submitted → under review → [escalated] → decision), the ability to
   add documents/edit fields and resubmit when in `MORE_INFO_REQUESTED`,
@@ -435,6 +454,19 @@ started an application — it's created (or matched, if one already
 exists for that identifier) **only when an application under that
 identifier is approved**. An applicant can submit and even complete
 several applications with no `customers` row existing for them at all.
+
+**`name`/`email`/`phone` are seeded and kept current from approved
+applications, not left permanently blank — planned (Phase 14, not built
+yet).** The row created on first approval is seeded from that
+application's own submitted name/email/phone (today's actual behavior
+leaves them `NULL` forever — a real gap, not a deliberate one, found
+while designing this). Every *later* approved application under the
+same identifier unconditionally overwrites them with its own submitted
+values — the most recently approved application always wins, on the
+reasoning that `customer/` is this project's source of truth for the
+*current* profile (§9's own framing) and an approved application is
+exactly the trust signal that makes "current" worth updating. See
+`CLAUDE.md`'s "Returning-customer profile refresh and ID reuse."
 
 ### 9.2 Account (owned by the Account module)
 
@@ -525,6 +557,15 @@ because `account_id` doesn't exist yet at document-upload time. See
 
 ## 11. Open questions (for the implementer / reviewer to resolve early)
 
+- **Should ID reuse (§6.5, §8.1) extend to resubmit, not just new
+  applications?** Deliberately deferred in Phase 14 — a customer
+  resubmitting from `MORE_INFO_REQUESTED` who never uploaded a
+  Government ID for *this specific* application still has to upload
+  one, even as a known returning customer with one already on file.
+  Current assumption: acceptable for a POC, since resubmit is a
+  narrower, already-in-progress flow, not a fresh application; revisit
+  if resubmit turns out to hit this often enough to be worth the extra
+  plumbing.
 - **Which surface triggers a `consent` upload (§6.5)?** Not designed
   yet — could be a post-approval customer screen, a back-office action,
   or both. `document.service.upload_consent(account_id, file)` doesn't

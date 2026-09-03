@@ -170,6 +170,15 @@ the Known Gaps in `CLAUDE.md` (the race-window variant of this same
 area is still open, deliberately — see that bullet), same as after
 Phase 12.
 
+**Phase 14 (Returning-customer profile refresh & ID reuse) added after
+Phase 13 closed** — a product enhancement brainstormed and confirmed
+with the user, not part of the original build-out. `CLAUDE.md` and
+`PRD.md` have been updated to describe the target design (see
+`CLAUDE.md`'s "Returning-customer profile refresh and ID reuse" and
+`PRD.md` §6.5/§8.1/§9.1/§11); **none of Phase 14's five tasks
+(P14-1 through P14-5) are implemented yet** — this was a documentation-only
+session. Start at P14-1.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 
@@ -2191,6 +2200,162 @@ gaps in this file are deliberately left unaddressed.
       task-id-prefixed-commit-message and `gh run watch` convention
       every prior phase in this file has used.
 
+## Phase 14 — Returning-customer profile refresh & ID reuse
+
+**Depends on:** everything above (all 13 prior phases). **Not part of
+the original build-out** — a product enhancement brainstormed and
+confirmed with the user after Phase 13 closed. `CLAUDE.md` and `PRD.md`
+were updated *before* this phase's own tasks below, per this project's
+own convention — see `CLAUDE.md`'s "Returning-customer profile refresh
+and ID reuse" and `PRD.md` §6.5/§8.1/§9.1/§11 for the target design
+each task below implements.
+
+Two related-but-independent things, both scoped to *approval* and
+*new-application submission* only (resubmit is explicitly out of scope
+— see `PRD.md` §11):
+1. `customers.name`/`email`/`phone` are currently write-once-never-filled
+   — a real gap found while designing this, not something being
+   introduced by it. Every approved application now seeds or refreshes
+   the customer's profile.
+2. A returning customer's new-application form is prefilled from their
+   existing profile, and they get the option — not an automatic,
+   silent skip — to reuse the Government ID already on file instead of
+   uploading a new one.
+
+**A real technical constraint discovered while designing this, worth
+restating so no session re-derives it the hard way**: Mayan holds
+exactly one value per (document, metadata_type) — `attach_metadata`
+creates an entry, a second call for the *same* metadata_type on the
+*same* document does not create a second value. This is why reuse
+cannot be "re-tag the old `id_photo` document into the new
+application" (that would silently unfile it from its *original*
+application's own index branch) — it has to work by excluding
+Government ID from the new application's own completeness check
+instead. See `CLAUDE.md`'s design section for the full reasoning.
+
+- [ ] **P14-1** — `customer/`: `db.py`'s `get_or_create` gains `name`,
+      `email`, `phone` parameters, inserted alongside `applicant_identifier`
+      (the existing `ON CONFLICT (applicant_identifier) DO NOTHING` path
+      is unchanged — an existing row is never touched by this function,
+      only a brand-new one gets seeded). New `db.py`'s `update_profile(customer_id,
+      name, email, phone) -> asyncpg.Record` — a plain `UPDATE ... SET
+      name = $2, email = $3, phone = $4 WHERE customer_id = $1 RETURNING
+      *`, unconditional overwrite, no fill-blanks-only branching.
+      `service.py`'s `get_or_create` and new `update_profile` wrap these
+      one-to-one, same shape as every other `customer/service.py`
+      function.
+      DoD: `tests/unit/customer/test_service.py` updated/extended
+      against a real Postgres (this module's own established "real DB,
+      not mocked" testing exception, per `CLAUDE.md`'s Testing section)
+      — covers seeding on first create, that a second `get_or_create`
+      call for the same identifier does *not* change an existing row's
+      profile fields, and that `update_profile` overwrites unconditionally
+      (including overwriting non-`NULL` values, not just filling blanks).
+- [ ] **P14-2** — `document/`: `mayan_client.py` gains
+      `delete_metadata_entry(document_id, metadata_entry_id) -> None`
+      (a plain wrapper over the already-generic `self.delete(...)` —
+      mirrors `attach_metadata`/`update_metadata_entry`'s existing
+      shape). `service.py`:
+      - New **read-only** `has_id_photo(customer_id) -> bool`, a thin
+        wrapper over the existing `list_customer_documents(customer_id)`.
+      - `check_completeness` gains `exclude_categories: list[str] |
+        None = None`; `required = [c for c in
+        REQUIRED_CATEGORIES[product_type] if c not in
+        (exclude_categories or [])]`.
+      - `promote_government_id_to_customer_photo` rewritten: if no
+        Government ID document exists under `application_id`, return
+        early (a no-op) instead of `raise`ing `DocumentNotFound` (its
+        current behavior — safe to change since every existing caller
+        already only calls this from the one `persist_decision`
+        provisioning block, per P14-3 below). If one does exist, first
+        find any *other* document currently carrying this `customer_id`
+        metadata (`_documents_matching({"customer_id": customer_id})`,
+        excluding the one about to be tagged) and clear its `customer_id`
+        metadata entry via the new `delete_metadata_entry`, *then* tag
+        the new one — same rebuild-index-once-at-the-end shape the
+        function already has.
+      DoD: `tests/unit/document/test_service.py` (mocking
+      `FakeMayanClient`, same convention as every other test in this
+      file) covers: `has_id_photo` true/false: `check_completeness`
+      with `exclude_categories` actually excluding a category from the
+      missing-list; `promote_government_id_to_customer_photo`'s
+      no-op-when-absent path; and its supersede-and-untag-the-old-one
+      path (assert the *old* document's metadata no longer has
+      `customer_id` set, and the new one does — not just that the new
+      one is tagged). `FakeMayanClient` (`tests/unit/document/fake_mayan_client.py`)
+      needs a `delete_metadata_entry` method added to support this.
+- [ ] **P14-3** — `application/`: `service.py`'s `create_application`
+      gains `reuse_existing_id_photo: bool = False`. When `True` *and*
+      the resolved `customer_id` (via the existing `find_by_identifier`
+      call this function already makes) is not `None` *and*
+      `document_service.has_id_photo(customer_id)` is `True`, calls
+      `check_completeness(application_id, product_type,
+      exclude_categories=[document_service.CATEGORY_GOVERNMENT_ID])`
+      instead of the bare call — otherwise behaves exactly as today.
+      `activities.py`'s `persist_decision` provisioning block: replace
+      the current unconditional `customer_service.get_or_create(record["applicant_identifier"])`
+      (used only when `record["customer_id"] is None`) with the new
+      four-arg form, passing `record["applicant_name"]`/
+      `applicant_email`/`applicant_phone`; add an `else` branch calling
+      `customer_service.update_profile(record["customer_id"],
+      record["applicant_name"], record["applicant_email"],
+      record["applicant_phone"])` when `record["customer_id"]` is
+      already set. `promote_government_id_to_customer_photo`'s call
+      site is unchanged (still called unconditionally on every terminal
+      `APPROVED` transition) — P14-2's no-op/supersede rewrite is what
+      makes that safe now.
+      DoD: `tests/unit/application/test_service.py` covers
+      `create_application` passing `exclude_categories` through only
+      when all three conditions hold (not e.g. for a brand-new
+      applicant with no `customer_id` at all — must fall through to the
+      bare `check_completeness` call, never mistakenly exclude
+      Government ID for someone with no `id_photo` to reuse).
+      `tests/unit/application/test_activities.py` covers `persist_decision`
+      calling `get_or_create` (new signature) for a first-time customer
+      and `update_profile` for a returning one, plus that an existing
+      customer's profile fields actually change when they differ from
+      what's already stored (proving overwrite, not a no-op accidentally
+      passing because the values already matched in the test fixture).
+- [ ] **P14-4** — `bff_customer/`: the new-application wizard's start
+      step calls `customer.service.find_by_identifier(applicant_identifier)`
+      (already imported for "welcome back" copy) and prefills
+      `applicant_name`/`applicant_email`/`applicant_phone` (still
+      editable) when it resolves. When it resolves *and*
+      `document.service.has_id_photo(customer.customer_id)` is `True`,
+      the document-upload step shows a "We already have a Government ID
+      on file for you" choice — reuse selected by default, an explicit
+      "Upload a new one instead" control to override — and the final
+      submit passes `reuse_existing_id_photo` accordingly into
+      `application.service.create_application(...)`. No new `service.py`
+      function needed anywhere in this module; purely `routes.py` +
+      template changes.
+      DoD: **integration-verify** — walk a real browser through the
+      full sequence at least twice under one `applicant_identifier`:
+      first application (no prefill, no reuse option, since no customer
+      row exists yet) → Approve → second application (form prefilled
+      from the now-existing customer row, "already on file" choice
+      shown) tried both ways — once accepting reuse (confirm via `psql`
+      that `accounts`/`applications` provision correctly with **no**
+      new Government ID document created, and via Mayan that the
+      original `id_photo` document is unchanged) and once (a third
+      application) choosing "upload a new one instead" (confirm via
+      Mayan that the *new* document now carries `customer_id` and the
+      *original* one no longer does — exactly one current `id_photo`).
+- [ ] **P14-5** — Full-stack re-verification sweep, same shape as
+      P13-7's: `docker compose up -d --build` (not from empty volumes —
+      this phase doesn't touch `db/schema.sql`, no migration needed),
+      full unit suite (`pytest tests/unit`) and `lint-imports` both
+      green, then the standard live sweep (all three product types,
+      direct approve, escalation-then-manager-approve, reject, cancel,
+      more-info-then-resubmit) confirming nothing in Phases 0–13's
+      existing behavior regressed. Update `CLAUDE.md`'s "Returning-customer
+      profile refresh and ID reuse" section header from "planned — Phase
+      14" to reflect it's built (drop the "not built yet" framing
+      throughout that section and every "Planned (Phase 14, not built
+      yet)" pointer added to the individual module sections elsewhere
+      in the file), and `PRD.md`'s corresponding "planned"/"not built
+      yet" language in §6.5/§8.1/§9.1. Commit, push, confirm CI green.
+
 ---
 
 ## Session Log
@@ -2201,6 +2366,37 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-03** — Documentation-only session, no code changed. User
+  brainstormed a set of returning-customer enhancements (profile
+  backfill, application-form prefill, optional Government ID reuse
+  instead of forced re-upload); this session turned that brainstorm
+  into a concrete design and wrote it into `CLAUDE.md` (new
+  "Returning-customer profile refresh and ID reuse" section, plus
+  pointers added to the `bff_customer/`, `customer/`, `application/`,
+  and `document/` module sections), `PRD.md` (§6.5, §8.1, §9.1, a new
+  §11 open question), and this file's new Phase 14 (P14-1 through
+  P14-5, all unchecked). One real design constraint surfaced and
+  resolved during this pass, not just assumed: Mayan holds exactly one
+  value per (document, metadata_type) — confirmed by re-reading
+  `mayan_client.py`'s `attach_metadata`/`update_metadata_entry` — which
+  rules out "re-tag the existing `id_photo` document into the new
+  application" as the reuse mechanism (it would silently unfile that
+  document from its *original* application's own index branch); the
+  design instead excludes Government ID from the new application's own
+  completeness check via a new `exclude_categories` parameter. Also
+  surfaced, and resolved in the new design rather than left as a loose
+  end: `document.service.promote_government_id_to_customer_photo` has
+  never actually enforced `PRD.md`'s old "the first `id_photo` stands"
+  claim — it unconditionally re-tags whatever Government ID document
+  exists under a just-approved application with no check for a prior
+  one, a real, previously-undocumented gap that was simply never
+  exercised until this feature makes a second fresh-upload approval for
+  an existing customer reachable. `PRD.md` §6.5 corrected to describe
+  the new, actually-enforced intent (refreshable by a later fresh
+  upload, untouched on reuse) instead of the old, never-true claim.
+  Next: P14-1 (`customer/`'s `get_or_create` signature change +
+  new `update_profile`).
 
 - **2026-09-02** — Two small, user-requested cleanups, no behavior
   change: (1) `application/service.py`'s `create_application` and
