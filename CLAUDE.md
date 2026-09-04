@@ -1975,6 +1975,48 @@ for `KEYCLOAK_ISSUER`.
 
 ## Known gaps to state explicitly once built
 
+- **`docker compose up -d` does not rebuild images — a container can run
+  arbitrarily stale code relative to `git HEAD` with no warning, and
+  Mayan's own index-template/metadata-type config can independently
+  drift or reset without anyone editing this codebase.** Both hit live,
+  in the same session, and together they produced a confusing false
+  signal worth recording exactly as it happened. A long-running local
+  stack (containers up 26+ hours, spanning several sessions' worth of
+  commits including Phase 14, Phase 16, and the exclusive-placement
+  index redesign) was still running `app`/`worker-workflow`/
+  `worker-activity` images built from a commit *before* all three —
+  confirmed by reading `inspect.getsource(activities.persist_decision)`
+  from inside the live `worker-activity` container and finding no call
+  to `tag_application_documents` at all, an old
+  `generate_welcome_letter` call missing the `applicant_identifier`
+  argument, and old-style re-tag-in-place promotion behavior. A fresh
+  end-to-end approval against this stale image tagged only the
+  Government ID document with `customer_id`, attached `account_id` to
+  nothing, and created no customer-level Government ID copy — exactly
+  the symptoms a first read suggested were a *code* regression, until
+  comparing the running container's own loaded source against the
+  working tree proved otherwise. Fixed with `docker compose build app
+  worker-workflow worker-activity` followed by `docker compose up -d`
+  for the same three services; re-running the identical scenario
+  against the rebuilt images produced fully correct tagging and
+  exclusive placement. Separately, this same session found the live
+  Mayan instance had reverted to just the old single
+  `loan-onboarding-archive` index (the three-index exclusive-placement
+  redesign this file describes as already built and live-verified was
+  simply not present), and was also missing the two P16-4
+  metadata-type/document-type associations (`account_id` on
+  "Application Document", `customer_id` on "Account Document") —
+  neither loss has a confirmed root cause (a `mayan-db` volume reset
+  independent of the `db`/Temporal volumes is the leading guess, since
+  Postgres/Temporal state from the same period was unaffected), but the
+  practical lesson is the same as the stale-image one: **this project's
+  own documentation of "already built and live-verified" describes a
+  point in time, not a durable guarantee — re-verify both the running
+  image and Mayan's live config directly (don't trust either from
+  `CLAUDE.md`'s narrative alone) before trusting a "clear test data and
+  re-verify" pass to actually exercise current code.** No code changed
+  as a result of either finding — both were environment-state problems,
+  fixed by rebuilding/reconfiguring, not by editing `loan_onboarding/`.
 - **Reconciliation (`loan_onboarding/reconcile.py`, "Document/database
   reconciliation" above) only detects and fixes drift — it never
   prevents it, and nothing runs it automatically.** It has to be

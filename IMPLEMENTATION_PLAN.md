@@ -384,6 +384,44 @@ No code changes this pass — infrastructure/data cleanup and
 verification only, `CLAUDE.md`'s two new operational notes are the only
 diff. Nothing to commit from this pass itself.
 
+**Follow-up session, 2026-09-04, user-requested "review project, clear
+all test data, reconfig mayan, run e2e"**: found the long-running local
+stack had drifted from everything the entries above describe as
+already built and live-verified. Mayan's live config had reverted to
+just the old single `loan-onboarding-archive` index (the three-index
+exclusive-placement redesign wasn't present at all) and was missing
+the two P16-4 metadata-type associations; separately, and unrelated to
+the Mayan drift, the running `app`/`worker-workflow`/`worker-activity`
+images were built from a commit predating Phase 14/16 and the index
+redesign entirely — see `CLAUDE.md`'s new Known Gaps entry for the full
+diagnosis (comparing the live container's own loaded source against
+the working tree is what caught it). Cleared Postgres (`TRUNCATE`),
+Mayan (trashed all active documents), and Temporal (bulk-deleted every
+`LoanApplicationWorkflow`); rebuilt the three index templates plus the
+two missing metadata associations against the live Mayan instance;
+rebuilt the three stale images and recreated their containers. Ran a
+fresh scenario against the now-current code: one personal_loan
+application approved directly (customer/account provisioned, all 4
+documents + Welcome Letter correctly tagged `account_id`+`customer_id`,
+customer-level Government ID copy created, exclusive placement
+confirmed via direct REST tree-walking across all three indexes), and
+a second application (auto_loan, same identity) correctly prefilled,
+used ID reuse, and was rejected cleanly — confirmed its 4 fresh
+documents carried `customer_id` (resolved at upload) but never gained
+`account_id`. Full unit suite (244 tests, against a freshly created
+`loan_onboarding_test` database, dropped afterward) and `lint-imports`
+(8/8 contracts) both green. Left as explicitly deferred, on the user's
+own call: permanently purging the ~20 documents now sitting in Mayan's
+trash, and deleting the now-inert old `loan-onboarding-archive` index
+template — neither blocks anything functionally, both were declined
+this session in favor of leaving them for manual cleanup. Also noted,
+not investigated further: this session's own browser-automation tool
+reached a completely different backend than every `docker`/`curl`
+command did for the same `localhost` ports on the same machine, with
+old cached application/document data — surfaced to the user directly
+rather than guessed at; E2E verification for this pass was done via
+direct HTTP/API calls instead of a browser.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 
@@ -2932,6 +2970,48 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-04 (new session)** — User asked to "review project, clear
+  all test data, reconfig mayan, run e2e." Review turned up two real,
+  previously-undocumented drift problems on the long-running local
+  stack rather than anything wrong with the codebase itself: (1) the
+  running `app`/`worker-workflow`/`worker-activity` images were stale,
+  built from a commit before Phase 14, Phase 16, and the
+  exclusive-placement index redesign — confirmed by reading the live
+  `worker-activity` container's own loaded `persist_decision` source
+  and finding no `tag_application_documents` call at all; (2) Mayan's
+  live config had independently reverted to the old single
+  `loan-onboarding-archive` index and was missing the two P16-4
+  metadata-type associations, unrelated to the image staleness. Fixed
+  both: rebuilt the three images and recreated their containers;
+  rebuilt the three exclusive-placement index templates plus the two
+  missing associations against the live Mayan instance (deleting the
+  old single index was attempted but blocked by the harness's own
+  safety classifier as an irreversible action — left in place, inert,
+  per the user's explicit choice). Cleared Postgres/Mayan/Temporal test
+  data first (Mayan's permanent trash purge was also blocked by the
+  same classifier and left in trash per the user's choice). Ran a fresh
+  E2E scenario via direct HTTP/API calls (curl, not a browser — see
+  below) against the rebuilt stack: one personal_loan application
+  approved directly (customer/account provisioned; all 4 documents +
+  Welcome Letter tagged `account_id`+`customer_id`; customer-level
+  Government ID copy created; exclusive placement confirmed across all
+  three indexes via direct REST tree-walking) and a second application
+  (auto_loan, same identity) correctly prefilled, using ID reuse, then
+  rejected cleanly with no `account_id` ever attached to its documents.
+  Full unit suite (244 tests, dedicated `loan_onboarding_test` database
+  created then dropped) and `lint-imports` (8/8 contracts) both green.
+  **A genuinely unresolved finding, surfaced to the user rather than
+  guessed at**: this session's browser-automation tool reached a
+  completely different backend than every `docker exec`/`curl` command
+  did for the identical `localhost` ports on the identical machine (old
+  cached applications/documents visible only through the browser) — the
+  user chose to treat the `docker`/`curl`-reachable stack as
+  authoritative and do E2E verification without a browser for this
+  session; the browser discrepancy itself was not root-caused. No
+  `loan_onboarding/` code changed — see `CLAUDE.md`'s new Known Gaps
+  entry for the full write-up of both drift problems. `CLAUDE.md` and
+  this file's Current Status updated; commit covers docs only.
 
 - **2026-09-04 (later still, follow-up session)** — Ad hoc, user-requested:
   redesigned all three Mayan index templates from multi-placement to
