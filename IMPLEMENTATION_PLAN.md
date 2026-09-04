@@ -487,6 +487,29 @@ reaching `document.service`. Full unit suite still 246 passing,
 `lint-imports` still 8/8, `reconcile.py --report` still zero
 orphans/stale tags afterward.
 
+**Follow-up, same day: user asked whether an integration test covers
+the consent enhancement — it didn't, so added one.** Confirmed the gap
+first: `tests/unit/document/test_service.py` already covers
+`upload_consent`/`preview_account_document` against `FakeMayanClient`,
+but nothing in this project had ever run a Mayan-touching integration
+test against the real instance — `tests/integration/`'s only other
+file deliberately stubs `document_service` out. New
+`tests/integration/test_document_service.py` (2 tests, real Mayan
+required): a real create-then-reversion (confirmed same document id,
+`list_account_documents` staying at one document) with a real streamed
+download returning the latest version's actual bytes, and a real
+ownership-check rejection for a mismatched `account_id`. Uses
+synthetic uuid4-based `account_id`/`customer_id` (no real Postgres row
+needed) plus a `cleanup_documents` fixture that trashes what it creates.
+Both pass cleanly on their own, and alongside the full unit suite run
+separately (247 passed total across the two runs); running unit +
+integration together in one combined invocation produced one unrelated
+flake in `test_workflows.py`'s embedded Temporal test server that
+didn't reproduce in isolation — matches CI's own separation (`pytest
+tests/unit` only), so left as "run these two suites separately," not
+investigated further. `CLAUDE.md`'s Testing section documents the new
+file and why it exists.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 

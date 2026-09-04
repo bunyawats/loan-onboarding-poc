@@ -2488,6 +2488,40 @@ No `tests/contract/` needed anymore (see "Breaking the cycle") — the
 `workflow.task_queues.KNOWN_PRODUCT_TYPES` does that job at import time,
 in every test run, for free.
 
+**`tests/integration/test_document_service.py` (new) is this project's
+first integration test to touch real Mayan** — every prior Mayan
+verification (Phases 5, 14, 15, 16, the index redesigns) was a
+documented manual sweep instead, and `test_end_to_end_workflow.py`
+(the only other file in `tests/integration/`) deliberately stubs
+`document_service` out to avoid needing Mayan at all. Added
+specifically because `FakeMayanClient` can't catch what only real Mayan
+enforces — a document type rejecting a metadata attach it was never
+associated with (P16-4's real bug) and Mayan's own
+reject-on-duplicate-attach behavior are exactly the two bugs this
+project already hit for real that no unit test caught. Covers
+`upload_consent`/`preview_account_document` (the account-level document
+support the consent-upload feature added): a real create, a real
+same-document re-version (not a duplicate, confirmed via
+`list_account_documents` staying at one document), and a real streamed
+download returning the latest version's actual bytes. Uses synthetic,
+uuid4-based `account_id`/`customer_id` values with no real Postgres row
+behind them — `document/` never imports `application/`/`account/`/
+`customer/`, so it doesn't care whether they resolve to anything, only
+that they're stable strings to tag and filter on; a `cleanup_documents`
+fixture trashes every document a test creates afterward, same
+soft-delete this codebase uses everywhere else. Needs
+`docker compose up -d mayan` plus
+`MAYAN_BASE_URL`/`MAYAN_SERVICE_ACCOUNT_USERNAME`/
+`MAYAN_SERVICE_ACCOUNT_PASSWORD` set (same values `.env` already
+carries) — run it on its own
+(`pytest tests/integration/test_document_service.py -m integration`),
+not mixed into one invocation with `tests/unit`: doing that once in the
+same session produced an unrelated flake in
+`tests/workflow/test_workflows.py`'s embedded time-skipping Temporal
+test server that didn't reproduce running either suite alone,
+consistent with CI's own separation (`.github/workflows/ci.yml` only
+ever runs `pytest tests/unit`, never `tests/integration`).
+
 ## Build order and session-to-session progress
 
 See **[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)** — a
