@@ -254,6 +254,26 @@ class MayanClient:
         response = await self.delete(f"/documents/{document_id}/metadata/{metadata_entry_id}/")
         response.raise_for_status()
 
+    async def download_file(self, document_id: int) -> bytes:
+        """Fetches a document's current file content in full, in memory --
+        used internally for copying a document (CLAUDE.md's "Document
+        metadata assignment lifecycle": the customer-level Government ID
+        copy is a genuine second Mayan document, not a re-tag of the
+        original), never exposed to a BFF directly (`preview()` in
+        `document/service.py` streams to the caller instead, for the
+        large-file/viewing case)."""
+        document = await self.get_document(document_id)
+        file_latest = document.get("file_latest") or {}
+        file_id = file_latest.get("id")
+        if not file_id:
+            raise ValueError(f"document {document_id} has no uploaded file")
+        response = await self.stream(f"/documents/{document_id}/files/{file_id}/download/")
+        try:
+            await response.aread()
+        finally:
+            await response.aclose()
+        return response.content
+
     async def rebuild_index(self) -> None:
         index_ids = await self.index_template_ids()
         for index_id in index_ids:

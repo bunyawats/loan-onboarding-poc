@@ -262,6 +262,51 @@ session accidentally wiped the live compose stack's own
 plus both bug fixes) but **not yet pushed** — still needs `git push`
 and a CI-green confirmation.
 
+**A follow-up session redesigned Phase 16's index shape from
+multi-placement to exclusive placement** — a direct design request from
+the user, not a correction of a bug: a document should live at exactly
+one leaf across all three indexes (the deepest entity it's actually
+tied to), not fan out into every branch whose condition happened to
+match. Along with the index redesign, `promote_government_id_to_customer_photo`
+changed from a re-tag-in-place operation into a genuine file-copy
+operation — the just-approved application's own Government ID document
+is now left completely untouched (still owned only by its application),
+and a brand-new, separate Mayan document is created carrying only
+`customer_id` + `applicant_identifier` + `category`, living purely at
+the customer level (Customer Index's own direct "Government ID" leaf,
+never nested under an account or application branch). A returning
+customer's previous customer-level copy is trashed
+(`DELETE /documents/{id}/`, soft-delete) before the new one is created,
+so there's still never more than one at a time. See `CLAUDE.md`'s
+"Document hierarchy" and "Document metadata assignment lifecycle"
+(new rule 4) for the full design.
+
+`loan_onboarding/document/mayan_client.py` gained `download_file(...)`
+(reads a document's current file bytes fully into memory, used
+internally by the copy); `document/service.py`'s
+`promote_government_id_to_customer_photo` and `list_customer_documents`
+were rewritten accordingly; `reconcile.py`'s `scan()` was corrected
+alongside — a real bug found while designing this, not while testing
+it: the old logic treated every stale `customer_id` as a strippable
+secondary tag, which stops being true now that the customer-level copy
+carries `customer_id` as its *only* metadata (no `application_id`/
+`account_id` to fall back on) — `scan()` now checks for that case and
+reports it as fully orphaned instead. **Live-verified against the real
+stack**: rebuilt all three index templates (`scripts/setup_document_hierarchy.sh`
+updated to match, after building and confirming the new shape live via
+a one-off scratch script first), then ran a fresh multi-application
+scenario (two `personal_loan`-sibling applications approved under one
+identifier, a third rejected) confirming via direct REST tree-walking
+that no document appears in more than one leaf, the customer-level
+Government ID copy holds exactly one document throughout (correctly
+replaced on the second approval's fresh upload), the original
+application-level Government ID documents for both applications stay
+untouched under their own `<application_id>` branches, and the
+generated Welcome Letter lands only under
+`<customer_id>/<account_id>/<category>`. Full unit suite (244 tests,
+same dedicated `loan_onboarding_test` database discipline P16 added)
+and `lint-imports` both green.
+
 **Document index redesign (ad hoc, requested directly by the user after
 Phase 16 closed — not itself a numbered phase)**: replaced the single
 `applicant_identifier`-rooted "Loan Onboarding Archive" index with three
@@ -2887,6 +2932,62 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-04 (later still, follow-up session)** — Ad hoc, user-requested:
+  redesigned all three Mayan index templates from multi-placement to
+  **exclusive placement** — a document now lives at exactly one leaf
+  across Customer/Account/Application Index combined (the deepest entity
+  it's actually tied to), not fanned out into every branch whose
+  condition matched. Direct design request, not a bug fix: "customer
+  index 1 level shows only customer nodes, 2 level shows account node,
+  application nodes, government id node... leaf documents must show
+  inside the lowest document type hierarchy... Bank Statements always
+  inside Application not under Account or Customer, Welcome letter
+  always under Account, not under Customer." Confirmed two follow-up
+  decisions with the user before building: Account and Application Index
+  switch to the same exclusive model too (not just Customer Index), and
+  a refreshed customer-level Government ID copy gets trashed (not kept)
+  when superseded. Along with the index redesign,
+  `document/service.py`'s `promote_government_id_to_customer_photo`
+  changed from a re-tag-in-place operation into a genuine file copy — the
+  approved application's own Government ID document is left completely
+  untouched, and a brand-new Mayan document is created carrying only
+  `customer_id`/`applicant_identifier`/`category` (no `application_id`/
+  `account_id`), living purely at the customer level; a returning
+  customer's previous copy is trashed first. New
+  `document/mayan_client.py` method `download_file(...)` supports the
+  copy. `reconcile.py`'s `scan()` was corrected alongside — a real bug
+  found while designing this: the old logic treated every stale
+  `customer_id` as a strippable secondary tag, no longer true now that
+  the customer-level copy carries `customer_id` as its *only* metadata;
+  `scan()` now reports that specific shape (customer_id set, no
+  application_id/account_id) as fully orphaned instead of a stale tag.
+  Deleted the old (multi-placement) index templates live via the API,
+  built the three new ones live via a one-off scratch script, then
+  updated `scripts/setup_document_hierarchy.sh` to match so a future
+  fresh install produces the same exclusive-placement shape. Then, per
+  the user's further request ("clear all test data and run e2e again"),
+  cleared every active + trashed Mayan document and rebuilt all three
+  indexes from empty, and ran a fresh multi-application scenario (two
+  personal_loan-sibling applications approved under one identifier, a
+  third rejected) — confirmed via direct REST tree-walking that no
+  document appears in more than one leaf, the customer-level Government
+  ID copy holds exactly one document throughout (correctly replaced on
+  the second approval's fresh upload, with the old copy trashed first),
+  both applications' original application-level Government ID documents
+  stay untouched under their own `<application_id>` branches, and the
+  generated Welcome Letter lands only under
+  `<customer_id>/<account_id>/<category>` (no `<application_id>`
+  nesting). Rewrote `tests/unit/document/test_service.py`'s promote/
+  list_customer_documents tests and added a new `tests/unit/test_reconcile.py`
+  regression test for the orphaned-not-stale customer-level-copy case.
+  Full unit suite (244 tests) and `lint-imports` both green.
+  `CLAUDE.md` updated: "Document hierarchy" diagrams replaced, "Document
+  metadata assignment lifecycle" gained a new rule 4 (the copy mechanism)
+  and a live-verification paragraph, and the now-stale
+  `test_tag_application_documents_then_promote_does_not_double_attach`
+  reference in the P16-4 write-up was corrected to note it's superseded
+  (not reverted) by this redesign.
 
 - **2026-09-04 (later still)** — Ad hoc, user-requested: added a third
   sibling branch (`<root> -> <category>`, direct) to all three index

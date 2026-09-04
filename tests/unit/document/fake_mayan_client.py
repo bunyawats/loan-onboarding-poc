@@ -111,6 +111,24 @@ class FakeMayanClient:
     async def stream(self, path: str):
         return _FakeStreamResponse(content=b"%PDF-1.4 fake bytes", content_type="application/pdf")
 
+    async def download_file(self, document_id: int) -> bytes:
+        doc = self.documents[document_id]
+        return doc.file_versions[-1] if doc.file_versions else b""
+
+    async def delete(self, path: str) -> "_FakeDeleteResponse":
+        # path is "/documents/{id}/" -- promote_government_id_to_customer_photo's
+        # own trash-the-old-copy call, the only caller in this codebase
+        # that reaches for the generic `delete()` directly rather than a
+        # named wrapper (`delete_metadata_entry` etc).
+        document_id = int(path.strip("/").split("/")[1])
+        self.documents.pop(document_id, None)
+        return _FakeDeleteResponse()
+
+
+class _FakeDeleteResponse:
+    def raise_for_status(self) -> None:
+        pass
+
 
 class _FakeStreamResponse:
     def __init__(self, content: bytes, content_type: str) -> None:

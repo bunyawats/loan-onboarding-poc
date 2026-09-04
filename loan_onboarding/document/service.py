@@ -286,64 +286,77 @@ async def tag_application_documents(application_id: str, account_id: str, custom
 
 
 async def promote_government_id_to_customer_photo(application_id: str, customer_id: str) -> None:
-    """Re-tags the just-approved application's Government ID document
-    with `customer_id` metadata -- does NOT fetch/re-upload the file.
-    One Mayan document ends up satisfying two leaf paths in the index at
-    once (`<application_id>/Government ID` and
-    `<applicant_identifier>/id_photo`) -- confirmed against a real
-    instance in P5-2, see CLAUDE.md's "Document hierarchy".
+    """**Rewritten from a re-tag-in-place to a genuine copy**, per a
+    direct design request: the just-approved application's Government ID
+    document is left completely untouched (still owned only by its
+    application, per the "exclusive placement" rule in CLAUDE.md's
+    "Document hierarchy") -- a *new*, separate Mayan document is created
+    with the same file content, tagged with `customer_id` (and
+    `applicant_identifier`, `category`) but deliberately **no**
+    `application_id`/`account_id`, so it lives purely at the customer
+    level (Customer Index's own "Government ID" leaf, sibling to the
+    account/application branches, never nested under either). This is
+    what makes "exactly one current Government ID per customer" a
+    genuinely separate, unambiguous document rather than one document
+    satisfying multiple leaf conditions at once (the old design, changed
+    after live feedback that multi-placement was confusing to browse).
 
     **Two paths, per "Returning-customer profile refresh and ID reuse"**:
     if no Government ID document exists under `application_id` (the
-    reuse path -- the customer chose to reuse their existing `id_photo`
-    instead of uploading a new one), this is a no-op -- **changed from
-    this function's original behavior, which `raise`d `DocumentNotFound`
-    unconditionally in this case**; that was written under the old
-    assumption that every approved application always has its own
-    Government ID document, no longer true once reuse exists. If one
-    *does* exist (a fresh upload), first strip `customer_id` metadata
-    from any *other* Government-ID-category document currently carrying
-    it for this customer (Mayan holds exactly one value per (document,
-    metadata_type) -- re-tagging without stripping first would leave two
-    documents claiming the same `id_photo` leaf), then tag the new one --
-    "exactly one current `id_photo` per customer", enforced for real.
-
-    **The stale-tag lookup is scoped to `category=Government ID`,
-    not just `customer_id` alone** -- since `tag_application_documents`
-    (CLAUDE.md's "Document metadata assignment lifecycle") now tags
-    *every* document under an approved application with `customer_id`,
-    and `generate_welcome_letter` does too, a customer with more than
-    one approved application accumulates `customer_id` on several
-    unrelated documents (Proof of Income, Bank Statements, Welcome
-    Letters). Matching on `customer_id` alone here would wrongly strip
-    the tag from all of those the next time this customer's photo gets
-    refreshed -- a real bug caught while wiring P16 in, not a
-    hypothetical."""
+    reuse path -- the customer chose to reuse their existing photo
+    instead of uploading a new one), this is a no-op -- the existing
+    customer-level copy is left alone, still the customer's current
+    photo. If one *does* exist (a fresh upload), the customer's previous
+    copy (if any) is trashed first (`DELETE /documents/{id}/`, Mayan's
+    own soft-delete -- reversible, same convention this project already
+    uses elsewhere) before the new copy is created, so there's still
+    never more than one at a time."""
     matches = await _documents_matching({"application_id": application_id, "category": CATEGORY_GOVERNMENT_ID})
     if not matches:
         return
 
-    new_doc_ids = {doc.document_id for doc in matches}
-    existing_id_photo_docs = await _documents_matching(
-        {"customer_id": customer_id, "category": CATEGORY_GOVERNMENT_ID}
-    )
-    for doc in existing_id_photo_docs:
-        if doc.document_id in new_doc_ids:
-            continue
-        entry_id = await _metadata_entry_id(doc.document_id, "customer_id")
-        if entry_id is not None:
-            await mayan_client.delete_metadata_entry(doc.document_id, entry_id)
+    source = matches[0]
+    content = await mayan_client.download_file(source.document_id)
 
-    metadata_type_ids = await mayan_client.metadata_type_ids()
-    for doc in matches:
-        await _set_metadata(doc.document_id, "customer_id", customer_id, metadata_type_ids["customer_id"])
+    # The customer-level copy is identified by carrying customer_id but
+    # neither application_id nor account_id -- the one shape no other
+    # document in this codebase ever has (every real Application/Account
+    # Document is owned by at least one of the two). Scoped to
+    # category=Government ID too, though that's redundant in practice
+    # (a copy is never created under any other category) -- cheap and
+    # matches this function's own creation logic below.
+    existing_copies = await _documents_matching({"customer_id": customer_id, "category": CATEGORY_GOVERNMENT_ID})
+    for doc in existing_copies:
+        if doc.application_id is None and doc.account_id is None:
+            response = await mayan_client.delete(f"/documents/{doc.document_id}/")
+            response.raise_for_status()
+
+    doc_type_ids, metadata_type_ids = await asyncio.gather(
+        mayan_client.document_type_ids(), mayan_client.metadata_type_ids()
+    )
+    copy_document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_APPLICATION], source.filename)
+    copy_document_id = copy_document["id"]
+    await mayan_client.upload_file(copy_document_id, source.filename, content, action_name="replace")
+
+    for field, value in [
+        ("applicant_identifier", source.applicant_identifier),
+        ("category", CATEGORY_GOVERNMENT_ID),
+        ("customer_id", customer_id),
+    ]:
+        await mayan_client.attach_metadata(copy_document_id, metadata_type_ids[field], value)
+
     await mayan_client.rebuild_index()
 
 
 async def has_id_photo(customer_id: str) -> bool:
-    """Read-only -- a thin wrapper over `list_customer_documents`, since
-    any result *is* the `id_photo` (the one-per-customer invariant
-    `promote_government_id_to_customer_photo` now enforces). Called by
+    """Read-only -- a thin wrapper over `list_customer_documents`, which
+    (since the copy-based rewrite of `promote_government_id_to_customer_photo`)
+    returns specifically the customer-level Government ID copy, not just
+    any document carrying `customer_id` -- a customer can carry
+    `customer_id` on plenty of other documents (every document under an
+    approved application, `tag_application_documents`) without ever
+    having a Government ID copy, so this couldn't just check "any result"
+    the way an earlier draft did. Called by
     `application.service.create_application` to decide whether reuse is
     even offerable, and by `bff_customer` to decide whether to show the
     "already on file" choice at all."""
@@ -496,7 +509,18 @@ async def upload_consent(applicant_identifier: str, account_id: str, file: Uploa
 
 
 async def list_customer_documents(customer_id: str) -> list[DocumentRef]:
-    return await _documents_matching({"customer_id": customer_id})
+    """The customer-level Government ID copy specifically -- documents
+    carrying `customer_id` but neither `application_id` nor `account_id`
+    (see `promote_government_id_to_customer_photo`). **Not** "every
+    document tagged with this customer_id" -- that would also match
+    every document under any of this customer's approved applications
+    (`tag_application_documents` tags all of them, not just Government
+    ID) and every Welcome Letter (`generate_welcome_letter`), neither of
+    which is "the customer's photo". At most one match at any time
+    (`promote_government_id_to_customer_photo` enforces this by trashing
+    the old copy before creating a new one)."""
+    matches = await _documents_matching({"customer_id": customer_id})
+    return [doc for doc in matches if doc.application_id is None and doc.account_id is None]
 
 
 async def list_account_documents(account_id: str) -> list[DocumentRef]:

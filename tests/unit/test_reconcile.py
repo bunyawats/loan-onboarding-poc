@@ -79,6 +79,21 @@ async def test_valid_application_but_missing_customer_id_is_a_stale_tag_not_orph
     assert stale_tags == [doc]
 
 
+async def test_customer_level_copy_with_missing_customer_id_is_orphaned_not_stale(monkeypatch):
+    """The Government ID copy (customer_id only, no application_id or
+    account_id at all -- document.service.promote_government_id_to_customer_photo)
+    has no other owner, so a missing customer_id makes the whole document
+    orphaned, not a stale tag to merely strip."""
+    doc = _doc(1, customer_id="CUS-missing")
+    _mock_documents(monkeypatch, [doc])
+    _mock_lookups(monkeypatch)
+
+    orphaned, stale_tags = await reconcile.scan()
+
+    assert orphaned == [(doc, "customer_id CUS-missing not found (no other owner)")]
+    assert stale_tags == []
+
+
 async def test_document_with_no_ids_at_all_is_neither_orphaned_nor_stale(monkeypatch):
     doc = _doc(1)
     _mock_documents(monkeypatch, [doc])

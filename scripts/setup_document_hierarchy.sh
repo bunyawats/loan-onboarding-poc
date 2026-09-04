@@ -13,61 +13,53 @@
 #
 #   Customer Index (customer_id)
 #   └── <customer_id>
-#          ├── <account_id>                 (branch 1: docs that also carry
-#          │      └── <application_id>       account_id, i.e. every document
-#          │             └── <category>      under an approved application,
-#          │                                  plus Account Documents)
-#          ├── <application_id>              (branch 2: docs that carry
-#          │      └── <category>              application_id, whether or not
-#          │                                  they've also gained account_id
-#          │                                  yet -- a pre-approval upload
-#          │                                  from a returning customer)
-#          └── <category>                    (branch 3: every document with
-#                                              customer_id, direct -- no
-#                                              intermediate id-grouping)
+#          ├── <account_id>                  (docs that carry account_id --
+#          │      ├── <application_id>        every document under an
+#          │      │      └── <category>       approved application, one
+#          │      └── <category>               level further down --
+#          │           (account-only,          plus Account Documents,
+#          │            e.g. Welcome Letter)    which stop one level higher)
+#          ├── <application_id>              (docs that carry application_id
+#          │      └── <category>              but NOT account_id yet -- a
+#          │                                  pre-approval upload from a
+#          │                                  returning customer, or a
+#          │                                  rejected/pending application)
+#          └── <category>                    (docs with customer_id and
+#                                              NEITHER account_id nor
+#                                              application_id -- exactly the
+#                                              customer-level Government ID
+#                                              copy, document.service.py's
+#                                              promote_government_id_to_
+#                                              customer_photo, nothing else)
 #
 #   Account Index (account_id)
 #   └── <account_id>
-#          ├── <customer_id>
-#          │      └── <category>
 #          ├── <application_id>
 #          │      └── <category>
-#          └── <category>                    (branch 3: direct, as above)
+#          └── <category>                    (account-only, no application_id)
 #
 #   Application Index (application_id)
 #   └── <application_id>
-#          ├── <customer_id>
-#          │      └── <category>
-#          ├── <account_id>
-#          │      └── <category>
-#          └── <category>                    (branch 3: direct, as above)
+#          └── <category>                    (application is already the
+#                                              deepest owning entity for its
+#                                              own documents -- no further
+#                                              branching needed)
 #
-# **Branch 3 (the direct category leaf) was added after live feedback,
-# not part of the original design** -- the first version of each index
-# only had branches 1 and 2, and neither puts a category leaf directly
-# under the root entity id. That meant e.g. a promoted Government ID
-# (id_photo) document, which carries customer_id, required drilling into
-# "account" or "application" *first* to find it under Customer Index --
-# there was no way to just look under a customer_id and immediately see
-# its categories. Same gap for Welcome Letter under Account Index (only
-# ever has account_id + customer_id, so it needed drilling into "customer"
-# first). Branch 3 fixes this: every document carrying the root's own id,
-# by category, with nothing in between.
-#
-# **A document with more than one of these ids set shows up in more than
-# one place -- deliberately, not a bug.** Confirmed with the user rather
-# than assumed: Mayan evaluates every branch independently per document
-# (the same "multi-leaf placement" behavior this project's original single
-# index already relied on for its `id_photo` node -- see CLAUDE.md's
-# "Document hierarchy"), so e.g. an approved application's Government ID
-# document (application_id + account_id + customer_id, once approved)
-# naturally appears under Customer Index's "account -> application" branch,
-# its sibling "application" branch, *and* its sibling direct-category
-# branch all at once, not just one of the three. `applicant_identifier`
-# plays no role in any of these three templates -- it's still attached to
-# every document (see the metadata associations below) and still what
-# `document.service.py`'s own queries filter on, just no longer an
-# index-tree grouping key.
+# **Exclusive placement: a document lives at exactly one leaf across all
+# three indexes combined -- the deepest entity it's actually tied to.**
+# Corrected from an earlier draft of this script, which built each index
+# with three siblings-of-every-level branches (deliberately multi-placing
+# a document with several ids set into all of them at once, confirmed with
+# the user at the time as intentional). Superseded after a direct design
+# request: every leaf condition below now positively excludes any id one
+# level deeper than that leaf, so e.g. a Welcome Letter (account_id +
+# customer_id, no application_id) appears ONLY under
+# `<customer_id>/<account_id>/<category>`, never also under a bare
+# `<customer_id>/<category>` branch the way an earlier draft would have
+# shown it. `applicant_identifier` plays no role in any of these three
+# templates -- it's still attached to every document (see the metadata
+# associations below) and still what `document.service.py`'s own queries
+# filter on, just no longer an index-tree grouping key.
 #
 # All five gotchas from mayan-edms-customer-archive's
 # docs/document-hierarchy-setup.md still apply -- read that file before
@@ -246,7 +238,10 @@ NODE_CUSTOMER=$(post_node "$INDEX_ID" "$ROOT_NODE_ID" \
   "false")
 log "  customer_id node -> id=$NODE_CUSTOMER"
 
-# Branch 1: account -> application -> category.
+# account -> application -> category (every document under an approved
+# application) and account -> category (account-only documents, e.g.
+# Welcome Letter/Consent -- excludes application_id so they don't also
+# match the application-nested leaf one level down).
 NODE_C_ACCOUNT=$(post_node "$INDEX_ID" "$NODE_CUSTOMER" \
   '{{ document.metadata_value_of.account_id }}' \
   "false")
@@ -256,30 +251,32 @@ NODE_C_ACCOUNT_APPLICATION=$(post_node "$INDEX_ID" "$NODE_C_ACCOUNT" \
 post_node "$INDEX_ID" "$NODE_C_ACCOUNT_APPLICATION" \
   '{% if document.metadata_value_of.customer_id and document.metadata_value_of.account_id and document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
-log "  branch 1 (account -> application -> category) built"
+post_node "$INDEX_ID" "$NODE_C_ACCOUNT" \
+  '{% if document.metadata_value_of.customer_id and document.metadata_value_of.account_id and not document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  account branch (application-nested + account-only) built"
 
-# Branch 2 (sibling of branch 1, under customer): application -> category.
-# Deliberately not restricted to "account_id is empty" -- a document that
-# has gained account_id (post-approval) still also appears here, per the
-# multi-placement decision in the module docstring above.
+# application -> category, for documents that carry application_id but NOT
+# account_id yet (a pre-approval upload from a returning customer, or a
+# rejected/still-pending application) -- excludes account_id so an
+# approved application's documents don't ALSO show up here once they gain
+# it (exclusive placement: they belong one level deeper, under account).
 NODE_C_APPLICATION=$(post_node "$INDEX_ID" "$NODE_CUSTOMER" \
   '{{ document.metadata_value_of.application_id }}' \
   "false")
 post_node "$INDEX_ID" "$NODE_C_APPLICATION" \
-  '{% if document.metadata_value_of.customer_id and document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  '{% if document.metadata_value_of.customer_id and document.metadata_value_of.application_id and not document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
-log "  branch 2 (application -> category) built"
+log "  application branch (no account yet) built"
 
-# Branch 3 (sibling, direct child of customer): category. Added after live
-# feedback that neither branch 1 nor 2 puts a category leaf directly under
-# customer_id -- e.g. the promoted Government ID (id_photo) document has
-# customer_id but staff had to drill into "account" or "application" first
-# to find it. This branch shows every document that has customer_id at
-# all, by category, with no intermediate id-grouping level.
+# Direct category leaf, for documents with customer_id and NEITHER
+# account_id nor application_id -- exclusively the customer-level
+# Government ID copy (document.service.py's
+# promote_government_id_to_customer_photo), nothing else ever matches this.
 post_node "$INDEX_ID" "$NODE_CUSTOMER" \
-  '{% if document.metadata_value_of.customer_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  '{% if document.metadata_value_of.customer_id and not document.metadata_value_of.account_id and not document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
-log "  branch 3 (direct category) built"
+log "  government id leaf (customer-level copy, no account/application) built"
 
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 log "Done. 'Customer Index' id=$INDEX_ID, slug=customer-index"
@@ -292,32 +289,19 @@ NODE_ACCOUNT=$(post_node "$INDEX_ID" "$ROOT_NODE_ID" \
   "false")
 log "  account_id node -> id=$NODE_ACCOUNT"
 
-# Branch 1: customer -> category.
-NODE_A_CUSTOMER=$(post_node "$INDEX_ID" "$NODE_ACCOUNT" \
-  '{{ document.metadata_value_of.customer_id }}' \
-  "false")
-post_node "$INDEX_ID" "$NODE_A_CUSTOMER" \
-  '{% if document.metadata_value_of.account_id and document.metadata_value_of.customer_id %}{{ document.metadata_value_of.category }}{% endif %}' \
-  "true" > /dev/null
-log "  branch 1 (customer -> category) built"
-
-# Branch 2 (sibling): application -> category.
+# application -> category (application-nested) and category directly
+# (account-only, e.g. Welcome Letter/Consent) -- mutually exclusive on
+# application_id, same reasoning as Customer Index's account branch above.
 NODE_A_APPLICATION=$(post_node "$INDEX_ID" "$NODE_ACCOUNT" \
   '{{ document.metadata_value_of.application_id }}' \
   "false")
 post_node "$INDEX_ID" "$NODE_A_APPLICATION" \
   '{% if document.metadata_value_of.account_id and document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
-log "  branch 2 (application -> category) built"
-
-# Branch 3 (sibling, direct child of account): category -- same reasoning
-# as Customer Index's branch 3 above (e.g. Welcome Letter/Consent, which
-# only ever have account_id + customer_id, showing up requires drilling
-# into "customer" first without this).
 post_node "$INDEX_ID" "$NODE_ACCOUNT" \
-  '{% if document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  '{% if document.metadata_value_of.account_id and not document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
-log "  branch 3 (direct category) built"
+log "  application-nested + account-only branches built"
 
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 log "Done. 'Account Index' id=$INDEX_ID, slug=account-index"
@@ -325,35 +309,16 @@ log "Done. 'Account Index' id=$INDEX_ID, slug=account-index"
 log "Creating 'Application Index'"
 read -r INDEX_ID ROOT_NODE_ID <<< "$(create_index "Application Index" "application-index")"
 
+# Application is already the deepest owning entity for its own documents in
+# the real hierarchy (an application never "belongs" to anything shallower
+# than itself) -- no further branching needed, just application -> category.
 NODE_APPLICATION=$(post_node "$INDEX_ID" "$ROOT_NODE_ID" \
   '{{ document.metadata_value_of.application_id }}' \
   "false")
-log "  application_id node -> id=$NODE_APPLICATION"
-
-# Branch 1: customer -> category.
-NODE_AP_CUSTOMER=$(post_node "$INDEX_ID" "$NODE_APPLICATION" \
-  '{{ document.metadata_value_of.customer_id }}' \
-  "false")
-post_node "$INDEX_ID" "$NODE_AP_CUSTOMER" \
-  '{% if document.metadata_value_of.application_id and document.metadata_value_of.customer_id %}{{ document.metadata_value_of.category }}{% endif %}' \
-  "true" > /dev/null
-log "  branch 1 (customer -> category) built"
-
-# Branch 2 (sibling): account -> category.
-NODE_AP_ACCOUNT=$(post_node "$INDEX_ID" "$NODE_APPLICATION" \
-  '{{ document.metadata_value_of.account_id }}' \
-  "false")
-post_node "$INDEX_ID" "$NODE_AP_ACCOUNT" \
-  '{% if document.metadata_value_of.application_id and document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
-  "true" > /dev/null
-log "  branch 2 (account -> category) built"
-
-# Branch 3 (sibling, direct child of application): category -- same
-# reasoning as the other two indexes' branch 3.
 post_node "$INDEX_ID" "$NODE_APPLICATION" \
   '{% if document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
-log "  branch 3 (direct category) built"
+log "  category leaf built"
 
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 log "Done. 'Application Index' id=$INDEX_ID, slug=application-index"

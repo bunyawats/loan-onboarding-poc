@@ -1168,69 +1168,93 @@ confirmed with the user rather than assumed, since neither a single
 index nor `applicant_identifier`-as-root turned out to be what staff
 actually wanted to browse by:
 
+**Corrected again, to a strict "exclusive placement" model** — a
+document lives at exactly *one* leaf per index: the deepest entity it's
+actually tied to, matching the real customer → account → application
+hierarchy. Requested directly by the user after the multi-placement
+design (branches 1/2/3, all shown at once) turned out to be confusing
+to browse in practice — no more "the same document shows up in three
+different places at once."
+
 ```
 Customer Index (customer_id)
 └── <customer_id>
-       ├── <account_id>                 (branch 1: docs that also carry
-       │      └── <application_id>       account_id -- every document
-       │             └── <category>      under an approved application,
-       │                                  plus Account Documents)
-       ├── <application_id>              (branch 2: docs that carry
-       │      └── <category>              application_id, whether or not
-       │                                  they've also gained account_id
-       │                                  yet)
-       └── <category>                    (branch 3: every document with
-                                           customer_id, direct)
+       ├── <account_id>
+       │      ├── <application_id>
+       │      │      └── <category>       (e.g. Bank Statements --
+       │      │                            docs with all three ids set)
+       │      └── <category>               (account-only docs, e.g.
+       │                                    Welcome Letter -- account_id
+       │                                    + customer_id, no application_id)
+       ├── <application_id>                (docs with application_id +
+       │      └── <category>                customer_id but NO account_id
+       │                                    yet -- pre-approval upload
+       │                                    from a returning customer)
+       └── <category>                      (the customer-level
+                                             Government ID copy --
+                                             customer_id only, no
+                                             account_id/application_id
+                                             at all; see "Document
+                                             metadata assignment
+                                             lifecycle" below)
 
 Account Index (account_id)
 └── <account_id>
-       ├── <customer_id>
-       │      └── <category>
        ├── <application_id>
-       │      └── <category>
-       └── <category>                    (branch 3: direct, as above)
+       │      └── <category>               (docs with account_id +
+       │                                    application_id)
+       └── <category>                      (account-only docs, no
+                                             application_id)
 
 Application Index (application_id)
 └── <application_id>
-       ├── <customer_id>
-       │      └── <category>
-       ├── <account_id>
-       │      └── <category>
-       └── <category>                    (branch 3: direct, as above)
+       └── <category>                      (application is already the
+                                             deepest owning entity for
+                                             its own documents in the
+                                             real hierarchy -- no further
+                                             branching needed, whether or
+                                             not the application has also
+                                             gained account_id)
 ```
 
-**Branch 3 (the direct category leaf) was added after live feedback, not
-part of the original design.** The first version of each index only had
-branches 1 and 2 — neither puts a category leaf directly under the root
-entity id, so a promoted Government ID (id_photo) document (carries
-customer_id) required drilling into "account" or "application" first to
-find it under Customer Index; a Welcome Letter (only ever has
-account_id + customer_id) needed drilling into "customer" first to find
-it under Account Index. The user caught both gaps directly ("I don't
-see welcome letter under account", "I don't see government id under
-customer") — branch 3 fixes it: every document carrying the root's own
-id, by category, with nothing in between. Added live to all three
-indexes and to `scripts/setup_document_hierarchy.sh` for future fresh
-installs, then re-verified the same way as the first build (real
-`documents_url` listings, not inferred) — confirmed "Welcome Letter"
-now appears as a direct child category under its `account_id` node, and
-"Government ID" as a direct child category under its `customer_id`
-node.
+**No more cross-reference branches** (Account Index's old "customer"
+sibling, Application Index's old "customer"/"account" siblings) — each
+of those would have needed to either duplicate placement (the exact
+thing this redesign removes) or dead-end with no documents under it, so
+they're gone entirely rather than kept as inert navigation. A customer
+looking to browse by account or application uses Customer Index (which
+still nests both); Account Index and Application Index each answer only
+"what does *this* account/application directly own." Every leaf
+condition explicitly excludes the deeper case it doesn't own (e.g.
+Customer Index's account-only leaf requires `account_id` present *and*
+`application_id` absent) — Django's `{% if %}` supports `not` for this
+(`{% if a and b and not c %}`), same tag used elsewhere in these
+templates.
 
-**A document with more than one of these ids set shows up in more than
-one place — deliberately, not a bug.** An approved application's
-Government ID document (application_id + account_id + customer_id, all
-three once approved) naturally appears under Customer Index's
-"account → application" branch, its sibling "application" branch, *and*
-its sibling direct-category branch (3) all at once, not just one of the
-three — the same multi-leaf-placement mechanism the original single
-index already relied on for its `id_photo` node (see below), applied
-deliberately across all three new indexes rather than worked around.
-`applicant_identifier` plays no role in any of the three trees — it's
-still attached to every document (see `document/service.py`'s `upload`)
-and still what `document.service.py`'s own queries filter on (see the
-gotcha #2 consequence below), just no longer an index-tree grouping
-key.
+**The customer-level Government ID copy is exactly what makes Customer
+Index's direct-category leaf unambiguous** (unlike the earlier
+multi-placement design's version of this leaf, which matched *every*
+document with `customer_id` — Proof of Income, Welcome Letters, all of
+it): only the copy has `customer_id` with neither `account_id` nor
+`application_id`, so it's the only thing that can ever land there. See
+"Document metadata assignment lifecycle" below for why this document
+exists as a genuine second Mayan document now, not a re-tagged original.
+
+Live-verified end to end against a real instance, not just reasoned
+about: a customer with two approved applications (one per product
+type) and a rejected third showed, all at once and each in exactly one
+place — both accounts nested under the customer with their own
+application → category trees; the rejected application's own
+`<application_id> → category` branch, sibling to the accounts (no
+`account_id`, so it doesn't nest under either); and exactly one
+`Government ID` document directly under the customer (the current
+copy, confirmed via the real `documents_url` listing holding only that
+one document id, not the original per-application Government ID files
+too). `applicant_identifier` plays no role in any of the three trees —
+it's still attached to every document (see `document/service.py`'s
+`upload`) and still what `document.service.py`'s own queries filter on
+(see the gotcha #2 consequence below), just never an index-tree
+grouping key.
 
 **A real, mid-build reliability wrinkle, not a template bug — hit twice,
 in two different sessions, both times from the same root cause.** Right
@@ -1286,40 +1310,37 @@ end-to-end (create → upload-file → attach metadata → rebuild all three
 indexes with no error), and the uploaded document was confirmed present
 in Application Index's tree via the real `documents_url` listing.
 
-**Multi-leaf placement — empirically confirmed against a real instance
-in P5-2 (2026-09-02), not just source-level confidence**, and reused
-deliberately when this section's three-index redesign was built. The
-original single index's `id_photo` node depended on one Mayan document
-satisfying two different leaf-node paths in the same index template at
-once — the `<application_id> → Government ID` path (via `application_id`
-+ `category` metadata) and the `<applicant_identifier> → id_photo` path
-(via `customer_id` metadata, no `application_id` in that leaf's
-condition). A source read of
+**Multi-leaf placement is real Mayan behavior, no longer exploited on
+purpose — historical context, not current design.** Two earlier
+drafts of this file relied on it: the original single index's
+`id_photo` node depended on one Mayan document satisfying two different
+leaf-node paths at once (`<application_id> → Government ID` and
+`<applicant_identifier> → id_photo`), and this section's first
+three-index redesign deliberately kept the same trick across three
+branches per index. A source read of
 `mayan/apps/document_indexing/models/index_instance_models.py`'s
-`_document_add()` had already shown it walks *every* child branch at
-each tree level and links the document into *all* branches whose
-conditions independently evaluate true — not just the first match.
-P5-2's verification script (upload a Government ID document, attach
-`applicant_identifier`+`application_id`+`category` metadata, rebuild,
-confirm it's filed under `<application_id>/Government ID`; then attach
-`customer_id` to the *same* document, rebuild again, and confirm it now
-*also* appears under `<applicant_identifier>/id_photo`, same document
-id in both leaves' `documents_url` listings) reproduced exactly this —
-one document, two leaf memberships, confirmed via
-`GET /index_instances/<id>/nodes/.../documents/` on a live
-`docker compose`-run Mayan instance, not inferred. The three-index
-redesign was verified the same way, not just reasoned about: a
-just-approved auto_loan application's five documents (application_id +
-account_id + customer_id, all set) were confirmed present under
-Customer Index's `<customer_id>/<account_id>/<application_id>/<category>`
-leaf *and* its sibling `<customer_id>/<application_id>/<category>` leaf
-at once, via the real `documents_url` listing on each — not inferred.
-**Cabinets were evaluated as an alternative and rejected as the
-hierarchy's backbone** — they also support true multi-membership and
-are synchronous (no Celery, unlike Index Templates), but the project's
-actual usage pattern is automatic, upload-time classification via API,
-which is Index Templates' idiomatic niche, not Cabinets' (a third-party
-source describes Cabinets as manual, file-manager-style curation).
+`_document_add()` confirmed Mayan walks *every* child branch at each
+tree level and links a document into *all* branches whose conditions
+independently evaluate true — not just the first match — and P5-2's
+own live verification script (2026-09-02) reproduced this for real, not
+just reasoned about: one Government ID document, confirmed present
+under both leaves' `documents_url` listings at once via
+`GET /index_instances/<id>/nodes/.../documents/` on a live instance.
+**Both of those uses are gone now** — the exclusive-placement redesign
+just above replaced them specifically because multi-placement read as
+confusing when browsing (the user's own direct feedback), and the
+customer-level Government ID copy (a genuine second document, not a
+re-tagged original — see "Document metadata assignment lifecycle"
+below) means there's no longer any document that needs to satisfy two
+leaves simultaneously. The mechanism itself is still true of Mayan and
+worth knowing if a future design ever wants it back; this project just
+doesn't use it anymore. **Cabinets were evaluated as an alternative
+and rejected as the hierarchy's backbone** — they also support true
+multi-membership and are synchronous (no Celery, unlike Index
+Templates), but the project's actual usage pattern is automatic,
+upload-time classification via API, which is Index Templates'
+idiomatic niche, not Cabinets' (a third-party source describes Cabinets
+as manual, file-manager-style curation).
 
 **A sharper, previously-implicit consequence of gotcha #2 (async
 reindex)**: `document.service.check_completeness()` and
@@ -1362,7 +1383,7 @@ reference project.
 
 ## Document metadata assignment lifecycle
 
-**Four rules, confirmed with the user, that together describe exactly
+**Five rules, confirmed with the user, that together describe exactly
 which of `applicant_identifier`/`application_id`/`account_id`/
 `customer_id` a document carries at every point in its life** — the
 "Document hierarchy" section above describes the resulting tree shape;
@@ -1389,18 +1410,40 @@ attached to make that shape happen.
    Government ID one — gets `account_id` and `customer_id` attached.**
    `document.service.tag_application_documents(application_id,
    account_id, customer_id)` (new — see the `document/` module section
-   above) does this in one pass across every category. This runs
-   alongside, not instead of, `promote_government_id_to_customer_photo`
-   (which additionally strips a *different* application's stale
-   `id_photo` tag — a job `tag_application_documents` doesn't do) and
-   `generate_welcome_letter` (whose own new document now gets
-   `customer_id` too, for the same consistency reason). All three calls
-   sit inside `persist_decision`'s existing `account_id IS NOT NULL`
-   idempotency guard — a Temporal retry that finds the account already
-   provisioned skips all three, permanently, same accepted
-   smaller-than-a-duplicated-account gap this file already documents for
-   the other two.
-4. **A rejected, cancelled, or still-pending application's documents
+   above) does this in one pass across every category, in place, on
+   the documents themselves. This runs alongside, not instead of,
+   `promote_government_id_to_customer_photo` and
+   `generate_welcome_letter` (whose own new document gets `customer_id`
+   too, for consistency). All three calls sit inside `persist_decision`'s
+   existing `account_id IS NOT NULL` idempotency guard — a Temporal
+   retry that finds the account already provisioned skips all three,
+   permanently, same accepted smaller-than-a-duplicated-account gap this
+   file already documents for the other two.
+4. **`promote_government_id_to_customer_photo` creates a genuine second
+   Mayan document — a customer-level copy — rather than re-tagging the
+   original, corrected from an earlier draft of this file.** The
+   original design attached `customer_id` directly to the just-approved
+   application's own Government ID document, making one Mayan document
+   satisfy two index leaves at once (CLAUDE.md's old "multi-leaf
+   placement"). Changed after a direct design request: the application's
+   Government ID document is now left completely untouched (still owned
+   only by its application, consistent with "Document hierarchy"'s
+   exclusive-placement rule); a *new* document is created instead, with
+   the same file content (`mayan_client.download_file`, a full in-memory
+   read — POC-scale documents only, no streaming needed for the copy)
+   but tagged with only `customer_id`/`applicant_identifier`/`category`
+   — deliberately no `application_id`/`account_id` at all, so it lives
+   purely at the customer level (Customer Index's own direct
+   `Government ID` leaf). If the customer already had a previous copy
+   (a fresh Government ID on a *later* approved application, the
+   "Returning-customer profile refresh and ID reuse" refresh case), that
+   old copy is trashed first (`DELETE /documents/{id}/`, Mayan's own
+   soft-delete) — still never more than one copy per customer at a
+   time, just via delete-then-create instead of strip-then-retag. The
+   reuse path (no fresh Government ID under the just-approved
+   application) is still a no-op, unchanged — the existing copy is
+   already the customer's current photo.
+5. **A rejected, cancelled, or still-pending application's documents
    never get `account_id` — this was already true by construction, not
    new behavior.** `account_id` is only ever attached inside the
    terminal-`APPROVED` branch of `persist_decision`'s provisioning
@@ -1440,9 +1483,15 @@ surfacing against genuine Mayan behavior**:
    loops. `tests/unit/document/fake_mayan_client.py`'s `attach_metadata`
    now replicates the real reject-on-duplicate behavior (it silently
    allowed this before, which is exactly why the unit suite never
-   caught it) — a new regression test,
-   `test_tag_application_documents_then_promote_does_not_double_attach`,
-   locks this in.
+   caught it). **Superseded, not reverted, by the exclusive-placement
+   redesign below**: `promote_government_id_to_customer_photo` no
+   longer attaches anything to the *same* document
+   `tag_application_documents` touches at all — it creates a brand-new
+   Mayan document instead (see "Document hierarchy" and the new rule 4
+   below), so this specific double-attach can't recur structurally, not
+   just because `_set_metadata` guards it. `_set_metadata` stays in use
+   by `tag_application_documents`' own multi-category attach loop, where
+   the original conflict-on-retry concern is still real.
 
 Both fixes verified end-to-end against a real local stack, not just
 unit tests: a brand-new applicant's four documents carried no
@@ -1463,6 +1512,46 @@ uses; the standard per-test `DELETE FROM ...` cleanup fixtures are
 exactly the reconciliation-worthy drift this file's own
 "Document/database reconciliation" section describes, self-inflicted
 this time) and `lint-imports` both green.
+
+**A follow-up session redesigned the three index templates from
+multi-placement to exclusive placement** (a document lives at exactly
+one leaf — the deepest entity it's actually tied to — never nested
+under more than one branch at once) and, along with it, changed
+`promote_government_id_to_customer_photo` from a re-tag-in-place
+operation into a genuine file copy — see "Document hierarchy" above for
+the resulting tree shape and rule 4 below for the copy mechanism itself.
+**Live-verified against the real stack a second time**, against a fresh
+multi-application scenario built specifically to exercise the new
+design (two applications approved under one identifier, a third
+rejected): the rejected application's own documents stayed under its
+own `<application_id>` branch only, never touching the customer or
+account level; each approved application's documents landed only under
+`<customer_id>/<account_id>/<application_id>/<category>`, confirmed via
+direct REST tree-walking that no document appeared in more than one
+leaf; the generated Welcome Letter landed only under
+`<customer_id>/<account_id>/<category>`, with no `<application_id>`
+nesting; and the customer-level Government ID copy
+(`<customer_id>/<category>`, no account or application node in its
+path) held exactly one document throughout — the second approval's
+fresh Government ID upload correctly trashed the first copy
+(`DELETE /documents/{id}/`, soft-delete, same as every other delete in
+this codebase) before creating its replacement, and the *original*
+application-level Government ID documents for both applications were
+left completely untouched by the copy, still findable under their own
+`<application_id>` branches. A real correctness bug in
+`reconcile.py` was also found and fixed while building this: `scan()`
+used to treat *every* stale `customer_id` as a strippable secondary tag
+— true when `customer_id` only ever rode alongside `application_id`,
+no longer true now that the customer-level copy carries `customer_id`
+as its *only* metadata. `scan()` now checks whether a document has
+`application_id`/`account_id` at all before deciding orphaned-vs-stale
+(see rule 5 below and `scan()`'s own docstring); without this fix, a
+customer-level copy whose owning customer row was deleted would have
+had its one identifying tag stripped instead of the whole document
+being trashed, leaving a permanently untethered, un-taggable document
+invisible to every future reconciliation run. Full unit suite (244
+tests, same dedicated `loan_onboarding_test` database discipline as
+above) and `lint-imports` both green after the redesign.
 
 **Deliberately out of scope**: no backfill of documents belonging to
 applications approved *before* this lifecycle existed — same "forward-

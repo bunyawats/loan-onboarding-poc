@@ -179,35 +179,32 @@ async def test_tag_application_documents_tags_every_category_and_rebuilds_once(f
     assert fake_client.rebuild_count == 1
 
 
-async def test_tag_application_documents_then_promote_does_not_double_attach(fake_client):
-    """Regression: tag_application_documents and
-    promote_government_id_to_customer_photo both attach customer_id to
-    the Government ID document when run in persist_decision's real
-    order (tag first, then promote) -- a real 400 against live Mayan
-    (P16-4) if either used a bare create instead of the idempotent
-    update-or-create helper."""
-    gov_id = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))
-
-    await service.tag_application_documents("app-1", "acct-1", "cust-1")
-    await service.promote_government_id_to_customer_photo("app-1", "cust-1")
-
-    stored = fake_client.documents[gov_id.document_id]
-    assert stored.metadata["customer_id"] == "cust-1"
-    assert stored.metadata["account_id"] == "acct-1"
-
-
-async def test_promote_government_id_retags_without_creating_new_document(fake_client):
-    ref = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"content"))
+async def test_promote_government_id_creates_a_separate_customer_level_copy(fake_client):
+    """Rewritten from a re-tag-in-place to a genuine copy: the original
+    document (still owned by its application) is untouched, and a
+    *second* Mayan document is created carrying the same file content
+    but only customer_id/applicant_identifier/category -- deliberately no
+    application_id/account_id, so it lives purely at the customer level."""
+    ref = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"real content"))
     doc_count_before = len(fake_client.documents)
 
     await service.promote_government_id_to_customer_photo("app-1", "cust-1")
 
-    assert len(fake_client.documents) == doc_count_before
-    stored = fake_client.documents[ref.document_id]
-    assert stored.metadata["customer_id"] == "cust-1"
-    # Original metadata untouched.
-    assert stored.metadata["category"] == "Government ID"
-    assert stored.metadata["application_id"] == "app-1"
+    assert len(fake_client.documents) == doc_count_before + 1
+
+    original = fake_client.documents[ref.document_id]
+    assert original.metadata["category"] == "Government ID"
+    assert original.metadata["application_id"] == "app-1"
+    assert "customer_id" not in original.metadata
+
+    copy_id = next(doc_id for doc_id in fake_client.documents if doc_id != ref.document_id)
+    copy = fake_client.documents[copy_id]
+    assert copy.metadata["customer_id"] == "cust-1"
+    assert copy.metadata["category"] == "Government ID"
+    assert copy.metadata["applicant_identifier"] == "alice@example.com"
+    assert "application_id" not in copy.metadata
+    assert "account_id" not in copy.metadata
+    assert copy.file_versions == [b"real content"]
 
 
 async def test_promote_government_id_is_a_no_op_when_none_found(fake_client):
@@ -217,34 +214,39 @@ async def test_promote_government_id_is_a_no_op_when_none_found(fake_client):
     legitimately have no Government ID document of its own."""
     await service.promote_government_id_to_customer_photo("app-missing", "cust-1")
     assert fake_client.rebuild_count == 0
+    assert len(fake_client.documents) == 0
 
 
-async def test_promote_government_id_supersedes_and_untags_previous_id_photo(fake_client):
-    """Exactly one current id_photo per customer, enforced for real:
-    promoting a second, fresh Government ID upload for the same
-    customer must strip the customer_id metadata from the first
-    document, not just tag the second."""
-    first = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id1.pdf", b"1"))
+async def test_promote_government_id_trashes_old_copy_before_creating_new_one(fake_client):
+    """Exactly one current Government ID copy per customer, enforced for
+    real: promoting a second, fresh Government ID upload for the same
+    customer must trash the first copy, not leave two around."""
+    first_source = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id1.pdf", b"1"))
     await service.promote_government_id_to_customer_photo("app-1", "cust-1")
-    assert fake_client.documents[first.document_id].metadata["customer_id"] == "cust-1"
+    first_copies = await service.list_customer_documents("cust-1")
+    assert len(first_copies) == 1
+    first_copy_id = first_copies[0].document_id
 
-    second = await service.upload("alice@example.com", "app-2", "Government ID", UploadedFile("id2.pdf", b"2"))
+    second_source = await service.upload("alice@example.com", "app-2", "Government ID", UploadedFile("id2.pdf", b"2"))
     await service.promote_government_id_to_customer_photo("app-2", "cust-1")
 
-    assert "customer_id" not in fake_client.documents[first.document_id].metadata
-    assert fake_client.documents[second.document_id].metadata["customer_id"] == "cust-1"
+    # The old copy is gone (trashed); the two source documents (still
+    # owned by their own applications) are both still present untouched.
+    assert first_copy_id not in fake_client.documents
+    assert first_source.document_id in fake_client.documents
+    assert second_source.document_id in fake_client.documents
+
+    second_copies = await service.list_customer_documents("cust-1")
+    assert len(second_copies) == 1
+    assert fake_client.documents[second_copies[0].document_id].file_versions == [b"2"]
 
 
-async def test_promote_government_id_does_not_strip_customer_id_from_unrelated_documents(fake_client):
-    """Regression: tag_application_documents/generate_welcome_letter now
-    tag customer_id onto documents that are NOT the id_photo (Proof of
-    Income, Welcome Letter, etc.) -- promoting a fresh Government ID for
-    a later application must only strip the stale tag from the *old*
-    Government ID document, never from these unrelated ones."""
-    # First approved application: tag_application_documents-style tagging
-    # across every category, plus a Welcome Letter -- simulates what
-    # persist_decision does on approval.
-    old_id_photo = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id1.pdf", b"1"))
+async def test_promote_government_id_does_not_touch_unrelated_documents(fake_client):
+    """Regression, carried forward from the re-tag design: promoting a
+    fresh Government ID must never touch other documents that also
+    happen to carry customer_id (Proof of Income via
+    tag_application_documents, Welcome Letter via generate_welcome_letter)."""
+    await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id1.pdf", b"1"))
     income = await service.upload("alice@example.com", "app-1", "Proof of Income", UploadedFile("inc.pdf", b"2"))
     await service.tag_application_documents("app-1", "acct-1", "cust-1")
     await service.promote_government_id_to_customer_photo("app-1", "cust-1")
@@ -252,17 +254,14 @@ async def test_promote_government_id_does_not_strip_customer_id_from_unrelated_d
         "alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000"
     )
 
-    # A second approved application for the same customer, fresh
-    # Government ID upload -- promoting it must supersede only the old
-    # Government ID document.
-    new_id_photo = await service.upload("alice@example.com", "app-2", "Government ID", UploadedFile("id2.pdf", b"3"))
+    await service.upload("alice@example.com", "app-2", "Government ID", UploadedFile("id2.pdf", b"3"))
     await service.promote_government_id_to_customer_photo("app-2", "cust-1")
 
-    assert "customer_id" not in fake_client.documents[old_id_photo.document_id].metadata
-    assert fake_client.documents[new_id_photo.document_id].metadata["customer_id"] == "cust-1"
-    # Untouched -- these were never Government ID documents.
+    # Untouched -- these were never the customer-level copy.
     assert fake_client.documents[income.document_id].metadata["customer_id"] == "cust-1"
     assert fake_client.documents[welcome_letter.document_id].metadata["customer_id"] == "cust-1"
+    assert income.document_id in fake_client.documents
+    assert welcome_letter.document_id in fake_client.documents
 
 
 async def test_has_id_photo_true_after_promotion_false_before(fake_client):
@@ -272,6 +271,17 @@ async def test_has_id_photo_true_after_promotion_false_before(fake_client):
     await service.promote_government_id_to_customer_photo("app-1", "cust-1")
 
     assert await service.has_id_photo("cust-1") is True
+
+
+async def test_has_id_photo_false_when_customer_id_only_on_application_documents(fake_client):
+    """The tightened `list_customer_documents`/`has_id_photo` must not be
+    fooled by a customer who has customer_id on other documents
+    (tag_application_documents) but never actually got a Government ID
+    copy -- e.g. a reuse-path application where promote is a no-op."""
+    await service.upload("alice@example.com", "app-1", "Proof of Income", UploadedFile("inc.pdf", b"1"))
+    await service.tag_application_documents("app-1", "acct-1", "cust-1")
+
+    assert await service.has_id_photo("cust-1") is False
 
 
 async def test_check_completeness_excludes_categories_when_asked():
@@ -342,11 +352,14 @@ async def test_list_customer_documents_and_list_account_documents(fake_client):
     )
     await service.generate_welcome_letter("alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000")
 
-    # Welcome Letter now carries customer_id too (CLAUDE.md's "Document
-    # metadata assignment lifecycle") -- both it and the promoted
-    # Government ID (the id_photo) show up here.
+    # list_customer_documents is specifically the customer-level
+    # Government ID copy -- Welcome Letter carries customer_id too
+    # (CLAUDE.md's "Document metadata assignment lifecycle") but also
+    # carries account_id, so it's excluded here and belongs under
+    # list_account_documents instead (exclusive placement).
     customer_docs = await service.list_customer_documents("cust-1")
-    assert {d.category for d in customer_docs} == {"Government ID", "Welcome Letter"}
+    assert len(customer_docs) == 1
+    assert customer_docs[0].category == "Government ID"
 
     account_docs = await service.list_account_documents("acct-1")
     assert len(account_docs) == 1

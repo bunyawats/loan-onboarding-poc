@@ -66,15 +66,27 @@ async def _customer_exists(customer_id: str) -> bool:
 async def scan() -> tuple[list[Orphan], list[DocumentRef]]:
     """Returns (orphaned, stale_tags).
 
-    orphaned: documents whose primary owner (application_id for an
-    Application Document, account_id for an Account Document) no
-    longer resolves -- the document itself has nothing left to belong
-    to and should be removed.
+    orphaned: documents whose primary owner no longer resolves -- the
+    document itself has nothing left to belong to and should be
+    removed. Primary owner is `application_id` for an Application
+    Document, `account_id` for an Account Document, **or `customer_id`
+    for the customer-level Government ID copy specifically** (a
+    document carrying `customer_id` but neither `application_id` nor
+    `account_id` -- `document.service.promote_government_id_to_customer_photo`'s
+    copy has no other owner at all, so a missing customer means the
+    whole document is orphaned, not just a stale tag to strip).
 
-    stale_tags: documents whose primary owner still resolves fine, but
-    whose secondary customer_id tag (only ever present on a promoted
-    id_photo document) points at a customer row that's gone -- narrower
-    than orphaned, fixed by stripping just that metadata entry."""
+    stale_tags: documents whose primary owner (application_id or
+    account_id) still resolves fine, but whose *secondary* customer_id
+    tag points at a customer row that's gone -- narrower than orphaned,
+    fixed by stripping just that metadata entry. **Corrected from an
+    earlier draft, written before `promote_government_id_to_customer_photo`
+    became a copy operation**: that draft treated every `customer_id`
+    as secondary, which was true when the only place `customer_id` ever
+    lived alone (no application_id/account_id) didn't exist yet -- the
+    copy makes that case real, and stripping its only tag instead of
+    trashing it would leave a genuinely untethered document with zero
+    identifying metadata at all, invisible to every future scan."""
     documents = await document_service.list_all_documents()
     orphaned: list[Orphan] = []
     stale_tags: list[DocumentRef] = []
@@ -87,7 +99,10 @@ async def scan() -> tuple[list[Orphan], list[DocumentRef]]:
             orphaned.append((doc, f"account_id {doc.account_id} not found"))
             continue
         if doc.customer_id is not None and not await _customer_exists(doc.customer_id):
-            stale_tags.append(doc)
+            if doc.application_id is None and doc.account_id is None:
+                orphaned.append((doc, f"customer_id {doc.customer_id} not found (no other owner)"))
+            else:
+                stale_tags.append(doc)
 
     return orphaned, stale_tags
 
