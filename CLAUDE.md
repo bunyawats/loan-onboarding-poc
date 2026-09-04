@@ -578,10 +578,42 @@ the domain modules' `service.py` functions.
   `resubmit_application(...)` / `list_for_applicant(applicant_identifier, ...)`,
   `document.service.upload(applicant_identifier, application_id, ...)` /
   `list_documents(...)`,
-  `workflow.service.signal_decision(..., decision="CANCELLED")`. **No
-  `account.service` call** — there's nothing for this BFF to
-  find-or-create anymore; account creation happens only inside
-  `application/activities.py` on approval.
+  `workflow.service.signal_decision(..., decision="CANCELLED")`.
+  **`account.service` is now also called, read-only** (corrected — an
+  earlier draft of this bullet said this BFF makes no `account.service`
+  call at all; true until the consent-upload feature below needed
+  `account_id` to hand to `document.service.upload_consent(...)`):
+  `account.service.get_by_application_id(application_id)`, resolving the
+  account behind an `APPROVED` application. Still no *write* call —
+  account creation happens only inside `application/activities.py` on
+  approval, unchanged.
+- **Consent upload (resolves PRD §11's "which surface" question for the
+  customer half)**: the application detail page, once
+  `application.status == APPROVED`, shows a Consent section —
+  `_detail_context` resolves the account via
+  `account.service.get_by_application_id(...)` and the current consent
+  document (if any) via `document.service.list_account_documents(...)`
+  filtered to `CATEGORY_CONSENT`. A plain (non-htmx) POST-redirect-GET
+  form — same pattern as Cancel/Resubmit, not the one htmx widget this
+  module otherwise uses — calls
+  `document.service.upload_consent(applicant_identifier, account_id,
+  customer_id, file)`; re-uploading versions the same Mayan document
+  rather than creating a new one, so the page always links to one
+  document regardless of how many times it's been replaced. A dedicated
+  `document.service.preview_account_document(account_id, document_id)`
+  (new — `preview(application_id, ...)` can't authorize an
+  `application_id`-less document) backs the preview link, gated by the
+  same applicant-owns-this-application check every other route here
+  uses (`_owned_application`, wrapped for this case in a new
+  `_owned_account` helper that also enforces `APPROVED` + an account
+  actually existing). Live-verified via direct HTTP calls against the
+  real stack: uploading, then re-uploading, a consent file for a real
+  approved application kept the same Mayan document id across both
+  calls (2 file versions, latest content served on preview), Mayan
+  metadata confirmed `account_id`/`customer_id`/`applicant_identifier`/
+  `category=Consent` all attached, and a second identity's session
+  correctly got `404` on both the first identity's application detail
+  page and a direct hit on its consent preview URL.
 - **(Phase 14, built)**: the new-application wizard's start step calls
   `customer.service.find_by_identifier(...)` (the same read-only call
   already used for "welcome back" copy above) to prefill
@@ -1077,8 +1109,19 @@ through the application flow:
   Index's `<customer_id>/<account_id>/<category>` branch needs it to
   nest either one under the customer). Not restricted to one caller —
   either BFF can call it once `account_id`/`customer_id` exist (both
-  already import `document/`); which surface actually exposes a UI for
-  this is not yet designed — see `PRD.md`'s open questions.
+  already import `document/`). **The UI surface question is resolved
+  (built)**: `bff_customer`'s own application detail page, once the
+  application is `APPROVED` — see that module's section below. Staff
+  triggering an upload on the customer's behalf, from
+  `bff_backoffice`, remains unbuilt — `PRD.md`'s open question is
+  narrowed to that half, not the whole thing.
+- `service.preview_account_document(account_id, document_id) ->
+  DocumentStream` — the account-scoped sibling of `preview(application_id,
+  document_id)`, needed because an account-level document (Consent,
+  Welcome Letter) carries no `application_id` at all, so `preview`
+  itself can never authorize a request for one. Shares the actual
+  Mayan-streaming call with `preview` via a private `_stream_document`
+  helper; only the ownership check differs.
 - `service.list_customer_documents(customer_id) -> list[DocumentRef]`,
   `service.list_account_documents(account_id) -> list[DocumentRef]` —
   for staff/customer viewing (`id_photo`; `welcome_letter` + `consent`

@@ -422,6 +422,42 @@ old cached application/document data — surfaced to the user directly
 rather than guessed at; E2E verification for this pass was done via
 direct HTTP/API calls instead of a browser.
 
+**Follow-up session, same day: resolved PRD §11's "which surface
+triggers a `consent` upload" open question, customer half.** User
+confirmed consent is an account-level document (same as Welcome
+Letter) and asked for `customer_id` to be attached to it for
+consistency — `document.service.upload_consent(...)` gained a
+`customer_id` parameter, attached on the create-first-version path;
+the new-file-version path now returns the existing document's own
+real metadata (via `dataclasses.replace`) instead of a
+freshly-constructed partial `DocumentRef`. Then built the actual UI:
+`bff_customer`'s application detail page shows a Consent
+upload/replace section once `application.status == APPROVED`,
+resolving the account via a new (read-only)
+`account.service.get_by_application_id(...)` call — this BFF's own
+module section in `CLAUDE.md` previously claimed "no `account.service`
+call", now corrected. A new `document.service.preview_account_document(account_id,
+document_id)` (sharing a `_stream_document` helper with the existing
+`preview(application_id, ...)`) backs the preview link, since
+account-level documents carry no `application_id` for the existing
+`preview` to authorize against. Two new unit tests
+(`test_preview_account_document_streams_matching_document`,
+`test_preview_account_document_raises_when_document_belongs_to_different_account`)
+plus updated `upload_consent` tests — full suite (246 tests) and
+`lint-imports` (8/8) both green. **Live-verified against the real
+stack via direct HTTP calls** (browser automation still unreliable per
+the note just above): uploaded, then re-uploaded, a consent file
+against a real `APPROVED` application — same Mayan document id both
+times (2 file versions, latest content served on preview), confirmed
+via the Mayan REST API that `account_id`/`customer_id`/
+`applicant_identifier`/`category=Consent` were all attached; a second
+identity's own session correctly got `404` both loading the first
+identity's application detail page and hitting its consent preview URL
+directly. `reconcile.py --report` still shows zero orphans/stale tags
+afterward. Back-office-triggered consent upload (the other half of
+PRD §11's question) remains explicitly out of scope — not asked for
+this session.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 

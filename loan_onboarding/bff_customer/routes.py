@@ -29,14 +29,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from temporalio.client import Client
 
+from loan_onboarding.account import service as account_service
+from loan_onboarding.account.models import Account
 from loan_onboarding.application import schemas as application_schemas
 from loan_onboarding.application import service as application_service
 from loan_onboarding.application.models import Application, ApplicationNotFound
 from loan_onboarding.bff_customer import identity, notifications
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
-from loan_onboarding.document.models import UploadedFile
-from loan_onboarding.document.service import CATEGORY_GOVERNMENT_ID
+from loan_onboarding.document.models import DocumentStream, UploadedFile
+from loan_onboarding.document.service import CATEGORY_CONSENT, CATEGORY_GOVERNMENT_ID
 from loan_onboarding.idgen import service as idgen_service
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
@@ -313,6 +315,20 @@ async def _detail_context(application: Application) -> dict[str, Any]:
             }
             for category in required
         ]
+    account = None
+    consent_document = None
+    if application.status == STATUS_APPROVED:
+        # Consent is an account-level document (CLAUDE.md's "Document
+        # metadata assignment lifecycle") -- only offerable once the
+        # approval has actually provisioned an account, which is
+        # exactly what STATUS_APPROVED being terminal already
+        # guarantees (persist_decision provisions the account in the
+        # same transition that writes this status).
+        account = await account_service.get_by_application_id(application_id)
+        if account is not None:
+            account_documents = await document_service.list_account_documents(account.account_id)
+            consent_document = next((d for d in account_documents if d.category == CATEGORY_CONSENT), None)
+
     return {
         "application": application,
         "timeline": _build_timeline(application),
@@ -320,6 +336,8 @@ async def _detail_context(application: Application) -> dict[str, Any]:
         "by_category": by_category,
         "categories": categories,
         "is_terminal": application.status in TERMINAL_STATUSES,
+        "account": account,
+        "consent_document": consent_document,
     }
 
 
@@ -413,12 +431,7 @@ async def upload_more_info_document(
     )
 
 
-async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
-    try:
-        stream = await document_service.preview(application_id, document_id)
-    except document_service.DocumentNotFound:
-        raise HTTPException(status_code=404)
-
+def _stream_response(stream: DocumentStream) -> StreamingResponse:
     async def _iter_and_close():
         try:
             async for chunk in stream.aiter_bytes():
@@ -433,12 +446,63 @@ async def _document_preview(application_id: str, document_id: int) -> StreamingR
     )
 
 
+async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
+    try:
+        stream = await document_service.preview(application_id, document_id)
+    except document_service.DocumentNotFound:
+        raise HTTPException(status_code=404)
+    return _stream_response(stream)
+
+
 @router.get("/applications/{application_id}/documents/{document_id}/preview")
 async def application_document_preview(
     application_id: str, document_id: int, applicant_identifier: str = Depends(_require_applicant)
 ):
     await _owned_application(application_id, applicant_identifier)
     return await _document_preview(application_id, document_id)
+
+
+async def _owned_account(application_id: str, applicant_identifier: str) -> tuple[Application, Account]:
+    """Consent lives at the account level, but the customer only ever
+    reaches it from their own application's detail page -- so ownership
+    is still checked via `_owned_application` (applicant_identifier
+    filter, PRD §7.1/§10), then the account is resolved from that
+    already-owned application, never taken as a raw path param a
+    customer could guess at."""
+    application = await _owned_application(application_id, applicant_identifier)
+    if application.status != STATUS_APPROVED:
+        raise HTTPException(status_code=400, detail="consent is only available for an approved application")
+    account = await account_service.get_by_application_id(application_id)
+    if account is None:
+        raise HTTPException(status_code=404)
+    return application, account
+
+
+@router.post("/applications/{application_id}/consent/upload", response_class=RedirectResponse)
+async def upload_consent_document(
+    request: Request,
+    application_id: str,
+    file: UploadFile = File(...),
+    applicant_identifier: str = Depends(_require_applicant),
+):
+    application, account = await _owned_account(application_id, applicant_identifier)
+    content = await file.read()
+    await document_service.upload_consent(
+        applicant_identifier, account.account_id, account.customer_id, UploadedFile(file.filename, content)
+    )
+    return RedirectResponse(url=f"/apply/applications/{application_id}", status_code=303)
+
+
+@router.get("/applications/{application_id}/consent/{document_id}/preview")
+async def consent_document_preview(
+    application_id: str, document_id: int, applicant_identifier: str = Depends(_require_applicant)
+):
+    _, account = await _owned_account(application_id, applicant_identifier)
+    try:
+        stream = await document_service.preview_account_document(account.account_id, document_id)
+    except document_service.DocumentNotFound:
+        raise HTTPException(status_code=404)
+    return _stream_response(stream)
 
 
 # --------------------------------------------------------- new application ----

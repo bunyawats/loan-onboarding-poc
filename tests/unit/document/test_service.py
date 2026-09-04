@@ -160,6 +160,26 @@ async def test_preview_raises_when_document_has_no_uploaded_file(fake_client):
         await service.preview("app-1", document["id"])
 
 
+async def test_preview_account_document_streams_matching_document(fake_client):
+    ref = await service.upload_consent(
+        "alice@example.com", "acct-1", "cust-1", UploadedFile("consent.pdf", b"v1")
+    )
+
+    stream = await service.preview_account_document("acct-1", ref.document_id)
+    chunks = [chunk async for chunk in stream.aiter_bytes()]
+    assert chunks == [b"%PDF-1.4 fake bytes"]
+    await stream.aclose()
+
+
+async def test_preview_account_document_raises_when_document_belongs_to_different_account(fake_client):
+    ref = await service.upload_consent(
+        "alice@example.com", "acct-1", "cust-1", UploadedFile("consent.pdf", b"v1")
+    )
+
+    with pytest.raises(service.DocumentNotFound):
+        await service.preview_account_document("acct-2", ref.document_id)
+
+
 async def test_tag_application_documents_tags_every_category_and_rebuilds_once(fake_client):
     gov_id = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))
     income = await service.upload("alice@example.com", "app-1", "Proof of Income", UploadedFile("inc.pdf", b"2"))

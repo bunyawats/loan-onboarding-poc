@@ -39,6 +39,12 @@ from .models import DocumentRef, DocumentStream, UploadedFile
 # apart on the exact string.
 CATEGORY_GOVERNMENT_ID = "Government ID"
 
+# The other category a caller outside this module needs to name --
+# bff_customer/routes.py's consent-upload route matches documents
+# against this to render the current one, same "shared constant, not a
+# re-typed literal" reasoning as CATEGORY_GOVERNMENT_ID above.
+CATEGORY_CONSENT = "Consent"
+
 REQUIRED_CATEGORIES: dict[str, list[str]] = {
     "personal_loan": [CATEGORY_GOVERNMENT_ID, "Proof of Income", "Bank Statements", "Credit Report"],
     "auto_loan": [
@@ -235,15 +241,10 @@ async def check_completeness(
     return [category for category in required if category not in present]
 
 
-async def preview(application_id: str, document_id: int) -> DocumentStream:
-    """Streams the file from Mayan for in-app viewing -- verifies
-    `document_id` actually belongs to `application_id` first (via its
-    real metadata, not trust in the caller's URL) so neither BFF needs
-    its own Mayan credentials nor exposes an arbitrary document by id."""
-    metadata = await _metadata_map_for_id(document_id)
-    if metadata is None or metadata.get("application_id") != application_id:
-        raise DocumentNotFound(f"document {document_id} not found for application {application_id}")
-
+async def _stream_document(document_id: int) -> DocumentStream:
+    """Shared by `preview`/`preview_account_document` once each has
+    already verified ownership its own way -- the actual Mayan
+    file-streaming call is identical either way."""
     document = await mayan_client.get_document(document_id)
     file_latest = document.get("file_latest") or {}
     if not file_latest.get("id"):
@@ -256,6 +257,28 @@ async def preview(application_id: str, document_id: int) -> DocumentStream:
         aiter_bytes=response.aiter_bytes,
         aclose=response.aclose,
     )
+
+
+async def preview(application_id: str, document_id: int) -> DocumentStream:
+    """Streams the file from Mayan for in-app viewing -- verifies
+    `document_id` actually belongs to `application_id` first (via its
+    real metadata, not trust in the caller's URL) so neither BFF needs
+    its own Mayan credentials nor exposes an arbitrary document by id."""
+    metadata = await _metadata_map_for_id(document_id)
+    if metadata is None or metadata.get("application_id") != application_id:
+        raise DocumentNotFound(f"document {document_id} not found for application {application_id}")
+    return await _stream_document(document_id)
+
+
+async def preview_account_document(account_id: str, document_id: int) -> DocumentStream:
+    """Same ownership-then-stream shape as `preview`, scoped to
+    `account_id` instead -- needed for account-level documents (Consent,
+    Welcome Letter) that carry no `application_id` at all, so `preview`
+    itself can never authorize them."""
+    metadata = await _metadata_map_for_id(document_id)
+    if metadata is None or metadata.get("account_id") != account_id:
+        raise DocumentNotFound(f"document {document_id} not found for account {account_id}")
+    return await _stream_document(document_id)
 
 
 async def tag_application_documents(application_id: str, account_id: str, customer_id: str) -> None:
@@ -479,7 +502,7 @@ async def upload_consent(
     what `upload_consent` needs). CLAUDE.md's original placeholder
     (`action_name="new"*`, flagged "confirm during this task") was
     wrong and has been corrected in place."""
-    existing = await _documents_matching({"account_id": account_id, "category": "Consent"})
+    existing = await _documents_matching({"account_id": account_id, "category": CATEGORY_CONSENT})
 
     if existing:
         document_id = existing[0].document_id
@@ -497,7 +520,7 @@ async def upload_consent(
     for field, value in [
         ("applicant_identifier", applicant_identifier),
         ("account_id", account_id),
-        ("category", "Consent"),
+        ("category", CATEGORY_CONSENT),
         ("customer_id", customer_id),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
@@ -507,7 +530,7 @@ async def upload_consent(
     return DocumentRef(
         document_id=document_id,
         filename=file.filename,
-        category="Consent",
+        category=CATEGORY_CONSENT,
         applicant_identifier=applicant_identifier,
         account_id=account_id,
         customer_id=customer_id,

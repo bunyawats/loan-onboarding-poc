@@ -256,9 +256,9 @@ terminal `APPROVED` (§6.2, §9.2):
 - **`consent`** (account, versioned) — one logical document per
   account whose content can be updated over time; each update is a new
   *version* of the same document (Mayan's own file-versioning), not a
-  new document. **Which screen actually lets a customer or staff member
-  trigger a consent upload isn't decided yet** — see §11's open
-  questions.
+  new document. **Built**: the customer's own application detail page,
+  once `APPROVED`, is the screen — see §11 for the still-open
+  back-office half.
 
 ## 7. Identity: customer side unauthenticated, back office real Keycloak
 
@@ -566,12 +566,15 @@ because `account_id` doesn't exist yet at document-upload time. See
   narrower, already-in-progress flow, not a fresh application; revisit
   if resubmit turns out to hit this often enough to be worth the extra
   plumbing.
-- **Which surface triggers a `consent` upload (§6.5)?** Not designed
-  yet — could be a post-approval customer screen, a back-office action,
-  or both. `document.service.upload_consent(account_id, file)` doesn't
-  care which caller uses it; this is purely a missing UI flow, not an
-  API gap. Needs a decision before Phase 10/11 builds whichever screen
-  it turns out to be.
+- **Which surface triggers a `consent` upload (§6.5)? — half-resolved.**
+  The customer half is built: `bff_customer`'s application detail page
+  shows a Consent upload/replace section once the application is
+  `APPROVED`, calling `document.service.upload_consent(applicant_identifier,
+  account_id, customer_id, file)`. Whether a back-office action should
+  *also* let staff upload consent on the customer's behalf is still
+  undecided — `upload_consent` doesn't care which caller uses it, so
+  adding that later needs no API change, purely a `bff_backoffice`
+  route + template.
 - Should the escalation threshold be per-product instead of global?
   (Deferred to POC v2 — see `CLAUDE.md`.)
 - Should `MORE_INFO_REQUESTED` → resubmit require *new* documents, or is
