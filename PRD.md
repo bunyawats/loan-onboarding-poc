@@ -233,22 +233,31 @@ application flow, all of them consequences of an application reaching
 terminal `APPROVED` (§6.2, §9.2):
 
 - **`id_photo`** (customer, exactly one at a time) — when a customer
-  record is created or matched at approval, the just-approved
-  application's "Government ID" document is re-tagged as this
-  customer's `id_photo` rather than asking them to upload it again.
-  **Refreshed by a later approved application's own fresh upload, not
-  frozen after the first one — corrected from an earlier draft of this
-  PRD**, which said "the first one stands." A returning customer can
-  choose to reuse the ID already on file (§8.1) — no new upload, the
-  existing `id_photo` is untouched — or upload a new one, which then
-  supersedes it once that application is approved. See `CLAUDE.md`'s
-  "Returning-customer profile refresh and ID reuse" for the mechanism
-  (built and live-verified in Phase 14) and for why this was
-  found to be a real, previously-unenforced gap rather than a
-  deliberate choice: nothing in the code has ever actually stopped a
-  second `id_photo` from being tagged, "the first one stands" was
-  simply never exercised until this feature made a second
-  fresh-upload approval for an existing customer reachable.
+  record is created or matched at approval, and a fresh Government ID
+  was uploaded for the just-approved application, a **copy** of that
+  document is created and tagged as this customer's `id_photo` — the
+  application's own original Government ID document is left completely
+  untouched under its own application. **Corrected here**: an earlier
+  draft of this PRD (and of `CLAUDE.md`) described this as re-tagging
+  the application's document in place; changed to a genuine second
+  Mayan document after a direct design request, so a document never
+  needs to satisfy two different places in the browsing hierarchy at
+  once — see `CLAUDE.md`'s "Document hierarchy" for why. **Refreshed by
+  a later approved application's own fresh upload, not frozen after the
+  first one — corrected from an earlier draft of this PRD**, which said
+  "the first one stands." A returning customer can choose to reuse the
+  ID already on file (§8.1) — no new upload, the existing `id_photo`
+  copy is untouched — or upload a new one, which then supersedes it
+  (the old copy is trashed) once that application is approved. See
+  `CLAUDE.md`'s "Returning-customer profile refresh and ID reuse" and
+  "Document metadata assignment lifecycle" for the full mechanism
+  (built and live-verified in Phase 14, then re-verified after the
+  copy-not-retag redesign) and for why "the first one stands" was found
+  to be a real, previously-unenforced gap rather than a deliberate
+  choice: nothing in the code ever actually stopped a second `id_photo`
+  from being tagged, it simply was never exercised until this feature
+  made a second fresh-upload approval for an existing customer
+  reachable.
 - **`welcome_letter`** (account, exactly one) — generated automatically
   when the account is created at approval, no human involved. A simple
   templated document (applicant name, product type, amount, decision
@@ -551,9 +560,16 @@ gets attached.
 4. Bulk approve/reject works for both Underwriter and Manager screens,
    including a mix of eligible and already-decided rows in one batch
    (partial success reported per item, not an all-or-nothing failure).
-5. A native Temporal cancel or a deleted workflow execution doesn't
-   orphan a Postgres row at a non-terminal status forever (reuse
-   `review-approval-temporal`'s recovery mechanisms).
+5. A native Temporal *cancel* doesn't orphan a Postgres row at a
+   non-terminal status forever — verified: `except
+   asyncio.CancelledError` recovery runs `persist_decision` with
+   `decision="CANCELLED"`, landing the row on `CANCELLED` (reusing
+   `review-approval-temporal`'s recovery mechanism). **A genuine,
+   documented gap, not met**: a native Temporal *terminate* (as opposed
+   to cancel) delivers no event the workflow can catch, so the
+   Postgres row is left stuck at its non-terminal status permanently,
+   and no reconciliation job in this codebase catches it from the
+   outside either — see `CLAUDE.md`'s "Known gaps."
 6. `docker compose up --build` brings up the entire stack — the one app
    image (web process(es) + Temporal worker process(es), all seven
    modules), Mayan + its own Postgres/Redis, the shared Postgres

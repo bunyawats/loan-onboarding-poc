@@ -50,7 +50,7 @@ graph TB
     workerWorkflow -->|poll task queue| temporalServer
     workerActivity -->|poll task queue, run activities| temporalServer
     workerActivity -->|"persist_application / persist_decision / persist_resubmit"| loanDb
-    workerActivity -->|"promote_government_id_to_customer_photo<br/>generate_welcome_letter"| mayan
+    workerActivity -->|"tag_application_documents<br/>promote_government_id_to_customer_photo<br/>generate_welcome_letter"| mayan
 
     temporalServer --> temporalDb
     temporalUi --> temporalServer
@@ -74,7 +74,8 @@ graph TB
   account-on-approval provisioning (`CLAUDE.md`'s "Applying without
   being a customer yet") runs inside `persist_decision`, which is
   activity code, hence this process (not `app`) is what calls
-  `promote_government_id_to_customer_photo`/`generate_welcome_letter`.
+  `tag_application_documents`/`promote_government_id_to_customer_photo`/
+  `generate_welcome_letter`.
 - **Keycloak's `backoffice-redis` and Mayan's `mayan-redis` are
   separate Redis instances** — named distinctly, no shared state
   between the two, matching `CLAUDE.md`'s explicit "not
