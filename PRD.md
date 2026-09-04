@@ -513,11 +513,23 @@ the same customer and product type).
 | `manager_name`, `manager_comment`, `manager_decided_at` | set only for escalated applications |
 | `created_at`, `updated_at` | |
 
-`applicant_identifier` and `application_id` are what's mirrored into
-Mayan's document metadata — the hierarchy is two levels
-(`applicant_identifier -> application_id`), not three, precisely
-because `account_id` doesn't exist yet at document-upload time. See
-`CLAUDE.md`'s document-hierarchy section.
+`application_id` (plus `applicant_identifier` and `category`) is
+always mirrored into Mayan's document metadata at upload time, since
+`account_id`/`customer_id` don't exist yet pre-approval; `customer_id`
+joins them at upload only when the applicant already resolves to an
+existing customer, and `account_id` is attached to every document
+under the application on approval. Staff browse the result through
+**three separate index templates** — Customer Index, Account Index,
+Application Index, one rooted at each id — not a single two-level
+tree; a document lives at exactly one leaf per index, the deepest
+entity it's actually tied to (**corrected here** — an earlier draft of
+this row described a single two-level `applicant_identifier ->
+application_id` hierarchy, which predates that redesign).
+`applicant_identifier` is attached to every document but plays no role
+in how any of the three trees are organized. See `CLAUDE.md`'s
+"Document hierarchy" and "Document metadata assignment lifecycle"
+sections for the full diagrams and the exact rules for when each field
+gets attached.
 
 ## 10. Success criteria for this POC
 
