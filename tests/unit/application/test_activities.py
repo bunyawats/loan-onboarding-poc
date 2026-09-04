@@ -41,7 +41,10 @@ async def _clean_tables():
 
 @pytest.fixture(autouse=True)
 def _mock_document_service(monkeypatch):
-    calls = {"promote": [], "welcome_letter": []}
+    calls = {"tag": [], "promote": [], "welcome_letter": []}
+
+    async def fake_tag(application_id, account_id, customer_id):
+        calls["tag"].append((application_id, account_id, customer_id))
 
     async def fake_promote(application_id, customer_id):
         calls["promote"].append((application_id, customer_id))
@@ -51,6 +54,7 @@ def _mock_document_service(monkeypatch):
             (applicant_identifier, account_id, customer_id, applicant_name, product_type, amount)
         )
 
+    monkeypatch.setattr(activities.document_service, "tag_application_documents", fake_tag)
     monkeypatch.setattr(activities.document_service, "promote_government_id_to_customer_photo", fake_promote)
     monkeypatch.setattr(activities.document_service, "generate_welcome_letter", fake_generate_welcome_letter)
     return calls
@@ -112,6 +116,7 @@ async def test_persist_decision_underwriter_reject_writes_columns_with_no_provis
     assert record["underwriter_decided_at"] is not None
     assert record["customer_id"] is None
     assert await account_service.get_by_application_id(application_id) is None
+    assert _mock_document_service["tag"] == []
     assert _mock_document_service["promote"] == []
     assert _mock_document_service["welcome_letter"] == []
 
@@ -159,6 +164,7 @@ async def test_persist_decision_approve_provisions_customer_and_account(_mock_do
     assert account.customer_id == record["customer_id"]
     assert account.product_type == "personal_loan"
 
+    assert _mock_document_service["tag"] == [(application_id, account.account_id, record["customer_id"])]
     assert _mock_document_service["promote"] == [(application_id, record["customer_id"])]
     assert len(_mock_document_service["welcome_letter"]) == 1
     assert _mock_document_service["welcome_letter"][0][0] == record["applicant_identifier"]
@@ -277,6 +283,7 @@ async def test_persist_decision_approve_is_idempotent_on_retry(_mock_document_se
         "SELECT count(*) FROM accounts WHERE customer_id = $1", first_account.customer_id
     )
     assert account_count == 1
+    assert len(_mock_document_service["tag"]) == 1
     assert len(_mock_document_service["promote"]) == 1
     assert len(_mock_document_service["welcome_letter"]) == 1
 
@@ -401,7 +408,8 @@ async def test_persist_decision_approve_converts_to_rejected_on_active_account_c
     assert account_count == 1
 
     # The conflict path never reaches document.service -- only the
-    # first, winning Approve's welcome letter exists.
+    # first, winning Approve's tag/promote/welcome-letter calls exist.
+    assert len(_mock_document_service["tag"]) == 1
     assert len(_mock_document_service["welcome_letter"]) == 1
 
 
@@ -455,6 +463,7 @@ async def test_persist_decision_cancelled_touches_no_decision_columns_or_provisi
     assert record["manager_name"] is None
     assert record["customer_id"] is None
     assert await account_service.get_by_application_id(application_id) is None
+    assert _mock_document_service["tag"] == []
     assert _mock_document_service["promote"] == []
     assert _mock_document_service["welcome_letter"] == []
 

@@ -169,6 +169,7 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
             elif inp.actor_role == ROLE_MANAGER:
                 manager_comment = f"{inp.comment} {conflict_note}".strip()
         else:
+            await document_service.tag_application_documents(application_id, account.account_id, customer_id)
             await document_service.promote_government_id_to_customer_photo(application_id, customer_id)
             await document_service.generate_welcome_letter(
                 record["applicant_identifier"],

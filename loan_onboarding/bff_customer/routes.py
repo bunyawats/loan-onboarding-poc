@@ -392,7 +392,13 @@ async def upload_more_info_document(
         raise HTTPException(status_code=400, detail=f"unknown category {category!r} for this product type")
 
     content = await file.read()
-    await document_service.upload(applicant_identifier, application_id, category, UploadedFile(file.filename, content))
+    await document_service.upload(
+        applicant_identifier,
+        application_id,
+        category,
+        UploadedFile(file.filename, content),
+        customer_id=application.customer_id,
+    )
 
     documents = await document_service.list_documents(application_id)
     category_documents = [d for d in documents if d.category == category]
@@ -636,7 +642,13 @@ async def new_application_upload(
         raise HTTPException(status_code=400, detail=f"unknown category {category!r} for this product type")
 
     content = await file.read()
-    await document_service.upload(applicant_identifier, draft["application_id"], category, UploadedFile(file.filename, content))
+    await document_service.upload(
+        applicant_identifier,
+        draft["application_id"],
+        category,
+        UploadedFile(file.filename, content),
+        customer_id=draft.get("customer_id"),
+    )
 
     documents = await document_service.list_documents(draft["application_id"])
     category_documents = [d for d in documents if d.category == category]

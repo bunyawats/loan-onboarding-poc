@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 
 @dataclass
 class _StoredDocument:
@@ -60,7 +62,22 @@ class FakeMayanClient:
         doc.filename = filename
 
     async def attach_metadata(self, document_id: int, metadata_type_id: int, value: str) -> None:
+        # Real Mayan rejects a second POST for a metadata_type the
+        # document already carries with a 400 (confirmed live in
+        # P16-4) -- replicated here so a caller that double-attaches
+        # the same field to the same document (a real bug caught only
+        # by live verification, since this fake previously allowed it
+        # silently) fails in unit tests too, not just against a real
+        # instance.
         name = self._metadata_id_to_name[metadata_type_id]
+        if name in self.documents[document_id].metadata:
+            request = httpx.Request("POST", f"http://fake/documents/{document_id}/metadata/")
+            response = httpx.Response(400, request=request)
+            raise httpx.HTTPStatusError("metadata type already attached", request=request, response=response)
+        self.documents[document_id].metadata[name] = value
+
+    async def update_metadata_entry(self, document_id: int, metadata_entry_id: int, value: str) -> None:
+        name = self._metadata_id_to_name[metadata_entry_id]
         self.documents[document_id].metadata[name] = value
 
     async def get_document_metadata(self, document_id: int) -> list[dict[str, Any]]:

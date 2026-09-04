@@ -232,6 +232,38 @@ construction). **This was a documentation-only session, per explicit
 user instruction — none of Phase 16's four tasks (P16-1 through P16-4)
 are implemented yet.** Start at P16-1.
 
+**Phase 16 is now fully built and live-verified — all four tasks
+(P16-1 through P16-4) done.** `document/service.py`'s `upload(...)`
+gained an optional `customer_id` param, `generate_welcome_letter(...)`
+now attaches it too, and a new `tag_application_documents(...)` tags
+every document under an approved application; `application/activities.py`'s
+`persist_decision` calls it inside the existing provisioning block, and
+`bff_customer/routes.py`'s two upload routes pass `customer_id` through.
+**Two real, previously-undetected bugs were found and fixed during
+P16-4's live verification, neither caught by the unit suite** — see
+`CLAUDE.md`'s "Document metadata assignment lifecycle" for full detail:
+(1) Mayan rejected the new attaches with a 400 because `account_id`/
+`customer_id` had never been associated with the "Application
+Document"/"Account Document" types respectively — fixed in
+`scripts/setup_document_hierarchy.sh` and live against the running
+instance; (2) `tag_application_documents` and
+`promote_government_id_to_customer_photo` both attach `customer_id` to
+the same Government ID document on a fresh promotion, which Mayan
+rejects as a duplicate — this file's own earlier draft wrongly called
+that "a harmless idempotent no-op"; fixed with a new idempotent
+`_set_metadata` helper, and the unit-test fake now replicates Mayan's
+real reject-on-duplicate behavior so this class of bug is unit-testable
+going forward. Full unit suite (242 tests) and `lint-imports` green —
+run against a new dedicated `loan_onboarding_test` database after this
+session accidentally wiped the live compose stack's own
+`loan_onboarding` database by running the suite against it directly
+(see `CLAUDE.md`'s Testing section for the new convention this added).
+**Not yet committed or pushed** — a next session (or the remainder of
+this one) should review the diff, commit (one commit per P16 task or
+one combined commit, either is fine — the bug fixes found during P16-4
+are part of the same task, not a separate one), push, and confirm CI
+green. This plan's backlog is otherwise empty again.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 
@@ -2659,7 +2691,7 @@ metadata assignment lifecycle" section (written first, per this
 project's own convention) describes the four confirmed rules and the
 exact call sequence each task below implements.
 
-- [ ] **P16-1** — `document/service.py`: `upload(applicant_identifier,
+- [x] **P16-1** — `document/service.py`: `upload(applicant_identifier,
       application_id, category, file, customer_id=None)` — attaches
       `customer_id` metadata alongside the existing three fields when
       given, `None` behaves exactly as today (no fourth attach call).
@@ -2672,7 +2704,7 @@ exact call sequence each task below implements.
       original three (backward-compatible default); `generate_welcome_letter`'s
       existing test updated to assert `customer_id` is now present in
       the stored metadata.
-- [ ] **P16-2** — `document/service.py` gains
+- [x] **P16-2** — `document/service.py` gains
       `tag_application_documents(application_id, account_id, customer_id)
       -> None` — finds every document under `application_id` (all
       categories, via `_documents_matching({"application_id":
@@ -2688,7 +2720,7 @@ exact call sequence each task below implements.
       all receiving `account_id`+`customer_id`; a document under a
       *different* `application_id` left untouched; the index rebuilt
       exactly once regardless of how many documents were tagged.
-- [ ] **P16-3** — `application/activities.py`'s `persist_decision`
+- [x] **P16-3** — `application/activities.py`'s `persist_decision`
       provisioning block gains one new call,
       `document_service.tag_application_documents(application_id,
       account.account_id, customer_id)`, alongside the existing
@@ -2713,7 +2745,13 @@ exact call sequence each task below implements.
       updated to assert `customer_id` is passed through correctly in
       both the returning-customer case and the brand-new-applicant
       (`None`) case.
-- [ ] **P16-4** — Live verification against the real stack: walk a real
+      > DONE: no existing route-level test file covers
+      > `bff_customer/routes.py`'s upload routes at all (confirmed by
+      > search — only `tests/unit/bff_customer/test_identity.py`
+      > exists), so that DoD clause is vacuously satisfied; P16-4's live
+      > browser verification is what actually exercises both routes'
+      > `customer_id` wiring end to end.
+- [x] **P16-4** — Live verification against the real stack: walk a real
       browser through a returning customer's new application (an
       identity that already resolves to an existing `customers` row from
       an earlier approval) and confirm via the Mayan REST API that every
@@ -2732,6 +2770,37 @@ exact call sequence each task below implements.
       suite and `lint-imports` both green. Update `CLAUDE.md`'s "Document
       metadata assignment lifecycle" section with the live-verification
       result. Commit, push, confirm CI green.
+      > DONE, with two real bugs found and fixed along the way — see
+      > `CLAUDE.md`'s "Document metadata assignment lifecycle" for the
+      > full detail. (1) Mayan rejected the new attaches with a 400:
+      > `account_id` was never associated with the "Application
+      > Document" type, nor `customer_id` with "Account Document" —
+      > fixed both in `scripts/setup_document_hierarchy.sh` and live
+      > against the running instance. (2) A second, independent bug:
+      > `tag_application_documents` and
+      > `promote_government_id_to_customer_photo` both attach
+      > `customer_id` to the same Government ID document on a fresh
+      > promotion — Mayan rejects the second attach (a real 400, not
+      > the "harmless idempotent no-op" an earlier draft of this file
+      > claimed); fixed with a new idempotent `_set_metadata` helper in
+      > `document/service.py`, and `tests/unit/document/fake_mayan_client.py`'s
+      > `attach_metadata` now replicates Mayan's real
+      > reject-on-duplicate behavior so this class of bug fails in unit
+      > tests too, not just live. Verified end-to-end: brand-new
+      > applicant's uploads carry no `customer_id`; approval tags every
+      > document (all categories) + the Welcome Letter with
+      > `account_id`+`customer_id`, zero worker errors; a returning
+      > customer's new application (different product type) prefills,
+      > offers and uses Government-ID reuse, and its fresh uploads carry
+      > `customer_id` immediately; rejecting that application left its
+      > documents with `customer_id` but no `account_id`. Full unit
+      > suite (242 tests) and `lint-imports` green — run against a new
+      > dedicated `loan_onboarding_test` database, **not** the compose
+      > stack's own `loan_onboarding`, after this session first
+      > accidentally wiped the live stack's application data by running
+      > the suite against the same live Postgres (see `CLAUDE.md`'s
+      > Testing section, new note). Not pushed/CI yet — see Current
+      > Status.
 
 ---
 
@@ -2743,6 +2812,85 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-04** — Implemented and live-verified all of Phase 16
+  (P16-1 through P16-4), continuing from the prior session's
+  documentation-only pass. `document/service.py`: `upload(...)` gained
+  `customer_id: str | None = None`, attaching it as a fourth metadata
+  field when given; `generate_welcome_letter(...)` now attaches
+  `customer_id` too; new `tag_application_documents(application_id,
+  account_id, customer_id)` tags every document under an application in
+  one pass, rebuilding the index once. `application/activities.py`'s
+  `persist_decision` calls it inside the existing provisioning block,
+  right before `promote_government_id_to_customer_photo`.
+  `bff_customer/routes.py`'s two upload routes pass `customer_id`
+  through (`draft.get("customer_id")` for the new-application wizard,
+  `application.customer_id` for the resubmit-more-info path).
+  **Two real bugs found and fixed during P16-4's live verification,
+  neither caught by the unit suite beforehand**: (1) Mayan rejected the
+  new attaches with a 400 -- `account_id` had never been associated
+  with the "Application Document" document type, nor `customer_id` with
+  "Account Document" (each association existed only for the *other*
+  type). Fixed in `scripts/setup_document_hierarchy.sh` (both new
+  associations, `required=false`) and live against the already-running
+  instance via the same API call. (2) A second, independent bug found
+  right after: `tag_application_documents` and
+  `promote_government_id_to_customer_photo` both attach `customer_id`
+  to the same Government ID document when a fresh upload is promoted --
+  Mayan rejects the second attach as a duplicate metadata entry, which
+  this file's own prior draft had wrongly asserted was "a harmless
+  idempotent no-op" without actually testing it. Fixed with a new
+  idempotent `_set_metadata` helper (update-in-place if the field
+  already exists, plain create otherwise) used by both functions'
+  attach loops; `tests/unit/document/fake_mayan_client.py`'s
+  `attach_metadata` now replicates Mayan's real reject-on-duplicate
+  behavior (it silently allowed double-attaches before, which is
+  exactly why this class of bug was invisible to the unit suite), with
+  a new regression test locking the fix in.
+  **Live-verified end to end against the real stack, not just unit
+  tests**: rebuilt the `app`/`worker-workflow`/`worker-activity` images
+  twice (once after the code fix, once more isn't needed -- both
+  Mayan-config fixes were applied live via direct API calls, no image
+  rebuild required for those). Walked a brand-new applicant through a
+  full personal_loan application -- confirmed via the Mayan REST API
+  that all four uploaded documents carried no `customer_id` before
+  submission; approved it and confirmed every document plus the
+  generated Welcome Letter gained `account_id` + `customer_id`, with
+  zero worker errors on this second, post-fix attempt (the first
+  attempt, before both fixes, genuinely failed partway through with a
+  400, and — per this project's own documented, accepted idempotency
+  tradeoff — the Temporal retry then permanently skipped the document
+  calls since the account was already provisioned; recovered manually
+  by re-running the three document.service calls directly against the
+  worker-activity container, which is exactly the kind of
+  manually-recoverable gap `CLAUDE.md` already accepts for this
+  scenario). Submitted a second application (auto_loan, a different
+  product type, to sidestep the active-account-per-product-type rule)
+  under the same now-returning identity -- confirmed the wizard
+  prefilled the form and the reused-ID flow worked cleanly with zero
+  errors on approval. Submitted a third application (mortgage) under
+  the same identity -- confirmed its three freshly-uploaded documents
+  carried `customer_id` immediately at upload time (before submission),
+  then rejected it and confirmed its documents kept `customer_id` but
+  never gained `account_id`.
+  **A real, self-inflicted incident along the way**: ran the unit test
+  suite with `DATABASE_URL` pointed at the compose stack's own
+  `loan_onboarding` database (reachable on the host's published `5433`
+  port) instead of a separate test database -- the suite's own per-test
+  `DELETE FROM applications/accounts/customers` cleanup fixtures
+  silently wiped every row the live stack had, mid-session. Recovered
+  by continuing the live-verification flow fresh (the wiped rows didn't
+  invalidate the Mayan-side evidence already captured, which doesn't
+  read Postgres at all) and by creating a dedicated
+  `loan_onboarding_test` database for all unit-test runs going forward
+  -- see `CLAUDE.md`'s Testing section for the new convention. Full
+  unit suite (242 tests, up from 238 -- new tests for `upload(...,
+  customer_id=...)`, `tag_application_documents`, and the
+  double-attach regression) and `lint-imports` both green against the
+  new test database. `CLAUDE.md`'s "Document metadata assignment
+  lifecycle" section updated with the full live-verification result and
+  both bugs' detail. **Not yet committed** -- next step is to review the
+  diff, commit, push, and confirm CI green.
 
 - **2026-09-03** — Documentation-only session, no code changed, per
   explicit user instruction ("not start implement in this session").

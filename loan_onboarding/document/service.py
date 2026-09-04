@@ -107,6 +107,25 @@ async def _metadata_entry_id(document_id: int, field: str) -> int | None:
     return None
 
 
+async def _set_metadata(document_id: int, field: str, value: str, metadata_type_id: int) -> None:
+    """Idempotent attach: updates the entry in place if `document_id`
+    already carries `field`, otherwise creates it. Mayan's metadata
+    endpoint rejects a second POST for a metadata_type the document
+    already has (a real 400, confirmed live in P16-4) -- needed here
+    because `tag_application_documents` and
+    `promote_government_id_to_customer_photo` both now attach
+    `customer_id` and can both touch the same Government ID document in
+    one approval (CLAUDE.md's "Document metadata assignment lifecycle"
+    originally claimed this double-attach was "a harmless idempotent
+    no-op" -- live verification proved that wrong; this is the fix, not
+    a hypothetical)."""
+    entry_id = await _metadata_entry_id(document_id, field)
+    if entry_id is not None:
+        await mayan_client.update_metadata_entry(document_id, entry_id, value)
+    else:
+        await mayan_client.attach_metadata(document_id, metadata_type_id, value)
+
+
 async def _documents_matching(filters: dict[str, str]) -> list[DocumentRef]:
     """Exact-match on every (field, value) pair in `filters`, filtered in
     Python against each candidate's real metadata -- NEVER via Mayan's
@@ -125,15 +144,26 @@ async def _documents_matching(filters: dict[str, str]) -> list[DocumentRef]:
     return matches
 
 
-async def upload(applicant_identifier: str, application_id: str, category: str, file: UploadedFile) -> DocumentRef:
+async def upload(
+    applicant_identifier: str,
+    application_id: str,
+    category: str,
+    file: UploadedFile,
+    customer_id: str | None = None,
+) -> DocumentRef:
     """create-document -> upload-file (`action_name=replace`) -> attach
     metadata -> rebuild index. Safe to call repeatedly for the same
     `application_id`/`category` -- each call creates a distinct Mayan
     document, satisfying that category alongside any prior upload rather
     than replacing it (CLAUDE.md: "a category is satisfied by one or
-    more documents, not exactly one"). No `account_id`/`customer_id`
-    param -- neither exists yet at upload time under the
-    account-on-approval model."""
+    more documents, not exactly one"). No `account_id` param -- it
+    doesn't exist yet at upload time under the account-on-approval
+    model. `customer_id` (CLAUDE.md's "Document metadata assignment
+    lifecycle") is optional and caller-supplied, not resolved here --
+    `document/` is a leaf module and never imports `application/`; a
+    returning applicant's caller already knows it (a resolved customer),
+    a brand-new applicant's caller passes `None`, same as before this
+    parameter existed."""
     doc_type_ids, metadata_type_ids = await asyncio.gather(
         mayan_client.document_type_ids(), mayan_client.metadata_type_ids()
     )
@@ -146,11 +176,14 @@ async def upload(applicant_identifier: str, application_id: str, category: str, 
     # Sequential, not concurrent: each attach call re-triggers async
     # index evaluation server-side (gotcha #2) -- firing them
     # concurrently would make the race worse, not better.
-    for field, value in [
+    fields = [
         ("applicant_identifier", applicant_identifier),
         ("application_id", application_id),
         ("category", category),
-    ]:
+    ]
+    if customer_id is not None:
+        fields.append(("customer_id", customer_id))
+    for field, value in fields:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
     await mayan_client.rebuild_index()
@@ -161,6 +194,7 @@ async def upload(applicant_identifier: str, application_id: str, category: str, 
         category=category,
         applicant_identifier=applicant_identifier,
         application_id=application_id,
+        customer_id=customer_id,
     )
 
 
@@ -223,6 +257,34 @@ async def preview(application_id: str, document_id: int) -> DocumentStream:
     )
 
 
+async def tag_application_documents(application_id: str, account_id: str, customer_id: str) -> None:
+    """Attaches `account_id` + `customer_id` to *every* document under
+    `application_id` (all categories, not just Government ID), rebuilding
+    the index once at the end -- CLAUDE.md's "Document metadata
+    assignment lifecycle", point 3. Deliberately separate from
+    `promote_government_id_to_customer_photo` immediately below, whose
+    own job (re-tagging one specific document, possibly stripping a
+    *different* application's stale `id_photo` tag) is orthogonal --
+    this function never looks outside `application_id`'s own documents.
+    Re-attaching `customer_id` to the Government ID document a second
+    time (once here, once via `promote_government_id_to_customer_photo`)
+    is a harmless no-op in effect, but NOT at the Mayan API level -- a
+    bare `attach_metadata` (POST-create) on a field the document already
+    carries is a real 400 (confirmed live in P16-4, corrected from an
+    earlier draft of this docstring that assumed otherwise without
+    testing it), so both attaches here go through `_set_metadata`
+    (update-in-place if already present)."""
+    matches = await _documents_matching({"application_id": application_id})
+    if not matches:
+        return
+
+    metadata_type_ids = await mayan_client.metadata_type_ids()
+    for doc in matches:
+        await _set_metadata(doc.document_id, "account_id", account_id, metadata_type_ids["account_id"])
+        await _set_metadata(doc.document_id, "customer_id", customer_id, metadata_type_ids["customer_id"])
+    await mayan_client.rebuild_index()
+
+
 async def promote_government_id_to_customer_photo(application_id: str, customer_id: str) -> None:
     """Re-tags the just-approved application's Government ID document
     with `customer_id` metadata -- does NOT fetch/re-upload the file.
@@ -240,17 +302,31 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     assumption that every approved application always has its own
     Government ID document, no longer true once reuse exists. If one
     *does* exist (a fresh upload), first strip `customer_id` metadata
-    from any *other* document currently carrying it for this customer
-    (Mayan holds exactly one value per (document, metadata_type) --
-    re-tagging without stripping first would leave two documents
-    claiming the same `id_photo` leaf), then tag the new one --
-    "exactly one current `id_photo` per customer", enforced for real."""
+    from any *other* Government-ID-category document currently carrying
+    it for this customer (Mayan holds exactly one value per (document,
+    metadata_type) -- re-tagging without stripping first would leave two
+    documents claiming the same `id_photo` leaf), then tag the new one --
+    "exactly one current `id_photo` per customer", enforced for real.
+
+    **The stale-tag lookup is scoped to `category=Government ID`,
+    not just `customer_id` alone** -- since `tag_application_documents`
+    (CLAUDE.md's "Document metadata assignment lifecycle") now tags
+    *every* document under an approved application with `customer_id`,
+    and `generate_welcome_letter` does too, a customer with more than
+    one approved application accumulates `customer_id` on several
+    unrelated documents (Proof of Income, Bank Statements, Welcome
+    Letters). Matching on `customer_id` alone here would wrongly strip
+    the tag from all of those the next time this customer's photo gets
+    refreshed -- a real bug caught while wiring P16 in, not a
+    hypothetical."""
     matches = await _documents_matching({"application_id": application_id, "category": CATEGORY_GOVERNMENT_ID})
     if not matches:
         return
 
     new_doc_ids = {doc.document_id for doc in matches}
-    existing_id_photo_docs = await _documents_matching({"customer_id": customer_id})
+    existing_id_photo_docs = await _documents_matching(
+        {"customer_id": customer_id, "category": CATEGORY_GOVERNMENT_ID}
+    )
     for doc in existing_id_photo_docs:
         if doc.document_id in new_doc_ids:
             continue
@@ -260,7 +336,7 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
 
     metadata_type_ids = await mayan_client.metadata_type_ids()
     for doc in matches:
-        await mayan_client.attach_metadata(doc.document_id, metadata_type_ids["customer_id"], customer_id)
+        await _set_metadata(doc.document_id, "customer_id", customer_id, metadata_type_ids["customer_id"])
     await mayan_client.rebuild_index()
 
 
@@ -308,6 +384,7 @@ async def generate_welcome_letter(
         ("applicant_identifier", applicant_identifier),
         ("account_id", account_id),
         ("category", "Welcome Letter"),
+        ("customer_id", customer_id),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
@@ -319,6 +396,7 @@ async def generate_welcome_letter(
         category="Welcome Letter",
         applicant_identifier=applicant_identifier,
         account_id=account_id,
+        customer_id=customer_id,
     )
 
 

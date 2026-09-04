@@ -125,10 +125,26 @@ done
 # customer_id is attached later, per-document, only on promotion -- not
 # required at upload time (most Application Documents never get it).
 attach_metadata "${DOCUMENT_TYPE_ID['Application Document']}" "customer_id" "false"
+# account_id likewise -- attached to every document under an application
+# only on approval (document.service.tag_application_documents, CLAUDE.md's
+# "Document metadata assignment lifecycle"), never at upload time. Found
+# live in P16-4: without this association, Mayan rejects the attach with
+# a 400 (a document type can only carry metadata types it's been
+# associated with) -- an Application Document's account_id association
+# was missing entirely until this fix, since account_id previously only
+# ever lived on Account Document type documents (Welcome Letter/Consent).
+attach_metadata "${DOCUMENT_TYPE_ID['Application Document']}" "account_id" "false"
 
 for m in applicant_identifier account_id category; do
   attach_metadata "${DOCUMENT_TYPE_ID['Account Document']}" "$m" "true"
 done
+# customer_id too, same reasoning as the Application Document association
+# above -- generate_welcome_letter (document.service.py) attaches it to
+# every Welcome Letter/Consent document as of P16-1, and Mayan rejects
+# an attach for a metadata type the document type was never associated
+# with. Found live in the same P16-4 pass as the Application Document
+# gap.
+attach_metadata "${DOCUMENT_TYPE_ID['Account Document']}" "customer_id" "false"
 
 # ---------------------------------------------------------------------------
 # 3. Index template

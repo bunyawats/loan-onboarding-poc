@@ -29,6 +29,21 @@ async def test_upload_attaches_all_three_metadata_fields_and_rebuilds(fake_clien
     assert fake_client.rebuild_count == 1
 
 
+async def test_upload_with_customer_id_attaches_fourth_metadata_field(fake_client):
+    ref = await service.upload(
+        "alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"content"), customer_id="cust-1"
+    )
+
+    stored = fake_client.documents[ref.document_id]
+    assert stored.metadata == {
+        "applicant_identifier": "alice@example.com",
+        "application_id": "app-1",
+        "category": "Government ID",
+        "customer_id": "cust-1",
+    }
+    assert ref.customer_id == "cust-1"
+
+
 async def test_upload_same_category_twice_creates_two_documents(fake_client):
     await service.upload("alice@example.com", "app-1", "Bank Statements", UploadedFile("a.pdf", b"1"))
     await service.upload("alice@example.com", "app-1", "Bank Statements", UploadedFile("b.pdf", b"2"))
@@ -145,6 +160,42 @@ async def test_preview_raises_when_document_has_no_uploaded_file(fake_client):
         await service.preview("app-1", document["id"])
 
 
+async def test_tag_application_documents_tags_every_category_and_rebuilds_once(fake_client):
+    gov_id = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))
+    income = await service.upload("alice@example.com", "app-1", "Proof of Income", UploadedFile("inc.pdf", b"2"))
+    other_app = await service.upload("bob@example.com", "app-2", "Government ID", UploadedFile("b.pdf", b"3"))
+    fake_client.rebuild_count = 0
+
+    await service.tag_application_documents("app-1", "acct-1", "cust-1")
+
+    for ref in (gov_id, income):
+        stored = fake_client.documents[ref.document_id]
+        assert stored.metadata["account_id"] == "acct-1"
+        assert stored.metadata["customer_id"] == "cust-1"
+    # A document under a different application_id is left untouched.
+    other_stored = fake_client.documents[other_app.document_id]
+    assert "account_id" not in other_stored.metadata
+    assert "customer_id" not in other_stored.metadata
+    assert fake_client.rebuild_count == 1
+
+
+async def test_tag_application_documents_then_promote_does_not_double_attach(fake_client):
+    """Regression: tag_application_documents and
+    promote_government_id_to_customer_photo both attach customer_id to
+    the Government ID document when run in persist_decision's real
+    order (tag first, then promote) -- a real 400 against live Mayan
+    (P16-4) if either used a bare create instead of the idempotent
+    update-or-create helper."""
+    gov_id = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))
+
+    await service.tag_application_documents("app-1", "acct-1", "cust-1")
+    await service.promote_government_id_to_customer_photo("app-1", "cust-1")
+
+    stored = fake_client.documents[gov_id.document_id]
+    assert stored.metadata["customer_id"] == "cust-1"
+    assert stored.metadata["account_id"] == "acct-1"
+
+
 async def test_promote_government_id_retags_without_creating_new_document(fake_client):
     ref = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"content"))
     doc_count_before = len(fake_client.documents)
@@ -182,6 +233,36 @@ async def test_promote_government_id_supersedes_and_untags_previous_id_photo(fak
 
     assert "customer_id" not in fake_client.documents[first.document_id].metadata
     assert fake_client.documents[second.document_id].metadata["customer_id"] == "cust-1"
+
+
+async def test_promote_government_id_does_not_strip_customer_id_from_unrelated_documents(fake_client):
+    """Regression: tag_application_documents/generate_welcome_letter now
+    tag customer_id onto documents that are NOT the id_photo (Proof of
+    Income, Welcome Letter, etc.) -- promoting a fresh Government ID for
+    a later application must only strip the stale tag from the *old*
+    Government ID document, never from these unrelated ones."""
+    # First approved application: tag_application_documents-style tagging
+    # across every category, plus a Welcome Letter -- simulates what
+    # persist_decision does on approval.
+    old_id_photo = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id1.pdf", b"1"))
+    income = await service.upload("alice@example.com", "app-1", "Proof of Income", UploadedFile("inc.pdf", b"2"))
+    await service.tag_application_documents("app-1", "acct-1", "cust-1")
+    await service.promote_government_id_to_customer_photo("app-1", "cust-1")
+    welcome_letter = await service.generate_welcome_letter(
+        "alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000"
+    )
+
+    # A second approved application for the same customer, fresh
+    # Government ID upload -- promoting it must supersede only the old
+    # Government ID document.
+    new_id_photo = await service.upload("alice@example.com", "app-2", "Government ID", UploadedFile("id2.pdf", b"3"))
+    await service.promote_government_id_to_customer_photo("app-2", "cust-1")
+
+    assert "customer_id" not in fake_client.documents[old_id_photo.document_id].metadata
+    assert fake_client.documents[new_id_photo.document_id].metadata["customer_id"] == "cust-1"
+    # Untouched -- these were never Government ID documents.
+    assert fake_client.documents[income.document_id].metadata["customer_id"] == "cust-1"
+    assert fake_client.documents[welcome_letter.document_id].metadata["customer_id"] == "cust-1"
 
 
 async def test_has_id_photo_true_after_promotion_false_before(fake_client):
@@ -224,6 +305,12 @@ async def test_generate_welcome_letter_uploads_tagged_to_account(fake_client):
     assert stored.metadata["applicant_identifier"] == "alice@example.com"
     assert stored.metadata["account_id"] == "acct-1"
     assert stored.metadata["category"] == "Welcome Letter"
+    # customer_id is now attached too (CLAUDE.md's "Document metadata
+    # assignment lifecycle") -- every other document tied to this
+    # account/application carries it, the Welcome Letter shouldn't be
+    # the one exception.
+    assert stored.metadata["customer_id"] == "cust-1"
+    assert ref.customer_id == "cust-1"
     assert len(stored.file_versions) == 1
     # Genuinely a PDF -- not a hand-typed stub (gotcha #4).
     assert stored.file_versions[0].startswith(b"%PDF-1.4")
@@ -255,9 +342,11 @@ async def test_list_customer_documents_and_list_account_documents(fake_client):
     )
     await service.generate_welcome_letter("alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000")
 
+    # Welcome Letter now carries customer_id too (CLAUDE.md's "Document
+    # metadata assignment lifecycle") -- both it and the promoted
+    # Government ID (the id_photo) show up here.
     customer_docs = await service.list_customer_documents("cust-1")
-    assert len(customer_docs) == 1
-    assert customer_docs[0].category == "Government ID"
+    assert {d.category for d in customer_docs} == {"Government ID", "Welcome Letter"}
 
     account_docs = await service.list_account_documents("acct-1")
     assert len(account_docs) == 1

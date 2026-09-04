@@ -1313,6 +1313,61 @@ attached to make that shape happen.
    because it was asked about directly, not because anything had to
    change to make it true.
 
+**Live-verified against the real stack (P16-4), and two real bugs found
+and fixed along the way — neither caught by the unit suite, both only
+surfacing against genuine Mayan behavior**:
+
+1. **Mayan rejected the new attaches outright with a 400 — a document
+   type can only carry metadata types it's been explicitly associated
+   with, and `account_id` had never been associated with "Application
+   Document", nor `customer_id` with "Account Document"** (both
+   associations existed for the *other* document type only, since
+   `account_id` previously lived exclusively on Welcome
+   Letter/Consent, and `customer_id` exclusively on the promoted
+   Government ID). `scripts/setup_document_hierarchy.sh` now attaches
+   both associations (`required=false`, since neither exists at
+   upload/create time); fixed live against the running instance via
+   the same `POST /document_types/{id}/metadata_types/` call the script
+   makes, for the documents already created before the script was
+   updated.
+2. **A second, independent bug**: `tag_application_documents` and
+   `promote_government_id_to_customer_photo` both attach `customer_id`
+   to the same Government ID document when a fresh upload is promoted
+   (`persist_decision` calls the former first, unconditionally, then
+   the latter). This file's own earlier draft claimed the second
+   attach was "a harmless idempotent no-op" — untrue against real
+   Mayan, which rejects a second `POST` for a metadata type a document
+   already carries with another 400. Fixed with a new
+   `document/service.py`-internal `_set_metadata` helper
+   (update-in-place via `update_metadata_entry` if the field already
+   exists, plain create otherwise), used by both functions' attach
+   loops. `tests/unit/document/fake_mayan_client.py`'s `attach_metadata`
+   now replicates the real reject-on-duplicate behavior (it silently
+   allowed this before, which is exactly why the unit suite never
+   caught it) — a new regression test,
+   `test_tag_application_documents_then_promote_does_not_double_attach`,
+   locks this in.
+
+Both fixes verified end-to-end against a real local stack, not just
+unit tests: a brand-new applicant's four documents carried no
+`customer_id` at upload time; approving the application tagged all
+four *and* the generated Welcome Letter with `account_id` +
+`customer_id`, with zero worker errors; a second application (a
+different product type, to sidestep the active-account rule) under the
+same identity correctly prefilled the form, offered — and used — the
+Government-ID-reuse choice, and its three newly-uploaded documents
+carried `customer_id` immediately at upload time, before submission;
+rejecting that application confirmed its documents kept `customer_id`
+(resolved at upload) but never gained `account_id`. Full unit suite
+(242 tests, run against a dedicated `loan_onboarding_test` database —
+**not** the compose stack's own `loan_onboarding`, after this session
+accidentally wiped the live stack's `customers`/`accounts`/`applications`
+tables by running the suite against the same live Postgres the app
+uses; the standard per-test `DELETE FROM ...` cleanup fixtures are
+exactly the reconciliation-worthy drift this file's own
+"Document/database reconciliation" section describes, self-inflicted
+this time) and `lint-imports` both green.
+
 **Deliberately out of scope**: no backfill of documents belonging to
 applications approved *before* this lifecycle existed — same "forward-
 looking only" scope boundary Phase 14 already accepted for not
@@ -2066,6 +2121,22 @@ real Postgres service container for exactly this reason (see
 the "needs the whole stack" sense, but they were never really "unit"
 tests in the "no I/O at all" sense either; call them what they are
 rather than mislabeling either way.
+
+**When running these against a local `docker compose` stack you're also
+using for live/manual verification, point `DATABASE_URL` at a separate
+database (e.g. `loan_onboarding_test`), never the compose stack's own
+`loan_onboarding`.** Found the hard way in P16-4: these tests' per-test
+cleanup fixtures do a real `DELETE FROM applications`/`accounts`/
+`customers` against whatever `DATABASE_URL` points at — running the
+suite against the same live Postgres a `docker compose up -d app` is
+using silently wipes every application/account/customer the live stack
+had, mid-session, with no error. (The two databases live in the same
+Postgres *container*, both reachable on the host's published `5433`
+port — see "Data storage" — so pointing at the wrong one is an easy
+mistake, not a hypothetical.) Create the test database once
+(`CREATE DATABASE loan_onboarding_test;` then apply `db/schema.sql` to
+it) and keep using it for every local unit-test run alongside a running
+compose stack.
 
 Prefer `temporalio.testing.WorkflowEnvironment` (time-skipping) over a
 real Temporal server for `workflow/`'s workflow/activity tests — inject
