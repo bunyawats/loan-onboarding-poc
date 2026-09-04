@@ -606,14 +606,10 @@ the domain modules' `service.py` functions.
   same applicant-owns-this-application check every other route here
   uses (`_owned_application`, wrapped for this case in a new
   `_owned_account` helper that also enforces `APPROVED` + an account
-  actually existing). Live-verified via direct HTTP calls against the
-  real stack: uploading, then re-uploading, a consent file for a real
-  approved application kept the same Mayan document id across both
-  calls (2 file versions, latest content served on preview), Mayan
-  metadata confirmed `account_id`/`customer_id`/`applicant_identifier`/
-  `category=Consent` all attached, and a second identity's session
-  correctly got `404` on both the first identity's application detail
-  page and a direct hit on its consent preview URL.
+  actually existing). Live-verified end to end (document versioning,
+  metadata attachment, cross-identity `404`s) — full sweep moved to
+  `IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04 docs-consolidation
+  entry.
 - **(Phase 14, built)**: the new-application wizard's start step calls
   `customer.service.find_by_identifier(...)` (the same read-only call
   already used for "welcome back" copy above) to prefill
@@ -627,11 +623,10 @@ the domain modules' `service.py` functions.
   `reuse_existing_id_photo` parameter. See "Returning-customer profile
   refresh and ID reuse" above for the full design and why reuse can't
   be silent. Live-verified across three consecutive applications under
-  one identifier: no prefill/no reuse offer on the first (no customer
-  row yet), prefilled + reuse offered and accepted on the second (no
-  new Government ID document created), prefilled + "upload a new one
-  instead" chosen on the third (confirmed via Mayan that the new
-  document superseded the old one's `customer_id` tag).
+  one identifier (no prefill on the first, prefill+reuse on the second,
+  prefill+fresh-upload superseding the old copy on the third) — full
+  sweep moved to `IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04
+  docs-consolidation entry.
 
 ### 2. `bff_backoffice/` — Back-Office BFF (the "LOS")
 
@@ -696,17 +691,12 @@ System) is this module's working name.
   preview link — `/ui/{role}/{application_id}/consent/{document_id}/preview`,
   ownership resolved via `account.service.get_by_application_id(...)`
   rather than trusting a raw `account_id` path param. Live-verified via
-  a real Keycloak login as `underwriter1`: uploading, then replacing, a
-  consent file through this dialog versioned the same Mayan document
-  `bff_customer`'s own earlier upload had created for that application's
-  account (3 file versions total across both surfaces by the end), and
-  the customer-side preview URL immediately served the staff-uploaded
-  content back — confirming both surfaces genuinely share one document,
-  not two. Also confirmed: a `manager`-role session gets `403` on the
-  `underwriter`-scoped consent routes (same `_role_dependency` every
-  other underwriter/manager-split route already enforces), and posting
-  to the upload route for a non-`APPROVED` application returns a clean
-  `400` rather than reaching `document.service` at all.
+  a real Keycloak login: both surfaces confirmed to share one Mayan
+  document (a staff-side replace immediately visible via the
+  customer-side preview URL), role-gating (`403` for `manager` on
+  `underwriter`-scoped routes) and the non-`APPROVED` `400` guard both
+  held — full sweep moved to `IMPLEMENTATION_PLAN.md`'s Session Log,
+  2026-09-04 docs-consolidation entry.
 
 ### 3. `customer/` — Customer module
 
@@ -1321,107 +1311,62 @@ it): only the copy has `customer_id` with neither `account_id` nor
 "Document metadata assignment lifecycle" below for why this document
 exists as a genuine second Mayan document now, not a re-tagged original.
 
-Live-verified end to end against a real instance, not just reasoned
-about: a customer with two approved applications (one per product
-type) and a rejected third showed, all at once and each in exactly one
-place — both accounts nested under the customer with their own
-application → category trees; the rejected application's own
-`<application_id> → category` branch, sibling to the accounts (no
-`account_id`, so it doesn't nest under either); and exactly one
-`Government ID` document directly under the customer (the current
-copy, confirmed via the real `documents_url` listing holding only that
-one document id, not the original per-application Government ID files
-too). `applicant_identifier` plays no role in any of the three trees —
+Live-verified end to end against a real instance (a customer with two
+approved applications plus a rejected third, each landing in exactly
+one place across the three indexes) — full sweep moved to
+`IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04 docs-consolidation
+entry. `applicant_identifier` plays no role in any of the three trees —
 it's still attached to every document (see `document/service.py`'s
 `upload`) and still what `document.service.py`'s own queries filter on
 (see the gotcha #2 consequence below), just never an index-tree
 grouping key.
 
 **A real, mid-build reliability wrinkle, not a template bug — hit twice,
-in two different sessions, both times from the same root cause.** Right
-after adding branch 3 to the two already-built indexes still holding
-older content (Account Index, Application Index — Customer Index built
-clean the first time), their instance trees briefly went to
-`depth=0`/`node_count=0` after a rebuild, even though the template
-definitions themselves were confirmed correct via
-`GET /index_templates/<id>/nodes/`. Traced to overlapping `rebuild/`
-calls fired in quick succession (this session issued several within
-seconds of each other while iterating) racing Mayan's own reset-then-
-rebuild sequence, not a problem with the node expressions — a single,
-unhurried `rebuild/` call per index, left to finish on its own,
-produced a stable tree every time (confirmed stable across repeated
-polls, ~40s apart, before trusting it). **The same race reappeared in a
-later session's clean-slate E2E re-verification**, this time triggered
-across *different* index ids fired back-to-back in a loop (`for idx in
-3 4 5; do ... rebuild ...; done`) rather than the same id twice — one
-or two of the three ended up stuck at `node_count=0` (missing a
-just-approved account/application entirely) until each was re-triggered
-individually and *actually waited out* (polled stable across several
-5s intervals) before moving to the next. **The operating rule this
-confirms: never fire a `rebuild/` call — for any index — while a
-previous `rebuild/` call against *any* index might still be in flight,
-and always confirm `node_count` stable across several polls before
-trusting a rebuilt tree**, not just "loop over the three ids with no
-wait in between."
+in two different sessions, both from the same root cause: overlapping
+`rebuild/` calls fired in quick succession race Mayan's own
+reset-then-rebuild sequence and can leave a tree briefly at
+`depth=0`/`node_count=0`, even when the template definitions are
+correct.** Full repro moved to `IMPLEMENTATION_PLAN.md`'s Session Log
+(2026-09-04 docs-consolidation entry). **The operating rule this
+confirms, and the reason this paragraph stays in full here rather than
+moving with the rest**: never fire a `rebuild/` call — for any index —
+while a previous `rebuild/` call against *any* index might still be in
+flight, and always confirm `node_count` stable across several polls
+before trusting a rebuilt tree.
 
 **A real, load-bearing bug found while deleting the old single index**:
-`document/mayan_client.py`'s `rebuild_index()` — called after every
-metadata attach across `document/service.py` (`upload`,
-`tag_application_documents`, `promote_government_id_to_customer_photo`,
-`generate_welcome_letter`, `upload_consent`) and by
-`reconcile.py --fix` — used to look up a single hardcoded slug,
-`INDEX_TEMPLATE_SLUG = "loan-onboarding-archive"`, and rebuild only
-that one index. Deleting that index without updating this constant
-would have made **every** document upload in the whole application
-start failing with `RuntimeError: index template not found:
-loan-onboarding-archive`, since Mayan no longer has anything at that
-slug — not a hypothetical, this was caught by reasoning through the
-consequences before it ever reached a live upload attempt. Fixed by
+`document/mayan_client.py`'s `rebuild_index()` used to look up a single
+hardcoded slug, `INDEX_TEMPLATE_SLUG = "loan-onboarding-archive"` —
+deleting that index without updating this constant would have made
+every document upload in the whole application start failing. Fixed by
 replacing the single slug with `INDEX_TEMPLATE_SLUGS = ("customer-index",
 "account-index", "application-index")` and a new
-`index_template_ids() -> list[int]` (raises naming every slug still
-missing, not just the first) that `rebuild_index()` now loops over,
-rebuilding all three. Deliberately still excludes "Creation date" —
-nothing in this codebase rebuilt that index before this fix either;
-`scripts/setup_document_hierarchy.sh` builds and rebuilds it once at
-setup time and nothing keeps it fresh afterward, unchanged by this
-redesign. Live-verified after the fix: a real `document.service.upload()`
-call against the rebuilt `app`/`worker-activity` images succeeded
-end-to-end (create → upload-file → attach metadata → rebuild all three
-indexes with no error), and the uploaded document was confirmed present
-in Application Index's tree via the real `documents_url` listing.
+`index_template_ids() -> list[int]` that `rebuild_index()` now loops
+over, rebuilding all three. Deliberately still excludes "Creation
+date" — nothing in this codebase rebuilt that index before this fix
+either. Live-verified after the fix — see the Session Log entry above.
 
 **Multi-leaf placement is real Mayan behavior, no longer exploited on
 purpose — historical context, not current design.** Two earlier
-drafts of this file relied on it: the original single index's
-`id_photo` node depended on one Mayan document satisfying two different
-leaf-node paths at once (`<application_id> → Government ID` and
-`<applicant_identifier> → id_photo`), and this section's first
-three-index redesign deliberately kept the same trick across three
-branches per index. A source read of
+drafts of this file relied on it (source-confirmed via
 `mayan/apps/document_indexing/models/index_instance_models.py`'s
-`_document_add()` confirmed Mayan walks *every* child branch at each
-tree level and links a document into *all* branches whose conditions
-independently evaluate true — not just the first match — and P5-2's
-own live verification script (2026-09-02) reproduced this for real, not
-just reasoned about: one Government ID document, confirmed present
-under both leaves' `documents_url` listings at once via
-`GET /index_instances/<id>/nodes/.../documents/` on a live instance.
-**Both of those uses are gone now** — the exclusive-placement redesign
-just above replaced them specifically because multi-placement read as
-confusing when browsing (the user's own direct feedback), and the
-customer-level Government ID copy (a genuine second document, not a
-re-tagged original — see "Document metadata assignment lifecycle"
-below) means there's no longer any document that needs to satisfy two
-leaves simultaneously. The mechanism itself is still true of Mayan and
-worth knowing if a future design ever wants it back; this project just
-doesn't use it anymore. **Cabinets were evaluated as an alternative
-and rejected as the hierarchy's backbone** — they also support true
-multi-membership and are synchronous (no Celery, unlike Index
-Templates), but the project's actual usage pattern is automatic,
-upload-time classification via API, which is Index Templates'
-idiomatic niche, not Cabinets' (a third-party source describes Cabinets
-as manual, file-manager-style curation).
+`_document_add()`, which walks *every* child branch at each tree level
+and links a document into *all* branches whose conditions independently
+evaluate true, not just the first match — full verification narrative
+in the Session Log entry above). **Both uses are gone now** — the
+exclusive-placement redesign above replaced them specifically because
+multi-placement read as confusing when browsing (the user's own direct
+feedback), and the customer-level Government ID copy (a genuine second
+document, not a re-tagged original — see "Document metadata assignment
+lifecycle" below) means no document needs to satisfy two leaves
+simultaneously anymore. The mechanism itself is still true of Mayan and
+worth knowing if a future design ever wants it back. **Cabinets were
+evaluated as an alternative and rejected as the hierarchy's backbone**
+— they also support true multi-membership and are synchronous (no
+Celery, unlike Index Templates), but the project's actual usage pattern
+is automatic, upload-time classification via API, which is Index
+Templates' idiomatic niche, not Cabinets' (a third-party source
+describes Cabinets as manual, file-manager-style curation).
 
 **A sharper, previously-implicit consequence of gotcha #2 (async
 reindex)**: `document.service.check_completeness()` and
@@ -1533,66 +1478,33 @@ attached to make that shape happen.
    because it was asked about directly, not because anything had to
    change to make it true.
 
-**Live-verified against the real stack (P16-4), and two real bugs found
-and fixed along the way — neither caught by the unit suite, both only
-surfacing against genuine Mayan behavior**:
+**Two real bugs found against the real stack (P16-4), neither caught by
+the unit suite — both only surfacing against genuine Mayan behavior,
+full repro/verification narrative moved to `IMPLEMENTATION_PLAN.md`'s
+Session Log, 2026-09-04 docs-consolidation entry**:
 
-1. **Mayan rejected the new attaches outright with a 400 — a document
-   type can only carry metadata types it's been explicitly associated
-   with, and `account_id` had never been associated with "Application
-   Document", nor `customer_id` with "Account Document"** (both
-   associations existed for the *other* document type only, since
-   `account_id` previously lived exclusively on Welcome
-   Letter/Consent, and `customer_id` exclusively on the promoted
-   Government ID). `scripts/setup_document_hierarchy.sh` now attaches
-   both associations (`required=false`, since neither exists at
-   upload/create time); fixed live against the running instance via
-   the same `POST /document_types/{id}/metadata_types/` call the script
-   makes, for the documents already created before the script was
-   updated.
-2. **A second, independent bug**: `tag_application_documents` and
-   `promote_government_id_to_customer_photo` both attach `customer_id`
-   to the same Government ID document when a fresh upload is promoted
-   (`persist_decision` calls the former first, unconditionally, then
-   the latter). This file's own earlier draft claimed the second
-   attach was "a harmless idempotent no-op" — untrue against real
-   Mayan, which rejects a second `POST` for a metadata type a document
-   already carries with another 400. Fixed with a new
-   `document/service.py`-internal `_set_metadata` helper
-   (update-in-place via `update_metadata_entry` if the field already
-   exists, plain create otherwise), used by both functions' attach
-   loops. `tests/unit/document/fake_mayan_client.py`'s `attach_metadata`
-   now replicates the real reject-on-duplicate behavior (it silently
-   allowed this before, which is exactly why the unit suite never
-   caught it). **Superseded, not reverted, by the exclusive-placement
-   redesign below**: `promote_government_id_to_customer_photo` no
-   longer attaches anything to the *same* document
-   `tag_application_documents` touches at all — it creates a brand-new
-   Mayan document instead (see "Document hierarchy" and the new rule 4
-   below), so this specific double-attach can't recur structurally, not
-   just because `_set_metadata` guards it. `_set_metadata` stays in use
-   by `tag_application_documents`' own multi-category attach loop, where
+1. **A document type can only carry metadata types it's been explicitly
+   associated with** — `account_id` had never been associated with
+   "Application Document", nor `customer_id` with "Account Document",
+   so the new attaches above were rejected outright with a 400.
+   `scripts/setup_document_hierarchy.sh` now attaches both associations
+   (`required=false`, since neither exists at upload/create time).
+2. **Mayan rejects a second `POST` for a metadata type a document
+   already carries** with another 400 — `tag_application_documents` and
+   `promote_government_id_to_customer_photo` used to both attach
+   `customer_id` to the same Government ID document when a fresh upload
+   was promoted; this file's own earlier draft wrongly called that
+   second attach "a harmless idempotent no-op." Fixed with a
+   `document/service.py`-internal `_set_metadata` helper (update-in-place
+   via `update_metadata_entry` if the field already exists, plain create
+   otherwise). **Superseded, not reverted, by the exclusive-placement
+   redesign below** — `promote_government_id_to_customer_photo` no
+   longer touches the same document `tag_application_documents` does at
+   all (it creates a brand-new Mayan document instead), so this
+   double-attach can't recur structurally, not just because
+   `_set_metadata` guards it. `_set_metadata` stays in use by
+   `tag_application_documents`' own multi-category attach loop, where
    the original conflict-on-retry concern is still real.
-
-Both fixes verified end-to-end against a real local stack, not just
-unit tests: a brand-new applicant's four documents carried no
-`customer_id` at upload time; approving the application tagged all
-four *and* the generated Welcome Letter with `account_id` +
-`customer_id`, with zero worker errors; a second application (a
-different product type, to sidestep the active-account rule) under the
-same identity correctly prefilled the form, offered — and used — the
-Government-ID-reuse choice, and its three newly-uploaded documents
-carried `customer_id` immediately at upload time, before submission;
-rejecting that application confirmed its documents kept `customer_id`
-(resolved at upload) but never gained `account_id`. Full unit suite
-(242 tests, run against a dedicated `loan_onboarding_test` database —
-**not** the compose stack's own `loan_onboarding`, after this session
-accidentally wiped the live stack's `customers`/`accounts`/`applications`
-tables by running the suite against the same live Postgres the app
-uses; the standard per-test `DELETE FROM ...` cleanup fixtures are
-exactly the reconciliation-worthy drift this file's own
-"Document/database reconciliation" section describes, self-inflicted
-this time) and `lint-imports` both green.
 
 **A follow-up session redesigned the three index templates from
 multi-placement to exclusive placement** (a document lives at exactly
@@ -1600,39 +1512,21 @@ one leaf — the deepest entity it's actually tied to — never nested
 under more than one branch at once) and, along with it, changed
 `promote_government_id_to_customer_photo` from a re-tag-in-place
 operation into a genuine file copy — see "Document hierarchy" above for
-the resulting tree shape and rule 4 below for the copy mechanism itself.
-**Live-verified against the real stack a second time**, against a fresh
-multi-application scenario built specifically to exercise the new
-design (two applications approved under one identifier, a third
-rejected): the rejected application's own documents stayed under its
-own `<application_id>` branch only, never touching the customer or
-account level; each approved application's documents landed only under
-`<customer_id>/<account_id>/<application_id>/<category>`, confirmed via
-direct REST tree-walking that no document appeared in more than one
-leaf; the generated Welcome Letter landed only under
-`<customer_id>/<account_id>/<category>`, with no `<application_id>`
-nesting; and the customer-level Government ID copy
-(`<customer_id>/<category>`, no account or application node in its
-path) held exactly one document throughout — the second approval's
-fresh Government ID upload correctly trashed the first copy
-(`DELETE /documents/{id}/`, soft-delete, same as every other delete in
-this codebase) before creating its replacement, and the *original*
-application-level Government ID documents for both applications were
-left completely untouched by the copy, still findable under their own
-`<application_id>` branches. A real correctness bug in
-`reconcile.py` was also found and fixed while building this: `scan()`
-used to treat *every* stale `customer_id` as a strippable secondary tag
-— true when `customer_id` only ever rode alongside `application_id`,
-no longer true now that the customer-level copy carries `customer_id`
-as its *only* metadata. `scan()` now checks whether a document has
-`application_id`/`account_id` at all before deciding orphaned-vs-stale
-(see rule 5 below and `scan()`'s own docstring); without this fix, a
-customer-level copy whose owning customer row was deleted would have
-had its one identifying tag stripped instead of the whole document
-being trashed, leaving a permanently untethered, un-taggable document
-invisible to every future reconciliation run. Full unit suite (244
-tests, same dedicated `loan_onboarding_test` database discipline as
-above) and `lint-imports` both green after the redesign.
+the resulting tree shape and rule 4 above for the copy mechanism
+itself. A real correctness bug in `reconcile.py` was also found and
+fixed while building this: `scan()` used to treat *every* stale
+`customer_id` as a strippable secondary tag — true when `customer_id`
+only ever rode alongside `application_id`, no longer true now that the
+customer-level copy carries `customer_id` as its *only* metadata.
+`scan()` now checks whether a document has `application_id`/
+`account_id` at all before deciding orphaned-vs-stale (see rule 5 above
+and `scan()`'s own docstring) — without this fix, a customer-level copy
+whose owning customer row was deleted would have had its one
+identifying tag stripped instead of the whole document being trashed,
+leaving a permanently untethered, un-taggable document invisible to
+every future reconciliation run. Both redesign passes were
+live-verified end-to-end (244 tests + `lint-imports` green after the
+second) — full sweep in the Session Log entry referenced above.
 
 **Deliberately out of scope**: no backfill of documents belonging to
 applications approved *before* this lifecycle existed — same "forward-
@@ -1881,23 +1775,12 @@ and strips every stale `customer_id` tag, then rebuilds the index once
 at the end (same "rebuild once, not per-document" discipline every
 other multi-document `document/service.py` operation already follows).
 
-**Live-verified against a real orphaned state, not a synthetic one**:
-run against the actual drift this section opens with (27 real documents
-across 6 applications and 3 accounts, all orphaned by the same external
-table-clearing this project has now observed repeatedly) plus one
-deliberately constructed stale-tag case (approved a fresh application
-for real, then `DELETE FROM customers` for just that one customer row,
-leaving its `application`/`account` rows intact) — `--report` correctly
-listed all 27 as orphaned with accurate per-document reasons, and
-exactly the one promoted `id_photo` document as a stale tag, while its
-three sibling Application Documents and its account's Welcome Letter
-(all still validly owned, none carrying a `customer_id` at all except
-the promoted one) appeared in neither list. `--fix` then confirmed via
-the Mayan REST API: all 27 orphans gone from the active document list
-(moved to trash), the stale-tagged document's `customer_id` entry
-stripped with `applicant_identifier`/`application_id`/`category`
-untouched, and both indexes' document counts dropped from 27/28 to
-exactly 5 — the documents that were actually still valid.
+**Live-verified against a real orphaned state, not a synthetic one**
+(27 real orphaned documents plus a deliberately constructed stale-tag
+case; `--report` correctly separated the two categories, `--fix`
+correctly cleaned up both) — full sweep moved to
+`IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04 docs-consolidation
+entry.
 
 ## Enforcing the boundaries
 
@@ -2056,304 +1939,121 @@ for `KEYCLOAK_ISSUER`.
 
 ## Known gaps to state explicitly once built
 
-- **`docker compose up -d` does not rebuild images — a container can run
-  arbitrarily stale code relative to `git HEAD` with no warning, and
-  Mayan's own index-template/metadata-type config can independently
-  drift or reset without anyone editing this codebase.** Both hit live,
-  in the same session, and together they produced a confusing false
-  signal worth recording exactly as it happened. A long-running local
-  stack (containers up 26+ hours, spanning several sessions' worth of
-  commits including Phase 14, Phase 16, and the exclusive-placement
-  index redesign) was still running `app`/`worker-workflow`/
-  `worker-activity` images built from a commit *before* all three —
-  confirmed by reading `inspect.getsource(activities.persist_decision)`
-  from inside the live `worker-activity` container and finding no call
-  to `tag_application_documents` at all, an old
-  `generate_welcome_letter` call missing the `applicant_identifier`
-  argument, and old-style re-tag-in-place promotion behavior. A fresh
-  end-to-end approval against this stale image tagged only the
-  Government ID document with `customer_id`, attached `account_id` to
-  nothing, and created no customer-level Government ID copy — exactly
-  the symptoms a first read suggested were a *code* regression, until
-  comparing the running container's own loaded source against the
-  working tree proved otherwise. Fixed with `docker compose build app
-  worker-workflow worker-activity` followed by `docker compose up -d`
-  for the same three services; re-running the identical scenario
-  against the rebuilt images produced fully correct tagging and
-  exclusive placement. Separately, this same session found the live
-  Mayan instance had reverted to just the old single
-  `loan-onboarding-archive` index (the three-index exclusive-placement
-  redesign this file describes as already built and live-verified was
-  simply not present), and was also missing the two P16-4
-  metadata-type/document-type associations (`account_id` on
-  "Application Document", `customer_id` on "Account Document") —
-  neither loss has a confirmed root cause (a `mayan-db` volume reset
-  independent of the `db`/Temporal volumes is the leading guess, since
-  Postgres/Temporal state from the same period was unaffected), but the
-  practical lesson is the same as the stale-image one: **this project's
-  own documentation of "already built and live-verified" describes a
+*(Every "Resolved" bullet below is trimmed to a current-state summary —
+full repro/root-cause/reverification narrative for each lives in
+`IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04 docs-consolidation
+entry, unless a more specific pointer is given.)*
+
+- **`docker compose up -d` does not rebuild images, and Mayan's own
+  index-template/metadata-type config can independently drift or reset
+  — both hit live, in the same session.** A long-running local stack
+  ran stale `app`/`worker-workflow`/`worker-activity` images for over a
+  day without warning, and separately Mayan's live config reverted to
+  an old single index and lost two P16-4 metadata-type associations
+  (root cause unconfirmed, a `mayan-db` volume reset independent of
+  `db`/Temporal is the leading guess). **The operating rule this
+  confirms**: this file's "already built and live-verified" describes a
   point in time, not a durable guarantee — re-verify both the running
-  image and Mayan's live config directly (don't trust either from
-  `CLAUDE.md`'s narrative alone) before trusting a "clear test data and
-  re-verify" pass to actually exercise current code.** No code changed
-  as a result of either finding — both were environment-state problems,
-  fixed by rebuilding/reconfiguring, not by editing `loan_onboarding/`.
-- **Reconciliation (`loan_onboarding/reconcile.py`, "Document/database
-  reconciliation" above) only detects and fixes drift — it never
-  prevents it, and nothing runs it automatically.** It has to be
-  invoked, by a human or a scheduled job neither of which this project
-  sets up; between runs, an orphaned document is exactly as invisible as
-  it was before this existed. **Cascade-on-delete is deliberately not
-  built** — there is no delete operation for `customer`/`account`/
-  `application` anywhere in this codebase today, so there is nothing yet
-  for a cascade to hang off of; whether hard-deleting an approved
-  customer/account/application should even be possible in a
-  loan-onboarding system (versus a status change that preserves the
-  audit trail) is a real, unresolved product question, not a build
-  gap — confirmed with the user as "reconciliation first," cascade
+  image and Mayan's live config directly before trusting a "clear test
+  data and re-verify" pass to exercise current code. Full write-up: see
+  this file's own "2026-09-04 (new session)" Session Log entry.
+- **Reconciliation (`reconcile.py`) only detects and fixes drift — it
+  never prevents it, and nothing runs it automatically.** It has to be
+  invoked by a human or a scheduled job, neither of which this project
+  sets up. **Cascade-on-delete is deliberately not built** — there is no
+  delete operation for `customer`/`account`/`application` anywhere in
+  this codebase today, and whether a loan-onboarding system should ever
+  hard-delete an approved entity (audit-trail implications) versus a
+  status change is a real, unresolved product question, not a build gap
+  — confirmed with the user as "reconciliation first," cascade
   deferred, not decided against.
-- **`applications`'s `chk_approved_has_account` DB-level check
-  constraint is gone, not replaced.** An earlier draft of this file
-  (back when `applications.account_id` existed) relied on
-  `CHECK (status <> 'APPROVED' OR account_id IS NOT NULL)` as a
-  database-enforced backstop against a `persist_decision` idempotency
-  bug ever leaving an `APPROVED` application with no account. Once
-  `account_id` moved to `accounts.application_id` (see "Data storage"),
-  that invariant can no longer be expressed as a single-table `CHECK` —
-  enforcing "an APPROVED application has a matching account" across
-  two tables would need a trigger, which this POC deliberately doesn't
-  add. The invariant is still true in practice (`persist_decision`'s
-  logic guarantees it), but it moved from **DB-enforced** to
-  **code-enforced-only** — a real, if narrow, reduction in the safety
-  net, not a change with zero cost.
-- **The 9-digit-numeric primary key format (`CUS-`/`ACC-`/`APP-` +
-  `idgen.service.generate_id(prefix, 9)`) trades away collision-safety
-  margin for a familiar, account-number-style look.** `10^9` values per
-  entity type is real headroom for a POC, but nowhere near a `UUID`'s;
-  see "Data storage" for the full entropy discussion and why the
-  retry-on-collision insert logic in each module's `db.py` is load-
-  bearing, not decorative. Revisit (longer id, or alphanumeric instead
-  of digits-only) if this project ever needs to scale past POC data
-  volumes.
-- **Resolved in P12-3**: `app`'s planned host port `8000` (per this
-  file's own `app.py` docstring example) would have collided with
-  `mayan`'s already-published host port `8000` (flagged as a risk since
-  P5-1). `docker-compose.yml`'s `app` service (added in P12-3, once
-  both BFFs existed) publishes on `8001` instead, which was already
-  registered as this project's native-dev redirect URI
-  (`keycloak/import/loanrealm-realm.json`'s `http://localhost:8001/ui/callback`)
-  — no realm changes were needed. A second, real bug was found and
-  fixed in the same pass, invisible until the very first fully
-  containerized `docker compose up --build` (every earlier phase tested
-  `app.py` running natively on the host, where this never surfaced):
-  `bff_backoffice/keycloak_session.py`'s two browser-redirect URLs
-  (login, logout) and `keycloak_auth.py`'s token issuer-claim validation
-  were built from `KEYCLOAK_ISSUER` (`http://keycloak:8080/...`,
-  correct for this app container's own server-to-server calls to
-  Keycloak, but meaningless to a browser outside the compose network,
-  and mismatched against what Keycloak actually stamps into an issued
-  token's `iss` claim, which mirrors the front-channel/browser-facing
-  URL). Fixed with a new `KEYCLOAK_PUBLIC_ISSUER` env var (falls back
-  to `KEYCLOAK_ISSUER` when unset, so the native/host-run case needs no
-  config change) — see both modules' `_public_issuer()`/
-  `_public_keycloak_issuer()` and `docker-compose.yml`'s `app` service
-  comment. Verified via a real browser login/logout round trip through
-  the fully containerized stack after the fix.
-- **Resolved post-P12**: `db`'s published host port (`5432`, Postgres's
-  own default) collides with a native, host-installed Postgres on a
-  developer machine that's already bound `127.0.0.1:5432` — confirmed
-  directly, twice, on this project's own dev machine: both a native
-  `psql postgresql://postgres:postgres@localhost:5432/loan_onboarding`
-  and pgAdmin (running natively, pointed at `localhost:5432`) silently
-  connected to the *native* Postgres instead of this container's, and
-  failed with `FATAL: role "postgres" does not exist` (a real,
-  reproducible error, not a hypothetical one — the native instance has
-  no `postgres` role, this container's does). `docker-compose.yml`'s
-  `db` service now publishes on `5433` instead — every in-Compose
-  service (`temporal`, `worker-activity`, `app`) is unaffected, since
-  they all reach this container via the internal hostname `db:5432`,
-  never the host-published port; only host-side tools (pgAdmin, a
-  native `psql`, or `DATABASE_URL` for a natively-run `app.py`/
-  `worker_main.py`, as several earlier phases' own manual verification
-  needed) have to know to use `5433`. This is the same class of
-  collision as the earlier `db`-vs-`mayan` port-8000 note above — a
-  developer machine's own pre-existing services silently shadowing a
-  container's published port, with no error until something actually
-  tries to connect and gets someone else's server.
+- **`applications`'s old `chk_approved_has_account` DB-level check
+  constraint is gone, not replaced.** Once the account pointer moved to
+  `accounts.application_id` (see "Data storage"), "an APPROVED
+  application has a matching account" can no longer be expressed as a
+  single-table `CHECK` — enforcing it across two tables would need a
+  trigger, which this POC deliberately doesn't add. The invariant is
+  still true in practice (`persist_decision`'s logic guarantees it), but
+  it moved from DB-enforced to code-enforced-only — a real, if narrow,
+  reduction in the safety net.
+- **The 9-digit-numeric primary key format (`CUS-`/`ACC-`/`APP-`) trades
+  away collision-safety margin for a familiar, account-number-style
+  look.** `10^9` values per entity type is real headroom for a POC but
+  nowhere near a `UUID`'s — see "Data storage" for the entropy
+  discussion and why the retry-on-collision insert logic in each
+  module's `db.py` is load-bearing, not decorative. Revisit (longer id,
+  or alphanumeric) if this ever needs to scale past POC data volumes.
+- **Resolved (P12-3)**: `app`'s host port would have collided with
+  `mayan`'s (both `8000`) — moved to `8001`. A second bug, invisible
+  until the first fully containerized run, was found in the same pass:
+  browser-redirect URLs and issuer-claim validation were built from the
+  server-internal `KEYCLOAK_ISSUER`, mismatched against Keycloak's
+  actual browser-facing `iss` claim — fixed with a new
+  `KEYCLOAK_PUBLIC_ISSUER` env var.
+- **Resolved (post-P12)**: `db`'s published host port `5432` collides
+  with a native, host-installed Postgres on a dev machine — moved to
+  `5433` on the host side only (in-Compose services reach `db:5432`
+  internally, unaffected).
 - **Mayan's default REST API rate limit (`REST_API_THROTTLING_RATE_USER`,
-  20 req/sec out of the box) is real and gets hit at POC scale, not just
-  in theory** — found in P5-4/P5-5 by actually running
-  `document.service`'s functions against the real local Mayan instance
-  in a realistic sequence (upload several required categories in a row,
-  each doing create+upload+3×attach-metadata+rebuild, then
-  `check_completeness`'s fetch-all-documents-then-per-document-metadata
-  scan) and watching it 429. `mayan_client.py`'s `_request` now retries
-  on 429 honoring the `Retry-After` header Mayan sends (confirmed
-  present), bounded at `_MAX_429_RETRIES = 5` — not a full fix, just
-  enough that a normal customer upload flow doesn't surface a raw HTTP
-  error. `document/service.py`'s underlying approach
-  (`_documents_matching`: fetch every document in the whole instance,
-  then fetch each one's metadata individually, then filter in Python —
-  inherited from `mayan-edms-customer-archive`'s identical pattern,
-  needed because Mayan's advanced-search endpoint doesn't AND multiple
-  metadata fields together) is still O(all documents in the instance)
-  per call and will get slower and throttle more often as real data
-  volume grows; fine for a POC, would need real server-side filtering
-  (or caching, or a lower-frequency rebuild strategy) before this scaled
-  past that.
+  20 req/sec) is real and gets hit at POC scale** (found in P5-4/P5-5
+  running a realistic upload sequence against real Mayan).
+  `mayan_client.py`'s `_request` retries on 429 honoring `Retry-After`,
+  bounded at `_MAX_429_RETRIES = 5` — not a full fix.
+  `document/service.py`'s `_documents_matching` (fetch every document,
+  then every document's metadata, then filter in Python — Mayan's
+  advanced-search endpoint doesn't AND multiple metadata fields
+  together) is still O(all documents in the instance) per call and will
+  throttle more as real data volume grows; fine for a POC, would need
+  server-side filtering (or caching) before scaling past that.
 - **Resolved, narrowed rather than fully closed.** `bff_customer/` used
-  to accept a self-typed email or phone number with zero verification
-  (PRD §7.1) — this POC's standout risk, called out repeatedly in this
-  file and PRD.md as the single highest-priority gap. **Fixed** by
-  requiring email verification (a 6-digit one-time code, entered back
-  correctly) before the session cookie is ever set — see this file's
-  "Identity" section and `bff_customer/identity.py`'s module docstring
-  for the full mechanism, and `tests/unit/bff_customer/test_identity.py`
-  for the regression tests (round-trip, tampered/garbage rejection, the
-  5-attempt lockout). Confirmed live: entering a wrong code shows
-  "Incorrect code. Try again."; 5 wrong attempts in a row clears the
-  pending verification and the correct code no longer works afterward
-  without restarting from `/apply/identify`; the correct code lands on
-  "My Applications" as the verified identity. **What's still a real,
-  accepted limitation, not a gap in the mechanism itself**: this POC
-  has no real email/SMS provider (no SMTP, no Twilio/SendGrid/SES
-  credentials anywhere in `.env.example`), so delivery is fake --
-  `bff_customer/notifications.py` only prints the code server-side,
-  and the verify-code page also shows it directly in the response
-  (labeled as dev-only) since no real inbox will ever receive it
-  otherwise. This proves the mechanism, not a production-ready login --
-  see PRD §7.1 for the "treat any real deployment as non-public until a
-  real provider replaces the fake one" framing this carries forward.
-  Also dropped along with this fix: phone-number identifiers (SMS
-  delivery would need a provider this project doesn't have either) --
-  the identify form is email-only now, confirmed with the user as an
-  accepted scope reduction, not an oversight.
-- **Resolved (the "no graceful handling" half only — the race window
-  itself is deliberately still open, see below).** The active-account-
-  per-product-type rule (`accounts.product_type`'s partial unique
-  index, "Applying without being a customer yet") is checked before a
-  decision is signaled, but not atomically with it — two near-
-  simultaneous Approve decisions for the same customer and product type
-  can both pass `check_decision_allowed` before either commits. The
-  database constraint always stopped the bad state from ever being
-  *written*; what used to be missing was any graceful handling of the
-  resulting write failure on the loser's side. Reproduced live via the
-  underwriter's own Bulk Approve action (its pre-check loop runs
-  `check_decision_allowed` for every selected item *before* any signal
-  goes out, then fires all signals concurrently via `asyncio.gather` —
-  the natural way to hit the real race, not a race condition needing
-  threading tricks to simulate): two `personal_loan` applications for
-  one identifier, both selected and bulk-approved together, one
-  genuinely won the `ux_accounts_customer_active_product_type` race and
-  the other's `persist_decision` hit the real
-  `UniqueViolationError` — before the fix, that retried 5 times
-  identically, failed the whole Temporal workflow (`Status: FAILED`),
-  and left the application stuck at its pre-decision status forever,
-  no error ever surfaced to staff. **Fixed** by having
-  `persist_decision` catch that specific constraint violation and
-  convert the loser's outcome into a clean `REJECTED` write (with a
-  system-generated comment explaining the conflict) instead of letting
-  the exception propagate — confirmed by design decision with the user
-  (three other options were on the table: leave it, fail fast but still
-  stuck, or add a distributed lock; converting to a clean terminal
-  state was chosen as the one that actually closes the "stuck forever"
-  outcome without the invasiveness of serializing the check-and-write).
-  `persist_decision` now also returns the status it actually wrote, and
-  `workflows.py`'s `submit_decision` uses that return value (not its
-  own pre-computed `resulting_status`) for the workflow's own
-  `self._status` — closing a related, previously-unnoticed
-  inconsistency where the workflow's own `get_status` query could have
-  disagreed with what Postgres actually held (nothing in this codebase
-  queries workflow status directly today, so this was latent, not
-  observed, but is now correct either way). Re-verified live against
-  the exact repro above: the losing application lands cleanly on
-  `REJECTED` with the auto-generated comment, its Temporal workflow
-  ends `Status: COMPLETED` (not `FAILED`) with a query result that
-  correctly reports `"status":"REJECTED"`, and the worker logs stay
-  silent — no retries, no traceback. **The in-batch half of the window
-  itself is now also closed**, in a follow-up fix: `bff_backoffice`'s
-  bulk-approve route now calls a new
-  `application.service.check_decision_allowed_bulk(application_ids,
-  decision)` instead of looping the plain per-item
-  `check_decision_allowed` — it tracks which
-  `(applicant_identifier, product_type)` pairs an earlier, still-
-  eligible item *in the same batch* has already claimed, and blocks a
-  later item for the same pair before either signal is ever sent
-  (keyed on `applicant_identifier`, not the resolved `customer_id`,
-  since the more common trigger is two applications for an applicant
-  with *no* customer row yet at all — both would resolve the same
-  customer via the same idempotent `get_or_create` during provisioning
-  either way). Re-verified live against a fresh repro of the exact
-  same scenario: bulk-approving two sibling `personal_loan`
-  applications together now reports `"1 succeeded, 1 failed:
-  customer already has an active personal_loan account"` **immediately,
-  synchronously, in the Bulk Approve Results dialog** — the blocked
-  application is never signaled at all, stays at
-  `PENDING_UNDERWRITING` for a human to look at again later (rather
-  than being silently auto-rejected), and the worker logs stay
-  completely silent (no activity ever ran for it). **What's still a
-  deliberately-accepted gap**: only same-request concurrency is
-  closed. Two independent decisions — a second bulk action, or a
-  single-item Approve, submitted via *separate* HTTP requests close
-  enough in time — can still both pass their own checks, since nothing
-  tracks claims across requests. Closing that fully would need a lock
-  spanning from the check (in `bff_backoffice`, a web process) through
-  to the actual write (in a Temporal activity, a worker process,
-  arbitrarily later) — a much larger, riskier change (lock lifetime,
-  staleness, and deadlock handling across an async boundary with no
-  natural upper bound) that wasn't undertaken here.
-  `persist_decision`'s conflict-to-REJECTED handling (above) remains
-  the backstop for that cross-request case, and is expected to still
-  fire occasionally. See `application/service.py`'s
-  `check_decision_allowed_bulk` and
-  `tests/unit/application/test_service.py`'s
-  `test_check_decision_allowed_bulk_blocks_second_sibling_in_same_batch`,
-  and `application/activities.py`'s `persist_decision` plus
-  `tests/unit/application/test_activities.py`'s
-  `test_persist_decision_approve_converts_to_rejected_on_active_account_conflict`
-  for the still-needed backstop.
-- **Resolved, found live in Phase 13's P13-7 verification sweep, not
-  just reasoned about.** `check_decision_allowed`'s short-circuit used
-  to read `if record["customer_id"] is None: return []` — "a brand-new
-  applicant can't conflict with an existing active account" — which is
-  only correct for an applicant with *no other* application anywhere.
-  Two applications submitted under the same `applicant_identifier`
-  before either is decided both get `customer_id = NULL` at submission
-  (per "Applying without being a customer yet"). If one is approved
-  first (provisioning a customer + an `ACTIVE` `personal_loan` account)
-  and the *other*, older sibling application — whose own `customer_id`
-  column was never backfilled, since it's a different row — is later
-  Approved, the old code still read that row's own `NULL` `customer_id`
-  and returned `[]`, never resolving via `applicant_identifier` the way
-  `persist_decision`'s own provisioning step does. The signal reached
-  the workflow uncontested; `persist_decision` then hit the exact same
-  `ux_accounts_customer_active_product_type` `UniqueViolationError` as
-  the race above, but deterministically, no timing window required.
-  Reproduced directly before the fix: two `personal_loan` applications
-  submitted back to back under one identifier, the first Approved
-  (provisioning `cus-911063467`/`acc-604713440`), the second's later
-  Approve then failing every retry with
-  `duplicate key value violates unique constraint
-  "ux_accounts_customer_active_product_type"` — the activity's 5
-  retries all failed identically, and the Temporal workflow itself
-  ended in `FAILED` status with the application permanently stuck at
-  `PENDING_UNDERWRITING`, no error ever surfaced to `bff_backoffice` or
-  a staff member. **Fixed** by having `check_decision_allowed` resolve
-  via `customer.service.find_by_identifier(application.applicant_identifier)`
-  when `customer_id` is `NULL`, instead of trusting the column alone —
-  a genuinely new applicant still short-circuits to `[]` (no customer
-  resolves at all), but a since-approved sibling application is now
-  found. Re-verified live against the exact repro above: the second
-  Approve now returns a clean `"customer already has an active
-  personal_loan account"` error in the review dialog, the application
-  stays at `PENDING_UNDERWRITING` (not signaled), and no Temporal
-  workflow is touched at all — confirmed via `psql` and the worker
-  logs staying silent. See `application/service.py`'s
-  `check_decision_allowed` and `tests/unit/application/test_service.py`'s
-  `test_check_decision_allowed_resolves_by_identifier_when_customer_id_null_but_customer_exists`.
-  The adjacent race-window gap immediately above this bullet is
-  unaffected by this fix — it's a separate, narrower timing issue this
-  change doesn't touch.
+  to accept a self-typed email/phone with zero verification (PRD §7.1)
+  — this POC's standout risk. **Fixed** by requiring a 6-digit
+  email-verification code before the session cookie is ever set — see
+  "Identity" above and `bff_customer/identity.py`'s module docstring.
+  **Still a real, accepted limitation**: no real email/SMS provider, so
+  delivery is fake (`bff_customer/notifications.py` prints the code
+  server-side, the verify page shows it directly, labeled dev-only) —
+  this proves the mechanism, not a production-ready login. Phone-number
+  identifiers were dropped along with this fix (SMS would need a
+  provider this project has none of either), confirmed with the user as
+  an accepted scope reduction.
+- **Resolved (no-graceful-handling half only — the race window itself
+  is deliberately still open).** The active-account-per-product-type
+  rule is checked before a decision is signaled but not atomically with
+  it — two near-simultaneous Approves for the same customer+product_type
+  can both pass the check before either commits; the partial unique
+  index always stopped the bad *write*, but the loser used to fail its
+  whole Temporal workflow and get stuck forever with no error surfaced.
+  **Fixed**: `persist_decision` now catches that specific constraint
+  violation and converts the loser into a clean `REJECTED` (with a
+  system-generated comment), chosen over two other options (fail fast,
+  or a distributed lock) as the one that closes "stuck forever" without
+  serializing the check-and-write. **The in-batch half of the window is
+  now also closed** by `check_decision_allowed_bulk`, which tracks
+  `(applicant_identifier, product_type)` pairs an earlier item in the
+  same batch already claimed. **What's still deliberately accepted**:
+  only same-request concurrency is closed — two decisions from
+  *separate* HTTP requests close enough in time can still both pass
+  their own checks; closing that fully would need a lock spanning from
+  the web-process check to the worker-process write, a much larger,
+  riskier change not undertaken here. `persist_decision`'s
+  conflict-to-REJECTED handling remains the backstop for that
+  cross-request case. See `application/service.py`'s
+  `check_decision_allowed_bulk` and `application/activities.py`'s
+  `persist_decision`, plus each one's test coverage in
+  `tests/unit/application/`.
+- **Resolved, found live in Phase 13's P13-7 sweep.**
+  `check_decision_allowed`'s short-circuit used to trust a `NULL`
+  `applications.customer_id` as "no customer exists," which is wrong
+  for a sibling application under the same identifier whose column was
+  never backfilled after an *earlier* sibling's approval — this let a
+  second Approve reach the workflow uncontested and then deterministically
+  hit the same active-account unique-constraint violation. **Fixed** by
+  having `check_decision_allowed` resolve via
+  `customer.service.find_by_identifier(...)` when `customer_id` is
+  `NULL`, instead of trusting the column alone. This is a separate,
+  narrower fix from the race-window gap immediately above — unaffected
+  by it.
 - Module boundaries are enforced by import-linter config, not by a
   process/network boundary — a determined or careless change can still
   violate them if CI isn't actually wired to fail on a violation. Don't
@@ -2365,27 +2065,12 @@ for `KEYCLOAK_ISSUER`.
 - No timeout on "wait for Underwriter/Manager decision."
 - **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to
-  catch — and, worse than previously documented here, no reconciliation
-  job exists anywhere in this codebase to catch it from the outside
-  either.** An earlier draft of `db/schema.sql`'s `workflow_id` column
-  comment (and `PRD.md`'s §9.3 data-model table) claimed this column
-  "gets cleared if a Temporal admin deletes the execution," describing
-  a reconciliation mechanism as if it existed — corrected in P12-1
-  after grepping the codebase and finding no code anywhere writes to
-  `workflow_id` after `persist_application` sets it. Both claims (the
-  terminate gap, and the absence of any reconciliation) were verified
-  for real in P12-1, not just reasoned about: a genuine
-  `temporal workflow cancel` issued directly via the Temporal CLI
-  (bypassing this app entirely) against a live `PENDING_UNDERWRITING`
-  application correctly landed the Postgres row on `CANCELLED` (the
-  `except asyncio.CancelledError` recovery path works against a real
-  server, not just `WorkflowEnvironment`); a `temporal workflow
-  terminate` against a second, otherwise-identical application left its
-  row permanently stuck at `PENDING_UNDERWRITING` with no error raised
-  anywhere — confirmed by checking Postgres afterward, not assumed. A
-  human operator today has no query, alert, or job that would ever
-  surface this stuck row; finding it requires manually cross-referencing
-  Postgres against Temporal's own workflow list.
+  catch — and no reconciliation job exists anywhere in this codebase to
+  catch it from the outside either.** Verified for real in P12-1: a
+  genuine `temporal workflow cancel` correctly lands the Postgres row on
+  `CANCELLED`, but a `temporal workflow terminate` leaves it permanently
+  stuck with no error raised anywhere — a human operator today has no
+  query, alert, or job that would ever surface this.
 - No proactive notification (email/SMS) on status change.
 - A product type present in `application/schemas.py`'s registry but
   missing from `workflow/task_queues.py`'s `KNOWN_PRODUCT_TYPES` is

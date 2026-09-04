@@ -37,9 +37,9 @@ the architecture already decided in `CLAUDE.md`.
 
 ## Status
 
-Planning complete, implementation not started — see
-`IMPLEMENTATION_PLAN.md`'s **Current Status** for the exact resume
-point (Phase 0, repo & infra scaffolding).
+Build-out is substantially complete (all 16 planned phases done) — see
+`IMPLEMENTATION_PLAN.md`'s **Current Status** for exactly where things
+stand and what, if anything, is next.
 
 ## Reference projects
 
