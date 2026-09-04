@@ -588,6 +588,57 @@ JS-constructed `<form method="POST">` (a genuine navigation, not
 out?" confirmation page. A browser-automation technique note for future
 sessions, not an application bug.
 
+**Follow-up, same day: user reported "can not view consent document."
+Investigated and traced it to test data, not an app bug, then did a
+second full clean-slate clear + re-sweep using genuinely valid PDFs
+throughout.** The consent document from the previous sweep's live
+verification used trivial fake content (`%PDF-1.4\n` + a short string)
+for API-level testing — passes magic-byte sniffing but has no real PDF
+object structure, so Chrome's built-in PDF viewer showed "We can't open
+this file." **This is CLAUDE.md's own documented gotcha #4** ("a file
+that passes magic-byte sniffing may still have zero extractable
+pages"), hit for real by test data rather than a customer/staff upload
+this time. Confirmed the route/streaming were never the problem (`curl`
+had already shown 200 + correct `content-type` + correct bytes); proved
+it by replacing the same document with a genuinely valid one-page PDF
+(same generator technique `document/service.py`'s own
+`_render_welcome_letter_pdf` uses) through the real back-office dialog
+— it rendered correctly.
+
+**Then cleared everything again and reran the full sweep with real,
+structurally valid PDFs for every single upload** (18 generated via a
+one-off script, one per category/version), specifically to avoid a
+repeat of this. Same coverage as the previous sweep — one identity's
+three product types all approved (direct, ID-reuse, escalated), a
+second identity's application rejected cleanly, consent uploaded by
+the customer then replaced by staff (real Keycloak logins for both
+underwriter1 and manager1) — plus this time every consent document
+was independently opened in a **real browser tab and screenshotted**
+to positively confirm it renders, not just that the HTTP response
+looked right. Hit the same Customer Index rebuild-race lag as last
+time (`node_count` stuck at 5 right after the sweep instead of the
+full tree) — same documented fix, one `rebuild/` call, waited stable at
+37 across 6 polls. Full three-index tree walk this time verified
+programmatically rather than by eye: 21 active documents, zero
+duplicate placements *within* any single index (Customer/Account/
+Application each independently deduplicated — a document legitimately
+appears once per index it belongs to, so the right check is
+per-index, not combined across all three). `reconcile.py --report`:
+zero orphans, zero stale tags. Unit suite (246) and `lint-imports`
+(8/8) green. No code changes — this was entirely a live-verification
+session, using better test fixtures than before.
+
+**Also hit and recorded a browser-automation flakiness, not an app
+issue**: clicking Keycloak's "Log in with Keycloak" link and its
+"Logout" confirmation button both intermittently failed to navigate
+via the standard `computer` click action (2-3 attempts, screenshots
+confirmed no page change) during the mid-sweep role switch to
+manager1. Worked reliably every time via
+`document.querySelector('a'/'button[type=submit]').click()` through
+`javascript_exec` instead. Worth trying that fallback first next time
+this specific symptom shows up on a Keycloak-hosted page, rather than
+repeating plain coordinate/ref clicks.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 
