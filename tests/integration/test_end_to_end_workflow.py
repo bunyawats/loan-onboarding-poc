@@ -73,8 +73,11 @@ def _stub_document_service(monkeypatch):
     correctly here regardless, since this phase explicitly doesn't need
     Mayan at all."""
 
-    async def fake_check_completeness(application_id, product_type):
+    async def fake_check_completeness(application_id, product_type, exclude_categories=None):
         return []
+
+    async def fake_tag_application_documents(application_id, account_id, customer_id):
+        pass
 
     async def fake_promote(application_id, customer_id):
         pass
@@ -83,6 +86,7 @@ def _stub_document_service(monkeypatch):
         pass
 
     monkeypatch.setattr(service.document_service, "check_completeness", fake_check_completeness)
+    monkeypatch.setattr(activities.document_service, "tag_application_documents", fake_tag_application_documents)
     monkeypatch.setattr(activities.document_service, "promote_government_id_to_customer_photo", fake_promote)
     monkeypatch.setattr(activities.document_service, "generate_welcome_letter", fake_generate_welcome_letter)
 
