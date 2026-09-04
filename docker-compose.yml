@@ -167,6 +167,17 @@ services:
       MAYAN_LOCK_MANAGER_BACKEND_ARGUMENTS: "{'redis_url':'redis://mayan-redis:6379/2'}"
       MAYAN_AUTOADMIN_USERNAME: ${MAYAN_SERVICE_ACCOUNT_USERNAME:-admin}
       MAYAN_AUTOADMIN_PASSWORD: ${MAYAN_SERVICE_ACCOUNT_PASSWORD:-changeme}
+      # Gunicorn's own request timeout (default 120s) -- bumped for this
+      # project's memory-constrained dev box, where a request can end up
+      # queued behind real Celery congestion (confirmed live via
+      # `docker logs mayan` showing `whoosh.index.LockError` under
+      # concurrent index/deindex tasks -- see scripts/generate_real_e2e_data.py's
+      # own retry/backoff for that specific error, which this setting
+      # does NOT fix: Whoosh's writer lock itself has a hardcoded
+      # timeout=0.0 with no Mayan-exposed setting to change it. This
+      # only widens the window before Gunicorn kills a slow-but-still-
+      # working request.
+      MAYAN_GUNICORN_TIMEOUT: 300
     volumes:
       - mayan_app_data:/var/lib/mayan
     depends_on:
