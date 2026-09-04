@@ -2066,11 +2066,19 @@ entry, unless a more specific pointer is given.)*
 - **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to
   catch — and no reconciliation job exists anywhere in this codebase to
-  catch it from the outside either.** Verified for real in P12-1: a
-  genuine `temporal workflow cancel` correctly lands the Postgres row on
-  `CANCELLED`, but a `temporal workflow terminate` leaves it permanently
-  stuck with no error raised anywhere — a human operator today has no
-  query, alert, or job that would ever surface this.
+  catch it from the outside either.** An earlier draft of
+  `db/schema.sql`'s `workflow_id` column comment (and `PRD.md` §9.3's
+  data-model table) claimed this column "gets cleared if a Temporal
+  admin deletes the execution," describing a reconciliation mechanism
+  as if it existed — corrected in P12-1 after grepping the codebase and
+  finding no code anywhere writes to `workflow_id` after
+  `persist_application` sets it; `PRD.md` §9.3 still carries this
+  correction inline in its own `workflow_id` row. Verified for real in
+  P12-1: a genuine `temporal workflow cancel` correctly lands the
+  Postgres row on `CANCELLED`, but a `temporal workflow terminate`
+  leaves it permanently stuck with no error raised anywhere — a human
+  operator today has no query, alert, or job that would ever surface
+  this.
 - No proactive notification (email/SMS) on status change.
 - A product type present in `application/schemas.py`'s registry but
   missing from `workflow/task_queues.py`'s `KNOWN_PRODUCT_TYPES` is
