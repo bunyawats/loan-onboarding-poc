@@ -258,11 +258,37 @@ run against a new dedicated `loan_onboarding_test` database after this
 session accidentally wiped the live compose stack's own
 `loan_onboarding` database by running the suite against it directly
 (see `CLAUDE.md`'s Testing section for the new convention this added).
-**Not yet committed or pushed** — a next session (or the remainder of
-this one) should review the diff, commit (one commit per P16 task or
-one combined commit, either is fine — the bug fixes found during P16-4
-are part of the same task, not a separate one), push, and confirm CI
-green. This plan's backlog is otherwise empty again.
+**Committed** (one combined commit covering all of P16-1 through P16-4
+plus both bug fixes) but **not yet pushed** — still needs `git push`
+and a CI-green confirmation.
+
+**Document index redesign (ad hoc, requested directly by the user after
+Phase 16 closed — not itself a numbered phase)**: replaced the single
+`applicant_identifier`-rooted "Loan Onboarding Archive" index with three
+separate entity-rooted index templates (Customer Index, Account Index,
+Application Index) — see `CLAUDE.md`'s "Document hierarchy" for the
+full tree shapes, the two confirmed design decisions (category stays
+the leaf; a document with more than one entity id set deliberately
+shows up in more than one branch), and the live verification detail.
+Deleted the old index and built the three new ones live against the
+running Mayan instance via direct API calls; updated
+`scripts/setup_document_hierarchy.sh` to build the same three templates
+for any future fresh install. **A second, real bug found in the same
+pass**: `document/mayan_client.py`'s `rebuild_index()` had a single
+constant (`INDEX_TEMPLATE_SLUG = "loan-onboarding-archive"`) hardcoding
+which index to rebuild after every metadata attach — deleting that
+index without fixing this would have made every document upload in the
+whole application fail. Fixed with `INDEX_TEMPLATE_SLUGS` (all three
+new slugs) and a new `index_template_ids()`/`rebuild_index()` that
+rebuild all three; two new unit tests plus a rewritten pair for the old
+single-slug behavior. Live-verified after the fix: rebuilt the
+`app`/`worker-activity` images, ran a real `document.service.upload()`
+call against the live stack, confirmed it succeeded end-to-end with no
+error, and confirmed the uploaded document actually appears in
+Application Index's tree via the real `documents_url` listing. Full
+unit suite (243 tests) and `lint-imports` green. **Not yet committed**
+— next step is to review this diff (separate from the P16 commit
+above), commit, and push alongside it.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2812,6 +2838,46 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-04 (later same day)** — Ad hoc, user-requested: replaced
+  the single `applicant_identifier`-rooted "Loan Onboarding Archive"
+  Mayan index with three separate entity-rooted index templates
+  (Customer Index, Account Index, Application Index) — see `CLAUDE.md`'s
+  "Document hierarchy" for the full tree shapes. Confirmed two design
+  decisions with the user before building anything (category stays the
+  final leaf under every branch; a document that has more than one
+  entity id set is deliberately allowed to appear in more than one
+  branch, matching Mayan's existing per-branch-independent evaluation
+  this project's `id_photo` node already relied on). Deleted the old
+  index live via the API, built the three new ones live (verified their
+  real tree structure via `documents_url` at several levels — a fresh
+  auto_loan approval's documents correctly appeared under Customer
+  Index's `account → application → category` leaf *and* its sibling
+  `application → category` leaf at once), and updated
+  `scripts/setup_document_hierarchy.sh` so a future fresh install builds
+  the same three templates instead of the old one.
+  **A second, real bug found in the same pass, not caught until actually
+  reasoning through what deleting the old index would break**:
+  `document/mayan_client.py`'s `rebuild_index()` — called after every
+  metadata attach across the whole `document/service.py` module —
+  hardcoded a single index slug (`INDEX_TEMPLATE_SLUG =
+  "loan-onboarding-archive"`) to rebuild. Left unfixed, deleting that
+  index would have made every document upload in the entire application
+  fail with `RuntimeError: index template not found`. Fixed with
+  `INDEX_TEMPLATE_SLUGS` (all three new slugs) and a new
+  `index_template_ids()`/`rebuild_index()` pair that rebuild all three;
+  `tests/unit/document/test_mayan_client.py`'s old single-slug tests
+  rewritten for the new list-based lookup, plus a new
+  `test_rebuild_index_rebuilds_all_three_index_templates`. Rebuilt the
+  `app`/`worker-workflow`/`worker-activity` images with this fix and
+  live-verified: a real `document.service.upload()` call against the
+  running stack succeeded end-to-end with zero errors, and the uploaded
+  document was confirmed present in Application Index's tree via the
+  real API. Full unit suite (243 tests, up from 242) and `lint-imports`
+  both green. Lightly corrected a handful of now-stale
+  `<applicant_identifier> -> ...` references elsewhere in `CLAUDE.md`
+  and `docs/api-specification.md` that described the old single-index
+  shape. **Not yet committed.**
 
 - **2026-09-04** — Implemented and live-verified all of Phase 16
   (P16-1 through P16-4), continuing from the prior session's

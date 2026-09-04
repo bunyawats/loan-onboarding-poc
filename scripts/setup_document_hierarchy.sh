@@ -1,31 +1,67 @@
 #!/usr/bin/env bash
 #
-# Builds the "Loan Onboarding Archive" document hierarchy in Mayan EDMS via
-# the REST API: Metadata Types -> Document Types -> Index Template (with a
-# nested node tree).
+# Builds this project's document indexing setup in Mayan EDMS via the REST
+# API: Metadata Types -> Document Types -> three Index Templates (each with
+# its own nested node tree).
 #
-# This is this project's own hierarchy, NOT a literal copy of
-# mayan-edms-customer-archive's script -- see CLAUDE.md's "Document
-# hierarchy" for why the shape differs (two levels on the application
-# branch, not that project's three, because neither a customer nor an
-# account is guaranteed to exist at upload time here):
+# **Corrected from an earlier draft of this script**, which built one
+# single "Loan Onboarding Archive" index rooted at `applicant_identifier`.
+# Replaced (not merely renamed) with three separate indexes, each rooted at
+# a different one of the three entity ids that a document can carry --
+# giving staff three different entry points into the same document set,
+# rather than one hierarchy trying to serve every navigation need at once:
 #
-#   Loan Onboarding Archive
-#   └── <applicant_identifier>
-#          ├── <application_id>              (created at submission, always)
-#          │      └── <category>             (Government ID, Proof of Income, ...)
-#          ├── id_photo                       (same document as an approved
-#          │                                   application's Government ID,
-#          │                                   re-tagged with customer_id --
-#          │                                   present only post-approval)
-#          └── <account_id>                   (present only post-approval)
-#                 └── <category>              (Welcome Letter, Consent)
+#   Customer Index (customer_id)
+#   └── <customer_id>
+#          ├── <account_id>                 (branch 1: docs that also carry
+#          │      └── <application_id>       account_id, i.e. every document
+#          │             └── <category>      under an approved application,
+#          │                                  plus Account Documents)
+#          └── <application_id>              (branch 2: docs that carry
+#                 └── <category>              application_id, whether or not
+#                                              they've also gained account_id
+#                                              yet -- a pre-approval upload
+#                                              from a returning customer)
+#
+#   Account Index (account_id)
+#   └── <account_id>
+#          ├── <customer_id>
+#          │      └── <category>
+#          └── <application_id>
+#                 └── <category>
+#
+#   Application Index (application_id)
+#   └── <application_id>
+#          ├── <customer_id>
+#          │      └── <category>
+#          └── <account_id>
+#                 └── <category>
+#
+# **A document with more than one of these ids set shows up in more than
+# one place -- deliberately, not a bug.** Confirmed with the user rather
+# than assumed: Mayan evaluates every branch independently per document
+# (the same "multi-leaf placement" behavior this project's original single
+# index already relied on for its `id_photo` node -- see CLAUDE.md's
+# "Document hierarchy"), so e.g. an approved application's Government ID
+# document (application_id + account_id + customer_id, once approved)
+# naturally appears under Customer Index's "account -> application" branch
+# *and* its sibling "application" branch at once, not just one or the
+# other. `applicant_identifier` plays no role in any of these three
+# templates -- it's still attached to every document (see the metadata
+# associations below) and still what `document.service.py`'s own queries
+# filter on, just no longer an index-tree grouping key.
 #
 # All five gotchas from mayan-edms-customer-archive's
-# docs/document-hierarchy-setup.md apply -- read that file before touching
-# this script. In particular, every LEAF condition below repeats its full
-# ancestor requirement set (Gotcha #1: an empty parent expression does not
-# stop Mayan from evaluating a descendant node against every document).
+# docs/document-hierarchy-setup.md still apply -- read that file before
+# touching this script. In particular, every LEAF condition below repeats
+# its full ancestor requirement set (Gotcha #1: an empty parent expression
+# does not stop Mayan from evaluating a descendant node against every
+# document) -- the middle (non-leaf) grouping nodes deliberately do NOT
+# repeat this guard, matching this project's own established convention: a
+# middle node may spuriously group some wrong-document-type documents under
+# an empty-string value (harmless UI clutter, nothing links to it), but the
+# leaf is what actually gates which documents get shown, so only the leaf
+# needs the full guard.
 #
 # Usage:
 #   MAYAN_BASE_URL=http://localhost:8000 \
@@ -35,9 +71,9 @@
 #
 # Not idempotent (same as the reference project's script) -- re-running
 # creates duplicate metadata types / document types / index templates. To
-# re-run, delete the "Loan Onboarding Archive" index template and the two
-# document types first (System -> Setup, in Mayan's web UI), or reset the
-# database.
+# re-run, delete the "Customer Index" / "Account Index" / "Application
+# Index" index templates and the two document types first (System ->
+# Setup, in Mayan's web UI), or reset the database.
 #
 # Requires: curl, python3
 
@@ -147,23 +183,13 @@ done
 attach_metadata "${DOCUMENT_TYPE_ID['Account Document']}" "customer_id" "false"
 
 # ---------------------------------------------------------------------------
-# 3. Index template
+# 3. Three index templates: Customer Index, Account Index, Application
+#    Index -- see the module docstring above for the full tree shapes and
+#    why three separate indexes replaced the original single one.
 # ---------------------------------------------------------------------------
-log "Creating index template 'Loan Onboarding Archive'"
-INDEX_RESPONSE=$(api POST "/index_templates/" '{"label":"Loan Onboarding Archive","slug":"loan-onboarding-archive","enabled":true}')
-INDEX_ID=$(echo "$INDEX_RESPONSE" | json_get "['id']")
-ROOT_NODE_ID=$(echo "$INDEX_RESPONSE" | json_get "['index_template_root_node_id']")
-log "  index id=$INDEX_ID root_node_id=$ROOT_NODE_ID"
-
-log "Attaching document types to the index"
-for label in "Application Document" "Account Document"; do
-  api POST "/index_templates/$INDEX_ID/document_types/add/" \
-    "{\"document_type\":${DOCUMENT_TYPE_ID[$label]}}" > /dev/null
-done
-
 post_node() {
-  # post_node PARENT_ID EXPRESSION LINK_DOCUMENTS(true|false)
-  local parent="$1" expr="$2" link_docs="$3"
+  # post_node INDEX_ID PARENT_ID EXPRESSION LINK_DOCUMENTS(true|false)
+  local index_id="$1" parent="$2" expr="$3" link_docs="$4"
   local payload
   payload=$(python3 -c "
 import json, sys
@@ -174,60 +200,118 @@ print(json.dumps({
     'enabled': True,
 }))
 " "$parent" "$expr" "$link_docs")
-  api POST "/index_templates/$INDEX_ID/nodes/" "$payload" | json_get "['id']"
+  api POST "/index_templates/$index_id/nodes/" "$payload" | json_get "['id']"
 }
 
-log "Building node hierarchy"
+create_index() {
+  # create_index LABEL SLUG -- creates the index template, attaches both
+  # document types, and prints "INDEX_ID ROOT_NODE_ID" for the caller to
+  # capture via `read`.
+  local label="$1" slug="$2"
+  local response index_id root_id
+  response=$(api POST "/index_templates/" "{\"label\":\"$label\",\"slug\":\"$slug\",\"enabled\":true}")
+  index_id=$(echo "$response" | json_get "['id']")
+  root_id=$(echo "$response" | json_get "['index_template_root_node_id']")
+  log "  index '$label' -> id=$index_id root_node_id=$root_id"
+  for doc_type_label in "Application Document" "Account Document"; do
+    api POST "/index_templates/$index_id/document_types/add/" \
+      "{\"document_type\":${DOCUMENT_TYPE_ID[$doc_type_label]}}" > /dev/null
+  done
+  echo "$index_id $root_id"
+}
 
-# Level 1: group by applicant_identifier. The one identity value guaranteed
-# to exist at upload time, regardless of whether the applicant is a
-# recognized customer yet (CLAUDE.md's "Document hierarchy").
-NODE_APPLICANT=$(post_node "$ROOT_NODE_ID" \
-  '{{ document.metadata_value_of.applicant_identifier }}' \
+log "Creating 'Customer Index'"
+read -r INDEX_ID ROOT_NODE_ID <<< "$(create_index "Customer Index" "customer-index")"
+
+NODE_CUSTOMER=$(post_node "$INDEX_ID" "$ROOT_NODE_ID" \
+  '{{ document.metadata_value_of.customer_id }}' \
   "false")
-log "  applicant_identifier node -> id=$NODE_APPLICANT"
+log "  customer_id node -> id=$NODE_CUSTOMER"
 
-# Branch A: group by application_id (submission-gate documents).
-NODE_APPLICATION=$(post_node "$NODE_APPLICANT" \
+# Branch 1: account -> application -> category.
+NODE_C_ACCOUNT=$(post_node "$INDEX_ID" "$NODE_CUSTOMER" \
+  '{{ document.metadata_value_of.account_id }}' \
+  "false")
+NODE_C_ACCOUNT_APPLICATION=$(post_node "$INDEX_ID" "$NODE_C_ACCOUNT" \
   '{{ document.metadata_value_of.application_id }}' \
   "false")
-log "  application_id node -> id=$NODE_APPLICATION"
+post_node "$INDEX_ID" "$NODE_C_ACCOUNT_APPLICATION" \
+  '{% if document.metadata_value_of.customer_id and document.metadata_value_of.account_id and document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 1 (account -> application -> category) built"
 
-# Branch A leaf: category, under application_id. Condition repeats
-# "application_id present" rather than trusting the parent's emptiness to
-# gate it -- Gotcha #1.
-NODE_APPLICATION_CATEGORY=$(post_node "$NODE_APPLICATION" \
-  '{% if document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
-  "true")
-log "  category node (application docs, leaf) -> id=$NODE_APPLICATION_CATEGORY"
+# Branch 2 (sibling of branch 1, under customer): application -> category.
+# Deliberately not restricted to "account_id is empty" -- a document that
+# has gained account_id (post-approval) still also appears here, per the
+# multi-placement decision in the module docstring above.
+NODE_C_APPLICATION=$(post_node "$INDEX_ID" "$NODE_CUSTOMER" \
+  '{{ document.metadata_value_of.application_id }}' \
+  "false")
+post_node "$INDEX_ID" "$NODE_C_APPLICATION" \
+  '{% if document.metadata_value_of.customer_id and document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 2 (application -> category) built"
 
-# Branch B (leaf, direct child of applicant_identifier): id_photo. Fires
-# only once customer_id metadata has been attached (on approval) -- the
-# same Government ID document also satisfies Branch A's leaf at the same
-# time (multi-membership; see CLAUDE.md's flagged, source-confirmed-but-
-# not-yet-instance-verified note -- P5-2's own DoD verifies this for real).
-NODE_ID_PHOTO=$(post_node "$NODE_APPLICANT" \
-  '{% if document.metadata_value_of.customer_id %}id_photo{% endif %}' \
-  "true")
-log "  id_photo node (leaf) -> id=$NODE_ID_PHOTO"
+api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
+log "Done. 'Customer Index' id=$INDEX_ID, slug=customer-index"
 
-# Branch C: group by account_id (present only post-approval).
-NODE_ACCOUNT=$(post_node "$NODE_APPLICANT" \
+log "Creating 'Account Index'"
+read -r INDEX_ID ROOT_NODE_ID <<< "$(create_index "Account Index" "account-index")"
+
+NODE_ACCOUNT=$(post_node "$INDEX_ID" "$ROOT_NODE_ID" \
   '{{ document.metadata_value_of.account_id }}' \
   "false")
 log "  account_id node -> id=$NODE_ACCOUNT"
 
-# Branch C leaf: category, under account_id. Condition repeats "account_id
-# present" -- Gotcha #1, same reasoning as Branch A's leaf.
-NODE_ACCOUNT_CATEGORY=$(post_node "$NODE_ACCOUNT" \
-  '{% if document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
-  "true")
-log "  category node (account docs, leaf) -> id=$NODE_ACCOUNT_CATEGORY"
+# Branch 1: customer -> category.
+NODE_A_CUSTOMER=$(post_node "$INDEX_ID" "$NODE_ACCOUNT" \
+  '{{ document.metadata_value_of.customer_id }}' \
+  "false")
+post_node "$INDEX_ID" "$NODE_A_CUSTOMER" \
+  '{% if document.metadata_value_of.account_id and document.metadata_value_of.customer_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 1 (customer -> category) built"
 
-log "Rebuilding index"
+# Branch 2 (sibling): application -> category.
+NODE_A_APPLICATION=$(post_node "$INDEX_ID" "$NODE_ACCOUNT" \
+  '{{ document.metadata_value_of.application_id }}' \
+  "false")
+post_node "$INDEX_ID" "$NODE_A_APPLICATION" \
+  '{% if document.metadata_value_of.account_id and document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 2 (application -> category) built"
+
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
+log "Done. 'Account Index' id=$INDEX_ID, slug=account-index"
 
-log "Done. Index template id=$INDEX_ID, slug=loan-onboarding-archive"
+log "Creating 'Application Index'"
+read -r INDEX_ID ROOT_NODE_ID <<< "$(create_index "Application Index" "application-index")"
+
+NODE_APPLICATION=$(post_node "$INDEX_ID" "$ROOT_NODE_ID" \
+  '{{ document.metadata_value_of.application_id }}' \
+  "false")
+log "  application_id node -> id=$NODE_APPLICATION"
+
+# Branch 1: customer -> category.
+NODE_AP_CUSTOMER=$(post_node "$INDEX_ID" "$NODE_APPLICATION" \
+  '{{ document.metadata_value_of.customer_id }}' \
+  "false")
+post_node "$INDEX_ID" "$NODE_AP_CUSTOMER" \
+  '{% if document.metadata_value_of.application_id and document.metadata_value_of.customer_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 1 (customer -> category) built"
+
+# Branch 2 (sibling): account -> category.
+NODE_AP_ACCOUNT=$(post_node "$INDEX_ID" "$NODE_APPLICATION" \
+  '{{ document.metadata_value_of.account_id }}' \
+  "false")
+post_node "$INDEX_ID" "$NODE_AP_ACCOUNT" \
+  '{% if document.metadata_value_of.application_id and document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 2 (account -> category) built"
+
+api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
+log "Done. 'Application Index' id=$INDEX_ID, slug=application-index"
 
 # ---------------------------------------------------------------------------
 # 4. Second index template: "Creation date" -- groups documents by year then
@@ -255,12 +339,12 @@ for label in "Application Document" "Account Document"; do
     "{\"document_type\":${DOCUMENT_TYPE_ID[$label]}}" > /dev/null
 done
 
-NODE_YEAR=$(post_node "$CREATION_DATE_ROOT_NODE_ID" \
+NODE_YEAR=$(post_node "$INDEX_ID" "$CREATION_DATE_ROOT_NODE_ID" \
   '{{ document.datetime_created|date:"Y" }}' \
   "false")
 log "  year node -> id=$NODE_YEAR"
 
-NODE_MONTH=$(post_node "$NODE_YEAR" \
+NODE_MONTH=$(post_node "$INDEX_ID" "$NODE_YEAR" \
   '{{ document.datetime_created|date:"m" }}' \
   "true")
 log "  month node (leaf) -> id=$NODE_MONTH"

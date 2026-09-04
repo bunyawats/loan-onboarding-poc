@@ -177,16 +177,17 @@ class DocumentRef:
 ```
 
 - **`upload`/`list_documents`/`check_completeness`/`preview` take no
-  `customer_id`/`account_id` params.** The submission-gate branch of the
-  Mayan hierarchy is two levels — `<applicant_identifier> ->
-  <application_id> -> category` (`CLAUDE.md`'s "Document hierarchy") —
-  because there's no `account_id` to organize under at upload time
-  (uploads happen and the completeness gate is checked *before*
-  submission, before any account can exist) and `customer_id` may not
-  exist yet either. `applicant_identifier` is required, not resolved
-  internally — `document/` is a leaf module and never imports
-  `application/`; the caller (`bff_customer`, which already has it from
-  the session cookie) passes it straight through.
+  `account_id` param** (`upload` does take an optional `customer_id`,
+  see `CLAUDE.md`'s "Document metadata assignment lifecycle") — there's
+  no `account_id` to attach at upload time at all (uploads happen and
+  the completeness gate is checked *before* submission, before any
+  account can exist). See `CLAUDE.md`'s "Document hierarchy" for how
+  staff actually browse by these fields (three separate entity-rooted
+  index templates, not the applicant_identifier-rooted single index an
+  earlier draft of this file described). `applicant_identifier` is
+  required, not resolved internally — `document/` is a leaf module and
+  never imports `application/`; the caller (`bff_customer`, which
+  already has it from the session cookie) passes it straight through.
 - `check_completeness`'s required-category list per `product_type` is
   owned here (PRD §6.4's table), not in `application/` — `application/`
   just calls this function and trusts the answer. **A category is

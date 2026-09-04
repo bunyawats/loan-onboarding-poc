@@ -376,17 +376,20 @@ the *outcome* of an approved loan, not something that pre-exists it.**
   `REJECTED` outcome instead of a stuck application and a `FAILED`
   Temporal workflow — see "Known gaps" below for the full mechanism,
   the live repro, and why the window itself was left open on purpose.
-- **Document hierarchy still gates submission on a two-level branch**
-  (`<applicant_identifier> -> <application_id> -> category`, see
-  "Document hierarchy" below) — document upload/completeness-check at
-  submission time never needs an `account_id`, since no account can
-  possibly exist before submission. Post-approval, the hierarchy gains
-  a separate `<applicant_identifier> -> id_photo` node and an
-  `<applicant_identifier> -> <account_id>` branch (Welcome Letter,
-  Consent) — see "Document hierarchy" below for the full tree; the
-  Account level isn't gone, it's just populated later than the
-  Application level, by a different code path (provisioning, not
-  submission).
+- **Document upload/completeness-check at submission time never needs
+  an `account_id`**, since no account can possibly exist before
+  submission — `document.service.upload(...)` attaches
+  `applicant_identifier`/`application_id`/`category` (plus `customer_id`
+  when the applicant already resolves to a customer) regardless. Post-
+  approval, every document under the application gains `account_id` too
+  (`tag_application_documents`, "Document metadata assignment
+  lifecycle" below) — the account-level metadata isn't gone, it's just
+  attached later, by a different code path (provisioning, not
+  submission). See "Document hierarchy" below for how staff actually
+  browse these fields — corrected there from an
+  `applicant_identifier`-rooted single index to three separate
+  entity-rooted indexes; that redesign changed nothing about *when*
+  metadata gets attached, only how it's organized for browsing.
 
 ### Returning-customer profile refresh and ID reuse (built — Phase 14)
 
@@ -937,12 +940,10 @@ No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
   (`action_name=replace`) → attach metadata (`applicant_identifier`,
   `application_id`, `category`, and `customer_id` when given) → rebuild
   index. Same four-step sequence, and the same gotchas #1-4 below, as
-  the reference project's upload path. **No `account_id` param** — the
-  document hierarchy's application branch is still two levels
-  (`<applicant_identifier> -> <application_id> -> category`, see
-  "Document hierarchy" below): there's no `account_id` to organize under
-  at upload time, uploads happen before submission, before any account
-  can possibly exist (see "Applying without being a customer yet").
+  the reference project's upload path. **No `account_id` param** — there's
+  no account to tag at upload time at all, uploads happen before
+  submission, before any account can possibly exist (see "Applying
+  without being a customer yet").
   **`customer_id` (see "Document metadata assignment lifecycle" below)**
   is optional and caller-supplied, not resolved internally — same
   "`document/` is a leaf module, never imports `application/`" reasoning
@@ -1041,12 +1042,14 @@ through the application flow:
   leaving the Welcome Letter as the one exception would have been
   inconsistent). System-generated, no human in the loop, exactly one per
   account. **`applicant_identifier` was added to this signature after a
-  real bug, found live**: the
-  account branch (`<applicant_identifier> -> <account_id> -> category`,
-  "Document hierarchy" below) is nested under the applicant node, whose
-  own index expression evaluates `applicant_identifier` metadata — an
-  earlier version of this function attached only `account_id`/`category`,
-  which `scripts/setup_document_hierarchy.sh`'s gotcha #1 (leaf
+  real bug, found live, under the original single-index design** (since
+  replaced by the three-index redesign in "Document hierarchy" below,
+  but `applicant_identifier` stays attached to every document regardless
+  of index shape — it's a required field on both document types, see
+  `scripts/setup_document_hierarchy.sh`): that index's account branch
+  was nested under an applicant node whose own expression evaluated
+  `applicant_identifier` metadata — an earlier version of this function
+  attached only `account_id`/`category`, which gotcha #1 (leaf
   conditions don't inherit an ancestor's match) turned into a document
   landing under a top-level "None" bucket in the Mayan UI instead of the
   applicant's own branch. Confirmed against a real instance (not caught
@@ -1073,7 +1076,8 @@ through the application flow:
   respectively).
 
 Owns `scripts/setup_document_hierarchy.sh` (one-time, not idempotent)
-and the Mayan Index Template definition.
+and the Mayan Index Template definitions (three — Customer/Account/
+Application Index, see "Document hierarchy" below).
 
 ### 7. `workflow/` — Workflow module
 
@@ -1155,41 +1159,90 @@ domain knowledge."
 
 ## Document hierarchy
 
+**Corrected from an earlier draft of this file, which built one single
+"Loan Onboarding Archive" index rooted at `applicant_identifier`.**
+Replaced (not merely renamed) with **three separate index templates**,
+each rooted at a different one of the three entity ids a document can
+carry — three different entry points into the same document set,
+confirmed with the user rather than assumed, since neither a single
+index nor `applicant_identifier`-as-root turned out to be what staff
+actually wanted to browse by:
+
 ```
-Loan Onboarding Archive
-└── <applicant_identifier>
-       ├── <application_id>              (created at submission, always)
-       │      ├── Government ID
-       │      ├── Proof of Income
-       │      ├── Bank Statements
-       │      ├── Credit Report
-       │      ├── Property Appraisal      (mortgage only)
-       │      └── Vehicle Title/Invoice   (auto_loan only)
-       ├── id_photo                      (appears only once an application under
-       │                                  this applicant_identifier is approved --
-       │                                  same Mayan document as that application's
-       │                                  Government ID, re-tagged, not copied)
-       └── <account_id>                  (appears only once an application under
-              ├── Welcome Letter          this applicant_identifier is approved)
-              └── Consent                 (single document, multiple file versions)
+Customer Index (customer_id)
+└── <customer_id>
+       ├── <account_id>                 (branch 1: docs that also carry
+       │      └── <application_id>       account_id -- every document
+       │             └── <category>      under an approved application,
+       │                                  plus Account Documents)
+       └── <application_id>              (branch 2: docs that carry
+              └── <category>              application_id, whether or not
+                                           they've also gained account_id
+                                           yet)
+
+Account Index (account_id)
+└── <account_id>
+       ├── <customer_id>
+       │      └── <category>
+       └── <application_id>
+              └── <category>
+
+Application Index (application_id)
+└── <application_id>
+       ├── <customer_id>
+       │      └── <category>
+       └── <account_id>
+              └── <category>
 ```
 
-**Two required metadata types beyond the original three**
-(`applicant_identifier`, `application_id`, `category`): **`account_id`**
-(new — the account branch's node key, present only on `Welcome
-Letter`/`Consent` documents, absent on everything under
-`<application_id>`) and **`customer_id`** (attached to the promoted
-`id_photo` document alongside its original `application_id`/category
-metadata, purely so staff search can find it by customer — not itself
-an index branch key, since `applicant_identifier` already plays that
-role).
+**A document with more than one of these ids set shows up in more than
+one place — deliberately, not a bug.** An approved application's
+Government ID document (application_id + account_id + customer_id, all
+three once approved) naturally appears under Customer Index's
+"account → application" branch *and* its sibling "application" branch
+at once, not just one or the other — the same multi-leaf-placement
+mechanism the original single index already relied on for its
+`id_photo` node (see below), applied deliberately across all three new
+indexes rather than worked around. `applicant_identifier` plays no role
+in any of the three trees — it's still attached to every document (see
+`document/service.py`'s `upload`) and still what `document.service.py`'s
+own queries filter on (see the gotcha #2 consequence below), just no
+longer an index-tree grouping key.
+
+**A real, load-bearing bug found while deleting the old single index**:
+`document/mayan_client.py`'s `rebuild_index()` — called after every
+metadata attach across `document/service.py` (`upload`,
+`tag_application_documents`, `promote_government_id_to_customer_photo`,
+`generate_welcome_letter`, `upload_consent`) and by
+`reconcile.py --fix` — used to look up a single hardcoded slug,
+`INDEX_TEMPLATE_SLUG = "loan-onboarding-archive"`, and rebuild only
+that one index. Deleting that index without updating this constant
+would have made **every** document upload in the whole application
+start failing with `RuntimeError: index template not found:
+loan-onboarding-archive`, since Mayan no longer has anything at that
+slug — not a hypothetical, this was caught by reasoning through the
+consequences before it ever reached a live upload attempt. Fixed by
+replacing the single slug with `INDEX_TEMPLATE_SLUGS = ("customer-index",
+"account-index", "application-index")` and a new
+`index_template_ids() -> list[int]` (raises naming every slug still
+missing, not just the first) that `rebuild_index()` now loops over,
+rebuilding all three. Deliberately still excludes "Creation date" —
+nothing in this codebase rebuilt that index before this fix either;
+`scripts/setup_document_hierarchy.sh` builds and rebuilds it once at
+setup time and nothing keeps it fresh afterward, unchanged by this
+redesign. Live-verified after the fix: a real `document.service.upload()`
+call against the rebuilt `app`/`worker-activity` images succeeded
+end-to-end (create → upload-file → attach metadata → rebuild all three
+indexes with no error), and the uploaded document was confirmed present
+in Application Index's tree via the real `documents_url` listing.
 
 **Multi-leaf placement — empirically confirmed against a real instance
-in P5-2 (2026-09-02), not just source-level confidence.** The
-`id_photo` node depends on one Mayan document satisfying two different
-leaf-node paths in the same index template at once — the
-`<application_id> -> Government ID` path (via `application_id` +
-`category` metadata) and the `<applicant_identifier> -> id_photo` path
+in P5-2 (2026-09-02), not just source-level confidence**, and reused
+deliberately when this section's three-index redesign was built. The
+original single index's `id_photo` node depended on one Mayan document
+satisfying two different leaf-node paths in the same index template at
+once — the `<application_id> → Government ID` path (via `application_id`
++ `category` metadata) and the `<applicant_identifier> → id_photo` path
 (via `customer_id` metadata, no `application_id` in that leaf's
 condition). A source read of
 `mayan/apps/document_indexing/models/index_instance_models.py`'s
@@ -1204,10 +1257,14 @@ confirm it's filed under `<application_id>/Government ID`; then attach
 id in both leaves' `documents_url` listings) reproduced exactly this —
 one document, two leaf memberships, confirmed via
 `GET /index_instances/<id>/nodes/.../documents/` on a live
-`docker compose`-run Mayan instance, not inferred. `promote_government_id_to_customer_photo`
-(P5-5, P6-3) can be built as a pure re-tag (attach `customer_id`
-metadata to the existing document) with no fallback-to-copy path
-needed. **Cabinets were evaluated as an alternative and rejected as the
+`docker compose`-run Mayan instance, not inferred. The three-index
+redesign was verified the same way, not just reasoned about: a
+just-approved auto_loan application's five documents (application_id +
+account_id + customer_id, all set) were confirmed present under
+Customer Index's `<customer_id>/<account_id>/<application_id>/<category>`
+leaf *and* its sibling `<customer_id>/<application_id>/<category>` leaf
+at once, via the real `documents_url` listing on each — not inferred.
+**Cabinets were evaluated as an alternative and rejected as the
 hierarchy's backbone** — they also support true multi-membership and
 are synchronous (no Celery, unlike Index Templates), but the project's
 actual usage pattern is automatic, upload-time classification via API,
@@ -1226,28 +1283,17 @@ uploads their last required document and immediately hits Submit could
 get a false "still missing" result purely from index lag — a real
 correctness bug, not a hypothetical, since `create_application()` calls
 `check_completeness()` synchronously right after the customer's last
-upload (PRD §6.4). The Index Template tree exists for staff to browse
-the archive visually in Mayan's own UI; it is not a data source for any
-of this application's own logic.
+upload (PRD §6.4). **This principle is exactly why swapping the index
+templates out entirely (this section's redesign) required zero changes
+to any of `document/service.py`'s query functions** — none of them ever
+read the Index Template tree in the first place; the tree exists purely
+for staff to browse the archive visually in Mayan's own UI, never as a
+data source for this application's own logic.
 
-**Two levels on the application branch, not `mayan-edms-customer-archive`'s three** — that
-project's `Customer → Account → Application` shape assumed both a
-customer and an account already existed at document-upload time. Here
-neither does: documents are uploaded and the completeness gate checked
-*before* submission (PRD §6.4), and an account is now the *outcome* of
-an approved application, not a precondition of filing one (see
-"Applying without being a customer yet" above). `applicant_identifier`
-is used as the top level specifically because it's the one identity
-value guaranteed to exist at upload time regardless of whether the
-applicant is a recognized customer yet — using `customer_id` instead
-would mean branching this index between "customer" and "prospect"
-sub-trees, or re-parenting documents after approval (Mayan gotcha #2's
-async reindex makes that a real cost, not just an inconvenience); a
-flat `applicant_identifier` node sidesteps both. The same **five
-gotchas** documented in `mayan-edms-customer-archive`'s
+The same **five gotchas** documented in `mayan-edms-customer-archive`'s
 `docs/document-hierarchy-setup.md` still apply — read that file before
-touching the index template or `document/`'s setup script (they're
-about index-template mechanics, not the specific number of levels):
+touching any index template or `document/`'s setup script (they're
+about index-template mechanics, not any particular tree shape):
 
 1. Empty index-node expressions don't prune the branch — every leaf
    condition must repeat the full ancestor requirement set.

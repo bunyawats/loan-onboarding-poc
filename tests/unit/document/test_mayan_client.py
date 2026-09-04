@@ -167,31 +167,73 @@ async def test_metadata_type_ids_follows_pagination(client):
 
 
 @respx.mock
-async def test_index_template_id_found_by_slug(client):
+async def test_index_template_ids_found_by_slug_in_declared_order(client):
     respx.post(f"{BASE}/api/v4/auth/token/obtain/").mock(
         return_value=httpx.Response(200, json={"token": "abc123"})
     )
     respx.get(f"{BASE}/api/v4/index_templates/?page_size=100").mock(
         return_value=httpx.Response(
             200,
-            json={"results": [{"id": 7, "slug": "loan-onboarding-archive"}]},
+            json={
+                "results": [
+                    {"id": 1, "slug": "creation_date"},
+                    {"id": 5, "slug": "application-index"},
+                    {"id": 3, "slug": "customer-index"},
+                    {"id": 4, "slug": "account-index"},
+                ]
+            },
         )
     )
 
-    assert await client.index_template_id() == 7
+    # Order matches mayan_client.INDEX_TEMPLATE_SLUGS
+    # (customer-index, account-index, application-index), not the API
+    # response's own ordering.
+    assert await client.index_template_ids() == [3, 4, 5]
 
 
 @respx.mock
-async def test_index_template_id_raises_if_not_found(client):
+async def test_index_template_ids_raises_if_any_slug_not_found(client):
     respx.post(f"{BASE}/api/v4/auth/token/obtain/").mock(
         return_value=httpx.Response(200, json={"token": "abc123"})
     )
     respx.get(f"{BASE}/api/v4/index_templates/?page_size=100").mock(
-        return_value=httpx.Response(200, json={"results": [{"id": 1, "slug": "something-else"}]})
+        return_value=httpx.Response(
+            200, json={"results": [{"id": 3, "slug": "customer-index"}, {"id": 4, "slug": "account-index"}]}
+        )
     )
 
-    with pytest.raises(RuntimeError, match="loan-onboarding-archive"):
-        await client.index_template_id()
+    with pytest.raises(RuntimeError, match="application-index"):
+        await client.index_template_ids()
+
+
+@respx.mock
+async def test_rebuild_index_rebuilds_all_three_index_templates(client):
+    respx.post(f"{BASE}/api/v4/auth/token/obtain/").mock(
+        return_value=httpx.Response(200, json={"token": "abc123"})
+    )
+    respx.get(f"{BASE}/api/v4/index_templates/?page_size=100").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": 3, "slug": "customer-index"},
+                    {"id": 4, "slug": "account-index"},
+                    {"id": 5, "slug": "application-index"},
+                ]
+            },
+        )
+    )
+    rebuild_routes = [
+        respx.post(f"{BASE}/api/v4/index_templates/{index_id}/rebuild/").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        for index_id in (3, 4, 5)
+    ]
+
+    await client.rebuild_index()
+
+    for route in rebuild_routes:
+        assert route.called
 
 
 @respx.mock

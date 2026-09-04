@@ -24,7 +24,7 @@ METADATA_FIELDS = ("applicant_identifier", "application_id", "account_id", "cust
 DOCUMENT_TYPE_APPLICATION = "Application Document"
 DOCUMENT_TYPE_ACCOUNT = "Account Document"
 
-INDEX_TEMPLATE_SLUG = "loan-onboarding-archive"
+INDEX_TEMPLATE_SLUGS = ("customer-index", "account-index", "application-index")
 
 
 class MayanClient:
@@ -161,13 +161,22 @@ class MayanClient:
                     self._document_type_ids = await self._load_id_map("/document_types/", "label")
         return self._document_type_ids
 
-    async def index_template_id(self) -> int:
+    async def index_template_ids(self) -> list[int]:
+        """One id per slug in `INDEX_TEMPLATE_SLUGS`, in that order --
+        the three browsable index templates (Customer/Account/Application
+        Index, CLAUDE.md's "Document hierarchy") this codebase keeps
+        freshened after every metadata change. Deliberately excludes the
+        "Creation date" index (`scripts/setup_document_hierarchy.sh`
+        builds it once at setup time; nothing in this codebase rebuilds
+        it afterward, same as before this function covered three slugs
+        instead of one)."""
         response = await self.get("/index_templates/?page_size=100")
         response.raise_for_status()
-        for result in response.json()["results"]:
-            if result["slug"] == INDEX_TEMPLATE_SLUG:
-                return result["id"]
-        raise RuntimeError(f"index template not found: {INDEX_TEMPLATE_SLUG}")
+        by_slug = {result["slug"]: result["id"] for result in response.json()["results"]}
+        missing = [slug for slug in INDEX_TEMPLATE_SLUGS if slug not in by_slug]
+        if missing:
+            raise RuntimeError(f"index template(s) not found: {', '.join(missing)}")
+        return [by_slug[slug] for slug in INDEX_TEMPLATE_SLUGS]
 
     # ------------------------------------------------------------------
     # Documents
@@ -246,9 +255,10 @@ class MayanClient:
         response.raise_for_status()
 
     async def rebuild_index(self) -> None:
-        index_id = await self.index_template_id()
-        response = await self.post(f"/index_templates/{index_id}/rebuild/")
-        response.raise_for_status()
+        index_ids = await self.index_template_ids()
+        for index_id in index_ids:
+            response = await self.post(f"/index_templates/{index_id}/rebuild/")
+            response.raise_for_status()
 
     async def search_documents(self, params: dict[str, str]) -> list[dict[str, Any]]:
         """Exact-match search over Mayan's advanced-search endpoint.
