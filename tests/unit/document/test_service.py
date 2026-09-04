@@ -327,20 +327,33 @@ async def test_generate_welcome_letter_uploads_tagged_to_account(fake_client):
 
 
 async def test_upload_consent_creates_document_on_first_call(fake_client):
-    ref = await service.upload_consent("alice@example.com", "acct-1", UploadedFile("consent.pdf", b"v1"))
+    ref = await service.upload_consent(
+        "alice@example.com", "acct-1", "cust-1", UploadedFile("consent.pdf", b"v1")
+    )
 
     stored = fake_client.documents[ref.document_id]
     assert stored.metadata["category"] == "Consent"
     assert stored.metadata["applicant_identifier"] == "alice@example.com"
     assert stored.metadata["account_id"] == "acct-1"
+    # Attached for consistency with Welcome Letter -- both are
+    # account-level documents, so both carry customer_id.
+    assert stored.metadata["customer_id"] == "cust-1"
+    assert ref.customer_id == "cust-1"
     assert stored.file_versions == [b"v1"]
 
 
 async def test_upload_consent_versions_same_document_on_second_call(fake_client):
-    first = await service.upload_consent("alice@example.com", "acct-1", UploadedFile("consent.pdf", b"v1"))
-    second = await service.upload_consent("alice@example.com", "acct-1", UploadedFile("consent_v2.pdf", b"v2"))
+    first = await service.upload_consent(
+        "alice@example.com", "acct-1", "cust-1", UploadedFile("consent.pdf", b"v1")
+    )
+    second = await service.upload_consent(
+        "alice@example.com", "acct-1", "cust-1", UploadedFile("consent_v2.pdf", b"v2")
+    )
 
     assert first.document_id == second.document_id
+    # The new-version path returns the existing document's own metadata
+    # (including customer_id), not a bare re-construction of it.
+    assert second.customer_id == "cust-1"
     stored = fake_client.documents[first.document_id]
     assert stored.file_versions == [b"v1", b"v2"]
 

@@ -1059,15 +1059,24 @@ through the application flow:
   `applicant_identifier` alongside the existing two fields. A document
   created before this fix stays orphaned under `None` — not
   retroactively backfilled.
-- `service.upload_consent(applicant_identifier, account_id, file) ->
-  DocumentRef` — **true Mayan document versioning, not a new document
-  per call**: if the account already has a "consent" document, this
-  uploads a new *file version* of that same document (Mayan retains the
-  version history natively); if not, it creates the document first
-  (attaching `applicant_identifier` too, same reasoning and same fix as
-  `generate_welcome_letter` above — the new-version path doesn't
-  re-attach metadata at all, so it needs nothing new). Not restricted to
-  one caller — either BFF can call it once `account_id` exists (both
+- `service.upload_consent(applicant_identifier, account_id, customer_id,
+  file) -> DocumentRef` — **true Mayan document versioning, not a new
+  document per call**: if the account already has a "consent" document,
+  this uploads a new *file version* of that same document (Mayan
+  retains the version history natively) and returns that document's own
+  already-attached metadata (including `customer_id`), not a
+  freshly-constructed partial `DocumentRef`; if not, it creates the
+  document first (attaching `applicant_identifier` too, same reasoning
+  and same fix as `generate_welcome_letter` above — the new-version path
+  doesn't re-attach metadata at all, so it needs nothing new).
+  **`customer_id` (corrected — this function originally didn't take
+  it)**: attached alongside `account_id`/`applicant_identifier` on the
+  create-first-version path, same as `generate_welcome_letter` already
+  does — consent is an account-level document, exactly like Welcome
+  Letter, so both carry `customer_id` for the same reason (Customer
+  Index's `<customer_id>/<account_id>/<category>` branch needs it to
+  nest either one under the customer). Not restricted to one caller —
+  either BFF can call it once `account_id`/`customer_id` exist (both
   already import `document/`); which surface actually exposes a UI for
   this is not yet designed — see `PRD.md`'s open questions.
 - `service.list_customer_documents(customer_id) -> list[DocumentRef]`,

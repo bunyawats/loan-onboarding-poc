@@ -20,6 +20,7 @@ if that assumption stops holding.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import Any
 
 import httpx
@@ -444,18 +445,23 @@ def _render_welcome_letter_pdf(applicant_name: str, product_type: str, amount: s
     return out
 
 
-async def upload_consent(applicant_identifier: str, account_id: str, file: UploadedFile) -> DocumentRef:
+async def upload_consent(
+    applicant_identifier: str, account_id: str, customer_id: str, file: UploadedFile
+) -> DocumentRef:
     """True Mayan document versioning: if the account already has a
     "consent" document, uploads a new *file version* of that same
     document; creates the document first if none exists yet. Not
     restricted to one caller -- either BFF can call this once
     `account_id` exists.
 
-    `applicant_identifier` is only used on the create-first-version path
-    -- same reason `generate_welcome_letter` needs it (the index's
-    account branch is nested under the applicant node, see that
-    function's docstring). The new-file-version-of-an-existing-document
-    path doesn't re-attach metadata at all, so it needs nothing new.
+    `applicant_identifier`/`customer_id` are only used on the
+    create-first-version path -- same reason `generate_welcome_letter`
+    needs them (the index's account branch is nested under the
+    applicant node, see that function's docstring; `customer_id` is
+    attached for consistency with Welcome Letter, the other account-level
+    document type -- both are account-level docs, so both carry it). The
+    new-file-version-of-an-existing-document path doesn't re-attach
+    metadata at all, so it needs nothing new.
 
     **`action_name="replace"` on both the first and every subsequent
     upload -- there is no "new" action.** Confirmed against Mayan's own
@@ -478,9 +484,7 @@ async def upload_consent(applicant_identifier: str, account_id: str, file: Uploa
     if existing:
         document_id = existing[0].document_id
         await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
-        return DocumentRef(
-            document_id=document_id, filename=file.filename, category="Consent", account_id=account_id
-        )
+        return dataclasses.replace(existing[0], filename=file.filename)
 
     doc_type_ids, metadata_type_ids = await asyncio.gather(
         mayan_client.document_type_ids(), mayan_client.metadata_type_ids()
@@ -494,6 +498,7 @@ async def upload_consent(applicant_identifier: str, account_id: str, file: Uploa
         ("applicant_identifier", applicant_identifier),
         ("account_id", account_id),
         ("category", "Consent"),
+        ("customer_id", customer_id),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
@@ -505,6 +510,7 @@ async def upload_consent(applicant_identifier: str, account_id: str, file: Uploa
         category="Consent",
         applicant_identifier=applicant_identifier,
         account_id=account_id,
+        customer_id=customer_id,
     )
 
 
