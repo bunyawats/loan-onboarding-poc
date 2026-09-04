@@ -458,6 +458,35 @@ afterward. Back-office-triggered consent upload (the other half of
 PRD §11's question) remains explicitly out of scope — not asked for
 this session.
 
+**Follow-up, same day: built the back-office half too, fully closing
+PRD §11's "which surface" question.** User asked directly for the
+staff-side consent upload action. `bff_backoffice/routes.py`'s
+`_application_detail_context` now also resolves the current consent
+document (mirroring `bff_customer`'s own `_detail_context`); the review
+dialog (`_detail_dialog.html`) shows an upload/replace Consent section
+whenever `account` resolves. New routes:
+`/ui/{underwriter,manager}/{application_id}/consent/upload` (role-gated
+only, not permission-gated -- same reasoning document preview already
+uses) and `/ui/{underwriter,manager}/{application_id}/consent/{document_id}/preview`.
+**Live-verified through a real Keycloak login** (not curl -- this
+needed the actual Authorization Code flow, so used the browser
+automation tool, which worked cleanly this time, unlike the cross-backend
+issue noted two sessions ago): logged in as `underwriter1`, opened the
+same `APP-139696396` this session had already uploaded a customer-side
+consent for, and used the dialog's own Replace button to upload a
+second file -- confirmed via the Mayan REST API that this added a
+*third* file version to the exact same document id (not a new one), and
+confirmed via `bff_customer`'s own preview URL that it now served the
+staff-uploaded content back, proving both surfaces genuinely share one
+document. Also confirmed live: a `manager`-role session gets a clean
+`403` hitting the `underwriter`-scoped consent routes (same
+`_role_dependency` guard every other role-split route already uses),
+and posting to the upload route for a non-`APPROVED` application
+(`APP-743410290`, `REJECTED`) returns a clean `400` without ever
+reaching `document.service`. Full unit suite still 246 passing,
+`lint-imports` still 8/8, `reconcile.py --report` still zero
+orphans/stale tags afterward.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 

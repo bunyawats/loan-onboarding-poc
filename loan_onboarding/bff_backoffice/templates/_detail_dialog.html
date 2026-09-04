@@ -78,6 +78,30 @@
       {% endif %}
     </div>
 
+    {% if account %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Consent</label>
+      {% if consent_document %}
+      <a class="text-blue-700 hover:underline text-sm" target="_blank" rel="noopener"
+        href="/ui/{{ role }}/{{ a.application_id }}/consent/{{ consent_document.document_id }}/preview">
+        {{ consent_document.filename }}
+      </a>
+      <p class="text-xs text-gray-500 mt-0.5 mb-1.5">Uploading a new file replaces this one.</p>
+      {% else %}
+      <p class="text-sm text-gray-500 m-0 mb-1.5">No consent document on file.</p>
+      {% endif %}
+      <form hx-post="/ui/{{ role }}/{{ a.application_id }}/consent/upload" hx-encoding="multipart/form-data"
+        hx-target="#dialog-container" hx-swap="innerHTML" class="flex items-center gap-2">
+        <input type="file" name="file" required
+          class="flex-1 text-sm file:mr-2 file:py-1.5 file:px-2.5 file:rounded-md file:border-0 file:bg-gray-100 file:text-sm">
+        <button type="submit"
+          class="min-h-9 px-3 py-1.5 text-sm font-medium rounded-md bg-gray-800 text-white hover:bg-gray-900 whitespace-nowrap">
+          {{ "Replace" if consent_document else "Upload" }}
+        </button>
+      </form>
+    </div>
+    {% endif %}
+
     {% if a.underwriter_name %}
     <div class="mb-4">
       <label class="block text-xs font-semibold mb-1 text-gray-700">Underwriter decision</label>

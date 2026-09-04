@@ -256,9 +256,10 @@ terminal `APPROVED` (§6.2, §9.2):
 - **`consent`** (account, versioned) — one logical document per
   account whose content can be updated over time; each update is a new
   *version* of the same document (Mayan's own file-versioning), not a
-  new document. **Built**: the customer's own application detail page,
-  once `APPROVED`, is the screen — see §11 for the still-open
-  back-office half.
+  new document. **Built, both surfaces**: the customer's own
+  application detail page, and (§11) staff can also upload/replace it
+  from the review dialog once the application is `APPROVED` — both
+  write to the same underlying document, versioned either way.
 
 ## 7. Identity: customer side unauthenticated, back office real Keycloak
 
@@ -566,15 +567,16 @@ because `account_id` doesn't exist yet at document-upload time. See
   narrower, already-in-progress flow, not a fresh application; revisit
   if resubmit turns out to hit this often enough to be worth the extra
   plumbing.
-- **Which surface triggers a `consent` upload (§6.5)? — half-resolved.**
-  The customer half is built: `bff_customer`'s application detail page
-  shows a Consent upload/replace section once the application is
-  `APPROVED`, calling `document.service.upload_consent(applicant_identifier,
-  account_id, customer_id, file)`. Whether a back-office action should
-  *also* let staff upload consent on the customer's behalf is still
-  undecided — `upload_consent` doesn't care which caller uses it, so
-  adding that later needs no API change, purely a `bff_backoffice`
-  route + template.
+- **Which surface triggers a `consent` upload (§6.5)? — resolved, both
+  halves built.** `bff_customer`'s application detail page shows a
+  Consent upload/replace section once the application is `APPROVED`;
+  `bff_backoffice`'s review dialog shows the same section for staff
+  (role-gated, not permission-gated — see `CLAUDE.md`'s `bff_backoffice/`
+  module section for why). Both call the same
+  `document.service.upload_consent(applicant_identifier, account_id,
+  customer_id, file)` and version the same underlying Mayan document —
+  live-verified that a staff-side replace is immediately visible via the
+  customer-side preview URL and vice versa.
 - Should the escalation threshold be per-product instead of global?
   (Deferred to POC v2 — see `CLAUDE.md`.)
 - Should `MORE_INFO_REQUESTED` → resubmit require *new* documents, or is

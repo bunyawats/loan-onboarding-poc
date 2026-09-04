@@ -31,18 +31,21 @@ import asyncio
 import os
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from temporalio.client import Client
 
 from loan_onboarding.account import service as account_service
+from loan_onboarding.account.models import Account
 from loan_onboarding.application import service as application_service
 from loan_onboarding.application.models import ApplicationNotFound, ApplicationPage
 from loan_onboarding.bff_backoffice import keycloak_auth, keycloak_session, selection_store
 from loan_onboarding.bff_backoffice.keycloak_session import SESSION_KEY
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
+from loan_onboarding.document.models import DocumentStream, UploadedFile
+from loan_onboarding.document.service import CATEGORY_CONSENT
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
 from loan_onboarding.workflow.workflows import (
@@ -51,6 +54,7 @@ from loan_onboarding.workflow.workflows import (
     DECISION_REQUEST_MORE_INFO,
     ROLE_MANAGER,
     ROLE_UNDERWRITER,
+    STATUS_APPROVED,
     STATUS_PENDING_MANAGER_APPROVAL,
     STATUS_PENDING_UNDERWRITING,
 )
@@ -231,12 +235,22 @@ async def _application_detail_context(application_id: str, role: str, user: dict
             customer = None
     account = await account_service.get_by_application_id(application_id)
 
+    consent_document = None
+    if account is not None:
+        # Consent is an account-level document (CLAUDE.md's "Document
+        # metadata assignment lifecycle") -- same reason bff_customer's
+        # own application detail page only offers it once an account
+        # exists.
+        account_documents = await document_service.list_account_documents(account.account_id)
+        consent_document = next((d for d in account_documents if d.category == CATEGORY_CONSENT), None)
+
     documents = await document_service.list_documents(application_id)
     permissions = await _user_permissions(user)
     return {
         "application": application,
         "customer": customer,
         "account": account,
+        "consent_document": consent_document,
         "documents": documents,
         "role": role,
         "permissions": permissions,
@@ -441,12 +455,7 @@ async def manager_detail(request: Request, application_id: str, user: dict = Dep
     return await _staff_detail(request, application_id, ROLE_MANAGER, user)
 
 
-async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
-    try:
-        stream = await document_service.preview(application_id, document_id)
-    except document_service.DocumentNotFound:
-        raise HTTPException(status_code=404)
-
+def _stream_response(stream: DocumentStream) -> StreamingResponse:
     async def _iter_and_close():
         try:
             async for chunk in stream.aiter_bytes():
@@ -461,6 +470,14 @@ async def _document_preview(application_id: str, document_id: int) -> StreamingR
     )
 
 
+async def _document_preview(application_id: str, document_id: int) -> StreamingResponse:
+    try:
+        stream = await document_service.preview(application_id, document_id)
+    except document_service.DocumentNotFound:
+        raise HTTPException(status_code=404)
+    return _stream_response(stream)
+
+
 @router.get("/underwriter/{application_id}/documents/{document_id}/preview")
 async def underwriter_document_preview(
     application_id: str, document_id: int, user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))
@@ -473,6 +490,82 @@ async def manager_document_preview(
     application_id: str, document_id: int, user: dict = Depends(_role_dependency(ROLE_MANAGER))
 ):
     return await _document_preview(application_id, document_id)
+
+
+# ----------------------------------------------------------------- consent ----
+
+async def _staff_account(application_id: str) -> Account:
+    """Resolves the account behind `application_id`, 404ing rather than
+    trusting a caller-supplied `account_id` -- same "derive ownership
+    from an id we already validated" shape as `_staff_detail`'s own
+    `ApplicationNotFound` -> 404 handling."""
+    account = await account_service.get_by_application_id(application_id)
+    if account is None:
+        raise HTTPException(status_code=404)
+    return account
+
+
+async def _consent_preview(application_id: str, document_id: int) -> StreamingResponse:
+    account = await _staff_account(application_id)
+    try:
+        stream = await document_service.preview_account_document(account.account_id, document_id)
+    except document_service.DocumentNotFound:
+        raise HTTPException(status_code=404)
+    return _stream_response(stream)
+
+
+@router.get("/underwriter/{application_id}/consent/{document_id}/preview")
+async def underwriter_consent_preview(
+    application_id: str, document_id: int, user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))
+):
+    return await _consent_preview(application_id, document_id)
+
+
+@router.get("/manager/{application_id}/consent/{document_id}/preview")
+async def manager_consent_preview(
+    application_id: str, document_id: int, user: dict = Depends(_role_dependency(ROLE_MANAGER))
+):
+    return await _consent_preview(application_id, document_id)
+
+
+async def _staff_consent_upload(
+    request: Request, application_id: str, role: str, file: UploadFile, user: dict[str, Any]
+) -> HTMLResponse:
+    try:
+        application = await application_service.get(application_id)
+    except ApplicationNotFound:
+        raise HTTPException(status_code=404)
+    if application.status != STATUS_APPROVED:
+        raise HTTPException(status_code=400, detail="consent is only available for an approved application")
+    account = await _staff_account(application_id)
+
+    content = await file.read()
+    await document_service.upload_consent(
+        application.applicant_identifier, account.account_id, account.customer_id, UploadedFile(file.filename, content)
+    )
+
+    ctx = await _application_detail_context(application_id, role, user)
+    return _render(request, "_detail_dialog.html", ctx)
+
+
+@router.post("/underwriter/{application_id}/consent/upload", response_class=HTMLResponse)
+async def underwriter_consent_upload(
+    request: Request,
+    application_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(_role_dependency(ROLE_UNDERWRITER)),
+):
+    return await _staff_consent_upload(request, application_id, ROLE_UNDERWRITER, file, user)
+
+
+@router.post("/manager/{application_id}/consent/upload", response_class=HTMLResponse)
+async def manager_consent_upload(
+    request: Request,
+    application_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(_role_dependency(ROLE_MANAGER)),
+):
+    return await _staff_consent_upload(request, application_id, ROLE_MANAGER, file, user)
 
 
 # --------------------------------------------------------- single decision ----

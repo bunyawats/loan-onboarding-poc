@@ -679,6 +679,34 @@ System) is this module's working name.
   functions are a no-op unless `decision == "APPROVE"`).
 - Owns the bulk-selection store — reuse the same Redis instance this
   module already needs for Keycloak sessions.
+- **Consent upload (staff half of PRD §11's "which surface" question,
+  the customer half is `bff_customer`'s — see that module's section)**:
+  the review dialog (`_detail_dialog.html`) shows a Consent section
+  whenever `account` resolves (i.e. the application is `APPROVED`,
+  mirroring `_application_detail_context`'s existing `customer`/
+  `account` resolution) — an upload/replace form posting to a new
+  `/ui/{role}/{application_id}/consent/upload`, backed by the same
+  `document.service.upload_consent(...)` `bff_customer` calls. **Gated
+  by role only (`_role_dependency`), not a Keycloak permission** —
+  deliberately, same reasoning document preview already uses: this
+  isn't one of the five decision scopes (Approve/Reject/RequestMoreInfo),
+  it's a supplementary action available to anyone who can see the
+  application at all. A new `document.service.preview_account_document(...)`
+  (shared with `bff_customer`, see `document/`'s section) backs the
+  preview link — `/ui/{role}/{application_id}/consent/{document_id}/preview`,
+  ownership resolved via `account.service.get_by_application_id(...)`
+  rather than trusting a raw `account_id` path param. Live-verified via
+  a real Keycloak login as `underwriter1`: uploading, then replacing, a
+  consent file through this dialog versioned the same Mayan document
+  `bff_customer`'s own earlier upload had created for that application's
+  account (3 file versions total across both surfaces by the end), and
+  the customer-side preview URL immediately served the staff-uploaded
+  content back — confirming both surfaces genuinely share one document,
+  not two. Also confirmed: a `manager`-role session gets `403` on the
+  `underwriter`-scoped consent routes (same `_role_dependency` every
+  other underwriter/manager-split route already enforces), and posting
+  to the upload route for a non-`APPROVED` application returns a clean
+  `400` rather than reaching `document.service` at all.
 
 ### 3. `customer/` — Customer module
 
@@ -1109,12 +1137,13 @@ through the application flow:
   Index's `<customer_id>/<account_id>/<category>` branch needs it to
   nest either one under the customer). Not restricted to one caller —
   either BFF can call it once `account_id`/`customer_id` exist (both
-  already import `document/`). **The UI surface question is resolved
-  (built)**: `bff_customer`'s own application detail page, once the
-  application is `APPROVED` — see that module's section below. Staff
-  triggering an upload on the customer's behalf, from
-  `bff_backoffice`, remains unbuilt — `PRD.md`'s open question is
-  narrowed to that half, not the whole thing.
+  already import `document/`). **The UI surface question is resolved,
+  both halves built**: `bff_customer`'s own application detail page,
+  once the application is `APPROVED`, plus `bff_backoffice`'s review
+  dialog for staff to upload/replace on the customer's behalf — see
+  both modules' sections below. Both write to the same document; a
+  replace from either surface is immediately visible from the other
+  (live-verified).
 - `service.preview_account_document(account_id, document_id) ->
   DocumentStream` — the account-scoped sibling of `preview(application_id,
   document_id)`, needed because an account-level document (Consent,
