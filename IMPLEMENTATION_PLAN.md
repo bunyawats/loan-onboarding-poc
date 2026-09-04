@@ -3206,12 +3206,15 @@ is.)*
   found stale (still said "Planning complete, implementation not
   started — Phase 0" despite Phases 0-16 being done) and was fixed to
   point at this file's Current Status instead of restating a phase
-  number that will only go stale again. Also noticed but **not**
-  fixed (out of scope for this pass, flagged to the user):
-  `docs/api-specification.md` still shows pre-Phase-13/14 signatures
-  (`UUID` ids instead of `CUS-`/`ACC-`/`APP-` strings, `get_or_create`
-  missing `name`/`email`/`phone`) — worth a follow-up pass. No code
-  changed; commit covers docs only.
+  number that will only go stale again. Also noticed, initially flagged
+  as out of scope, then fixed in a same-day follow-up commit at the
+  user's request: `docs/api-specification.md` still showed pre-Phase-
+  13/14 signatures (`UUID` ids instead of `CUS-`/`ACC-`/`APP-` strings,
+  `get_or_create` missing `name`/`email`/`phone`, no `idgen/`, no
+  consent upload/ID reuse/reconciliation, and a stale pre-Phase-6 "Open
+  items" section) — rewritten to match every module's actual shipped
+  signatures through Phase 16. No `loan_onboarding/` code changed
+  either commit; both cover docs only.
 
   **From "Modules, in detail" (`bff_customer/`)** — consent-upload
   live-verification: Live-verified via direct HTTP calls against the
