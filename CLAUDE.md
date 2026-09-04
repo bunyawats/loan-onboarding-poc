@@ -1232,7 +1232,8 @@ and still what `document.service.py`'s own queries filter on (see the
 gotcha #2 consequence below), just no longer an index-tree grouping
 key.
 
-**A real, mid-build reliability wrinkle, not a template bug**: right
+**A real, mid-build reliability wrinkle, not a template bug — hit twice,
+in two different sessions, both times from the same root cause.** Right
 after adding branch 3 to the two already-built indexes still holding
 older content (Account Index, Application Index — Customer Index built
 clean the first time), their instance trees briefly went to
@@ -1244,8 +1245,19 @@ seconds of each other while iterating) racing Mayan's own reset-then-
 rebuild sequence, not a problem with the node expressions — a single,
 unhurried `rebuild/` call per index, left to finish on its own,
 produced a stable tree every time (confirmed stable across repeated
-polls, ~40s apart, before trusting it). Don't fire a second `rebuild/`
-at the same index while an earlier one might still be in flight.
+polls, ~40s apart, before trusting it). **The same race reappeared in a
+later session's clean-slate E2E re-verification**, this time triggered
+across *different* index ids fired back-to-back in a loop (`for idx in
+3 4 5; do ... rebuild ...; done`) rather than the same id twice — one
+or two of the three ended up stuck at `node_count=0` (missing a
+just-approved account/application entirely) until each was re-triggered
+individually and *actually waited out* (polled stable across several
+5s intervals) before moving to the next. **The operating rule this
+confirms: never fire a `rebuild/` call — for any index — while a
+previous `rebuild/` call against *any* index might still be in flight,
+and always confirm `node_count` stable across several polls before
+trusting a rebuilt tree**, not just "loop over the three ids with no
+wait in between."
 
 **A real, load-bearing bug found while deleting the old single index**:
 `document/mayan_client.py`'s `rebuild_index()` — called after every
@@ -2221,6 +2233,35 @@ mistake, not a hypothetical.) Create the test database once
 (`CREATE DATABASE loan_onboarding_test;` then apply `db/schema.sql` to
 it) and keep using it for every local unit-test run alongside a running
 compose stack.
+
+**A second, related real hazard found in a later session's clean-slate
+E2E re-verification: ad hoc `docker exec <container> python3 -c
+"asyncio.run(...)"` one-off scripts (used for manual document-service
+recovery calls, or just to poke at a module directly) each create a
+brand-new `asyncpg` pool via that module's own `_get_pool()` — and
+`asyncpg.create_pool()` defaults to `min_size=10`, opening 10 real
+connections per call.** Running several such one-off scripts across a
+session (this one ran roughly a dozen over its course) can exhaust
+Postgres's `max_connections` (100 by default) well before anything
+looks obviously wrong — the symptom was every real request, browser-
+driven or not, starting to fail with `asyncpg.exceptions.TooManyConnectionsError:
+sorry, too many clients already`, including inside a running Temporal
+activity (turning an in-progress approval into a genuinely stuck,
+`FAILED` workflow — recovered by deleting that one workflow execution
+via `temporal workflow delete` and its now-orphaned application row,
+not by anything automatic). Each one-off process exiting *should*
+release its connections via ordinary TCP teardown, but in practice the
+connections lingered long enough to compound across many closely-spaced
+invocations. Fixed by restarting `db` (safe — data lives on the
+volume, not in the container) plus the app/worker containers whose own
+pools were sitting on now-invalid connections after that restart.
+**The operating rule this confirms**: prefer the running app/worker
+containers' own long-lived pools (drive verification through the real
+browser flow, or read state via `psql`/the Mayan REST API/`temporal`
+CLI directly) over spinning up fresh one-off Python processes against
+this codebase's own modules; if a one-off script is genuinely
+necessary, keep it to one at a time and don't let more than a couple
+accumulate across a session without restarting `db` in between.
 
 Prefer `temporalio.testing.WorkflowEnvironment` (time-skipping) over a
 real Temporal server for `workflow/`'s workflow/activity tests — inject

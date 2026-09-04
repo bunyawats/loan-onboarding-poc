@@ -301,6 +301,44 @@ verified live: both reported gaps now resolved. **Not yet committed**
 — this follow-up (script + `CLAUDE.md` only) needs its own commit and
 push alongside `01fa111`.
 
+**Follow-up, same day, user-requested full clean-slate E2E re-run**:
+user asked to clear all test data/documents and redo the full
+verification sweep from empty. Cleared all three systems — Postgres
+(`TRUNCATE applications, accounts, customers`), Mayan (trashed then
+permanently purged every document via `/trashed_documents/`), and
+Temporal (`temporal workflow delete --query "WorkflowType='LoanApplicationWorkflow'"`)
+— confirmed all three genuinely empty before proceeding. **Hit a real,
+self-inflicted infrastructure incident along the way**: many ad hoc
+`docker exec ... python3 -c "asyncio.run(...)"` one-off scripts run
+earlier in the session (each opening a fresh 10-connection `asyncpg`
+pool that didn't get cleanly released) exhausted Postgres's
+`max_connections`, which struck mid-approval and turned one application
+into a genuinely stuck `FAILED` Temporal workflow — see `CLAUDE.md`'s
+Testing section for the full mechanism and the new operating rule this
+confirms (prefer the running containers' own pools; avoid stacking up
+one-off Python processes). Recovered by restarting `db` + `app` +
+`worker-activity`, deleting the one stuck workflow and its orphaned
+Postgres row, and redoing that one application from scratch — the rest
+of the sweep then went cleanly. Full sweep against genuinely clean data:
+brand-new applicant's personal_loan application approved (all 4
+documents + generated Welcome Letter correctly tagged
+`account_id`+`customer_id`, zero manual recovery needed this time);
+same identity's second application (auto_loan, a different product
+type) correctly prefilled and used ID reuse, approved cleanly; a third
+application (mortgage) correctly showed `customer_id` at upload time,
+then rejected cleanly with its documents keeping `customer_id` but never
+gaining `account_id`. Re-verified all three index templates' final,
+fully-rebuilt state (one customer showing both accounts, all three
+applications, and every category — including `Government ID` and
+`Welcome Letter` directly under `customer_id` — confirmed via the real
+`documents_url`/node listings, matching the two originally-reported
+gaps' fix). Hit the rebuild-race wrinkle above a second time doing this
+final verification (fired three indexes' rebuilds in a tight loop with
+no wait) — resolved the same way, one index at a time, waited stable.
+No code changes this pass — infrastructure/data cleanup and
+verification only, `CLAUDE.md`'s two new operational notes are the only
+diff. Nothing to commit from this pass itself.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 
@@ -2849,6 +2887,35 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-04 (later still)** — Ad hoc, user-requested: added a third
+  sibling branch (`<root> -> <category>`, direct) to all three index
+  templates, after the user directly caught a real gap ("I don't see
+  welcome letter under account", "I don't see government id under
+  customer") — neither existed before this. Then, per a further
+  user request, cleared all test data/documents across Postgres, Mayan,
+  and Temporal and re-ran the full application lifecycle from a
+  genuinely empty state. Along the way, hit and recovered from a real
+  self-inflicted incident: many earlier ad hoc `docker exec ... python3
+  -c "asyncio.run(...)"` calls this session had left Postgres's
+  connection pool exhausted, which struck mid-approval and turned one
+  application into a stuck `FAILED` Temporal workflow (recovered by
+  restarting `db`/`app`/`worker-activity`, deleting the stuck workflow
+  and its orphaned row, and redoing that one application). The rest of
+  the sweep — a brand-new applicant's personal_loan approval, a second
+  application (auto_loan) from the same now-returning identity with
+  prefill and ID reuse, and a third (mortgage) rejected — all went
+  cleanly, and the two originally-reported gaps were confirmed fixed
+  against fresh data (Government ID and Welcome Letter both now appear
+  directly under their respective `customer_id`/`account_id` nodes).
+  Also hit the same overlapping-`rebuild/`-calls race a second time
+  while doing the final index verification (this time across different
+  index ids fired in a tight loop rather than the same id twice) —
+  `CLAUDE.md`'s existing note on this was strengthened to cover the
+  cross-index case too. Both new operational hazards (the connection-
+  pool exhaustion, and the cross-index rebuild race) are now documented
+  in `CLAUDE.md` so a future session doesn't rediscover them the same
+  way. No Python code changed in this pass.
 
 - **2026-09-04 (later same day)** — Ad hoc, user-requested: replaced
   the single `applicant_identifier`-rooted "Loan Onboarding Archive"
