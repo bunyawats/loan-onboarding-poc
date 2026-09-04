@@ -510,6 +510,84 @@ tests/unit` only), so left as "run these two suites separately," not
 investigated further. `CLAUDE.md`'s Testing section documents the new
 file and why it exists.
 
+**Follow-up, same day: user asked to clear all test data and re-run the
+full E2E sweep, to exercise both consent surfaces (and everything else)
+against genuinely fresh data.** Cleared Postgres (`TRUNCATE applications,
+accounts, customers` -- was 3 applications/2 accounts/1 customer),
+Mayan (trashed all 17 active documents individually via the REST API,
+`docker exec`/one-off-script-free this time per the standing operating
+rule), and Temporal (`temporal workflow delete --query
+"WorkflowType='LoanApplicationWorkflow'"` -- was 3), confirmed all
+three genuinely empty, and confirmed the three index templates plus
+document-type metadata associations were still intact (no repeat of
+the drift two sessions ago). Ran a fresh sweep, driven mostly via
+direct HTTP (customer BFF: identify/verify/wizard/upload/submit) plus
+a real browser for every Keycloak-gated staff action, executing
+decisions via `fetch()` POSTs against an authenticated session rather
+than clicking through dialogs each time (faster, still a real request
+through the real route and permission check):
+
+- One identity, three applications, all approved: `personal_loan`
+  (direct underwriter approve), `auto_loan` (prefill confirmed via the
+  rendered form's own `value=` attributes; ID reuse offered and
+  defaulted to reuse, confirmed no second Government ID document was
+  created), `mortgage` at $350k (escalated by the underwriter, approved
+  by the manager after a real role switch -- see the Keycloak-logout
+  note below). Ended with one customer holding three `ACTIVE` accounts,
+  one per product type, confirmed via `psql`.
+- A second identity's `personal_loan` application rejected cleanly --
+  confirmed no customer/account row was created for it at all.
+- **Consent, both surfaces, on fresh data**: customer-side upload
+  against the newly-approved `personal_loan` account, then a
+  staff-side replace from the underwriter's review dialog -- confirmed
+  via the Mayan REST API (2 file versions on the same document id) and
+  via the customer's own preview URL serving the staff-uploaded content
+  back, same result as the dirty-data verification two commits ago.
+- Full exclusive-placement tree walk across all three indexes for the
+  three-account customer plus the rejected sibling: 21 active documents
+  total, each appearing in exactly one leaf across Customer/Account/
+  Application Index combined (cross-checked against the real document
+  list, no duplicates, no gaps), the rejected application's own 4
+  documents appearing only in Application Index (never Customer/Account,
+  since no account was ever created for it).
+- `reconcile.py --report`: zero orphans, zero stale tags. Full unit
+  suite (246) and `lint-imports` (8/8) still green.
+
+**One real, live-hit recurrence of the already-documented "rebuild
+race" hazard (CLAUDE.md's "Document hierarchy" section), triggered by
+a new shape of trigger this time.** Every previous occurrence came from
+an operator firing bare `rebuild/` calls back-to-back in a loop; this
+time the trigger was the *application's own* automatic per-attach
+`rebuild_index()` calls -- three applications approved within seconds
+of each other (scripted, not manually paced) each fired their own
+sequence of metadata-attach-then-rebuild calls, and they overlapped.
+Symptom: Customer Index's tree came back real but badly incomplete
+right after the sweep (`CUS-354038337` showing only one of its three
+accounts, and that one account missing three of its four application
+documents) -- not a template bug, confirmed by fixing it the documented
+way: one unhurried `rebuild/` call per index, waited out (`node_count`
+polled every 5s until stable -- Customer Index took ~24s, climbing
+6 -> 24 -> 37 -> stable, before it was trustworthy). **New operating
+note worth adding here**: pacing multiple staff decisions seconds apart
+via script is enough to trigger this same race that ad hoc `rebuild/`
+loops already caused -- the fix (rebuild once per index, wait for
+`node_count` to stabilize before trusting the tree) is unchanged, but
+the trigger doesn't require anyone to call `rebuild/` directly anymore.
+Not investigated further (no code changed) -- this is an operational
+verification note, not a new code gap.
+
+**Also worth recording**: switching Keycloak roles mid-session (to
+test the manager approval step) needs a **real page navigation** through
+Keycloak's own logout flow, not a `fetch()` POST to `/ui/logout` --
+`fetch` follows the redirect chain as an opaque cross-origin response
+and never actually visits Keycloak's session-clearing endpoint in the
+browser, so a subsequent login silently re-authenticates as the same
+user via SSO instead of prompting. Fixed by submitting a real
+JS-constructed `<form method="POST">` (a genuine navigation, not
+`fetch`), which correctly lands on Keycloak's own "Do you want to log
+out?" confirmation page. A browser-automation technique note for future
+sessions, not an application bug.
+
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
 
