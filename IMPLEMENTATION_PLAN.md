@@ -286,9 +286,20 @@ single-slug behavior. Live-verified after the fix: rebuilt the
 call against the live stack, confirmed it succeeded end-to-end with no
 error, and confirmed the uploaded document actually appears in
 Application Index's tree via the real `documents_url` listing. Full
-unit suite (243 tests) and `lint-imports` green. **Not yet committed**
-— next step is to review this diff (separate from the P16 commit
-above), commit, and push alongside it.
+unit suite (243 tests) and `lint-imports` green. **Committed
+(`01fa111`)**, not yet pushed.
+
+**Follow-up, same day**: user caught a real gap directly ("I don't see
+welcome letter under account", "I don't see government id under
+customer") — none of the three indexes had a category leaf directly
+under the root entity id (only nested under a cross-reference branch).
+Added a third sibling branch to all three (`<root> -> <category>`,
+direct) live and in `scripts/setup_document_hierarchy.sh`; hit and
+resolved a rebuild-timing wrinkle along the way (overlapping `rebuild/`
+calls racing each other, not a template bug — see `CLAUDE.md`). Re-
+verified live: both reported gaps now resolved. **Not yet committed**
+— this follow-up (script + `CLAUDE.md` only) needs its own commit and
+push alongside `01fa111`.
 
 *(A session should overwrite this line, not append to it — it always
 reflects only the current resume point.)*
@@ -2877,7 +2888,33 @@ is.)*
   both green. Lightly corrected a handful of now-stale
   `<applicant_identifier> -> ...` references elsewhere in `CLAUDE.md`
   and `docs/api-specification.md` that described the old single-index
-  shape. **Not yet committed.**
+  shape. Committed (`01fa111`), not yet pushed.
+
+  **Follow-up in the same session, after direct user feedback**: "I
+  don't see welcome letter under account" / "I don't see government id
+  under customer". Real gap, not a misunderstanding — neither branch 1
+  nor 2 in any of the three indexes puts a category leaf directly under
+  the root entity id, so e.g. the promoted Government ID (id_photo)
+  document required drilling into "account" or "application" first to
+  find it under Customer Index. Added a third sibling branch to all
+  three indexes (`<root> -> <category>`, direct, no intermediate
+  id-grouping) live via the API, and to
+  `scripts/setup_document_hierarchy.sh` for future fresh installs.
+  **A real reliability wrinkle hit and resolved while doing this, not a
+  template bug**: right after adding branch 3, two of the three
+  indexes' instance trees briefly went to `depth=0`/`node_count=0` on
+  rebuild even though the template definitions were confirmed correct —
+  traced to firing overlapping `rebuild/` calls in quick succession
+  racing Mayan's own reset-then-rebuild sequence; a single unhurried
+  `rebuild/` call per index produced a stable tree (confirmed stable
+  across repeated polls ~40s apart). Re-verified live afterward:
+  "Welcome Letter" now appears as a direct child category under its
+  `account_id` node, "Government ID" as a direct child category under
+  its `customer_id` node. `CLAUDE.md` updated with the full detail,
+  including the rebuild-timing note for future sessions. **Not yet
+  committed** — this follow-up (script + `CLAUDE.md` changes only, no
+  Python code touched) still needs its own commit and push alongside
+  the `01fa111` commit above.
 
 - **2026-09-04** — Implemented and live-verified all of Phase 16
   (P16-1 through P16-4), continuing from the prior session's

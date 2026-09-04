@@ -1175,39 +1175,77 @@ Customer Index (customer_id)
        │      └── <application_id>       account_id -- every document
        │             └── <category>      under an approved application,
        │                                  plus Account Documents)
-       └── <application_id>              (branch 2: docs that carry
-              └── <category>              application_id, whether or not
-                                           they've also gained account_id
-                                           yet)
+       ├── <application_id>              (branch 2: docs that carry
+       │      └── <category>              application_id, whether or not
+       │                                  they've also gained account_id
+       │                                  yet)
+       └── <category>                    (branch 3: every document with
+                                           customer_id, direct)
 
 Account Index (account_id)
 └── <account_id>
        ├── <customer_id>
        │      └── <category>
-       └── <application_id>
-              └── <category>
+       ├── <application_id>
+       │      └── <category>
+       └── <category>                    (branch 3: direct, as above)
 
 Application Index (application_id)
 └── <application_id>
        ├── <customer_id>
        │      └── <category>
-       └── <account_id>
-              └── <category>
+       ├── <account_id>
+       │      └── <category>
+       └── <category>                    (branch 3: direct, as above)
 ```
+
+**Branch 3 (the direct category leaf) was added after live feedback, not
+part of the original design.** The first version of each index only had
+branches 1 and 2 — neither puts a category leaf directly under the root
+entity id, so a promoted Government ID (id_photo) document (carries
+customer_id) required drilling into "account" or "application" first to
+find it under Customer Index; a Welcome Letter (only ever has
+account_id + customer_id) needed drilling into "customer" first to find
+it under Account Index. The user caught both gaps directly ("I don't
+see welcome letter under account", "I don't see government id under
+customer") — branch 3 fixes it: every document carrying the root's own
+id, by category, with nothing in between. Added live to all three
+indexes and to `scripts/setup_document_hierarchy.sh` for future fresh
+installs, then re-verified the same way as the first build (real
+`documents_url` listings, not inferred) — confirmed "Welcome Letter"
+now appears as a direct child category under its `account_id` node, and
+"Government ID" as a direct child category under its `customer_id`
+node.
 
 **A document with more than one of these ids set shows up in more than
 one place — deliberately, not a bug.** An approved application's
 Government ID document (application_id + account_id + customer_id, all
 three once approved) naturally appears under Customer Index's
-"account → application" branch *and* its sibling "application" branch
-at once, not just one or the other — the same multi-leaf-placement
-mechanism the original single index already relied on for its
-`id_photo` node (see below), applied deliberately across all three new
-indexes rather than worked around. `applicant_identifier` plays no role
-in any of the three trees — it's still attached to every document (see
-`document/service.py`'s `upload`) and still what `document.service.py`'s
-own queries filter on (see the gotcha #2 consequence below), just no
-longer an index-tree grouping key.
+"account → application" branch, its sibling "application" branch, *and*
+its sibling direct-category branch (3) all at once, not just one of the
+three — the same multi-leaf-placement mechanism the original single
+index already relied on for its `id_photo` node (see below), applied
+deliberately across all three new indexes rather than worked around.
+`applicant_identifier` plays no role in any of the three trees — it's
+still attached to every document (see `document/service.py`'s `upload`)
+and still what `document.service.py`'s own queries filter on (see the
+gotcha #2 consequence below), just no longer an index-tree grouping
+key.
+
+**A real, mid-build reliability wrinkle, not a template bug**: right
+after adding branch 3 to the two already-built indexes still holding
+older content (Account Index, Application Index — Customer Index built
+clean the first time), their instance trees briefly went to
+`depth=0`/`node_count=0` after a rebuild, even though the template
+definitions themselves were confirmed correct via
+`GET /index_templates/<id>/nodes/`. Traced to overlapping `rebuild/`
+calls fired in quick succession (this session issued several within
+seconds of each other while iterating) racing Mayan's own reset-then-
+rebuild sequence, not a problem with the node expressions — a single,
+unhurried `rebuild/` call per index, left to finish on its own,
+produced a stable tree every time (confirmed stable across repeated
+polls, ~40s apart, before trusting it). Don't fire a second `rebuild/`
+at the same index while an earlier one might still be in flight.
 
 **A real, load-bearing bug found while deleting the old single index**:
 `document/mayan_client.py`'s `rebuild_index()` — called after every

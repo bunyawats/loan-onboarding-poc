@@ -17,25 +17,42 @@
 #          │      └── <application_id>       account_id, i.e. every document
 #          │             └── <category>      under an approved application,
 #          │                                  plus Account Documents)
-#          └── <application_id>              (branch 2: docs that carry
-#                 └── <category>              application_id, whether or not
-#                                              they've also gained account_id
-#                                              yet -- a pre-approval upload
-#                                              from a returning customer)
+#          ├── <application_id>              (branch 2: docs that carry
+#          │      └── <category>              application_id, whether or not
+#          │                                  they've also gained account_id
+#          │                                  yet -- a pre-approval upload
+#          │                                  from a returning customer)
+#          └── <category>                    (branch 3: every document with
+#                                              customer_id, direct -- no
+#                                              intermediate id-grouping)
 #
 #   Account Index (account_id)
 #   └── <account_id>
 #          ├── <customer_id>
 #          │      └── <category>
-#          └── <application_id>
-#                 └── <category>
+#          ├── <application_id>
+#          │      └── <category>
+#          └── <category>                    (branch 3: direct, as above)
 #
 #   Application Index (application_id)
 #   └── <application_id>
 #          ├── <customer_id>
 #          │      └── <category>
-#          └── <account_id>
-#                 └── <category>
+#          ├── <account_id>
+#          │      └── <category>
+#          └── <category>                    (branch 3: direct, as above)
+#
+# **Branch 3 (the direct category leaf) was added after live feedback,
+# not part of the original design** -- the first version of each index
+# only had branches 1 and 2, and neither puts a category leaf directly
+# under the root entity id. That meant e.g. a promoted Government ID
+# (id_photo) document, which carries customer_id, required drilling into
+# "account" or "application" *first* to find it under Customer Index --
+# there was no way to just look under a customer_id and immediately see
+# its categories. Same gap for Welcome Letter under Account Index (only
+# ever has account_id + customer_id, so it needed drilling into "customer"
+# first). Branch 3 fixes this: every document carrying the root's own id,
+# by category, with nothing in between.
 #
 # **A document with more than one of these ids set shows up in more than
 # one place -- deliberately, not a bug.** Confirmed with the user rather
@@ -44,12 +61,13 @@
 # index already relied on for its `id_photo` node -- see CLAUDE.md's
 # "Document hierarchy"), so e.g. an approved application's Government ID
 # document (application_id + account_id + customer_id, once approved)
-# naturally appears under Customer Index's "account -> application" branch
-# *and* its sibling "application" branch at once, not just one or the
-# other. `applicant_identifier` plays no role in any of these three
-# templates -- it's still attached to every document (see the metadata
-# associations below) and still what `document.service.py`'s own queries
-# filter on, just no longer an index-tree grouping key.
+# naturally appears under Customer Index's "account -> application" branch,
+# its sibling "application" branch, *and* its sibling direct-category
+# branch all at once, not just one of the three. `applicant_identifier`
+# plays no role in any of these three templates -- it's still attached to
+# every document (see the metadata associations below) and still what
+# `document.service.py`'s own queries filter on, just no longer an
+# index-tree grouping key.
 #
 # All five gotchas from mayan-edms-customer-archive's
 # docs/document-hierarchy-setup.md still apply -- read that file before
@@ -252,6 +270,17 @@ post_node "$INDEX_ID" "$NODE_C_APPLICATION" \
   "true" > /dev/null
 log "  branch 2 (application -> category) built"
 
+# Branch 3 (sibling, direct child of customer): category. Added after live
+# feedback that neither branch 1 nor 2 puts a category leaf directly under
+# customer_id -- e.g. the promoted Government ID (id_photo) document has
+# customer_id but staff had to drill into "account" or "application" first
+# to find it. This branch shows every document that has customer_id at
+# all, by category, with no intermediate id-grouping level.
+post_node "$INDEX_ID" "$NODE_CUSTOMER" \
+  '{% if document.metadata_value_of.customer_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 3 (direct category) built"
+
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 log "Done. 'Customer Index' id=$INDEX_ID, slug=customer-index"
 
@@ -281,6 +310,15 @@ post_node "$INDEX_ID" "$NODE_A_APPLICATION" \
   "true" > /dev/null
 log "  branch 2 (application -> category) built"
 
+# Branch 3 (sibling, direct child of account): category -- same reasoning
+# as Customer Index's branch 3 above (e.g. Welcome Letter/Consent, which
+# only ever have account_id + customer_id, showing up requires drilling
+# into "customer" first without this).
+post_node "$INDEX_ID" "$NODE_ACCOUNT" \
+  '{% if document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 3 (direct category) built"
+
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 log "Done. 'Account Index' id=$INDEX_ID, slug=account-index"
 
@@ -309,6 +347,13 @@ post_node "$INDEX_ID" "$NODE_AP_ACCOUNT" \
   '{% if document.metadata_value_of.application_id and document.metadata_value_of.account_id %}{{ document.metadata_value_of.category }}{% endif %}' \
   "true" > /dev/null
 log "  branch 2 (account -> category) built"
+
+# Branch 3 (sibling, direct child of application): category -- same
+# reasoning as the other two indexes' branch 3.
+post_node "$INDEX_ID" "$NODE_APPLICATION" \
+  '{% if document.metadata_value_of.application_id %}{{ document.metadata_value_of.category }}{% endif %}' \
+  "true" > /dev/null
+log "  branch 3 (direct category) built"
 
 api POST "/index_templates/$INDEX_ID/rebuild/" > /dev/null
 log "Done. 'Application Index' id=$INDEX_ID, slug=application-index"
