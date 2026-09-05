@@ -639,8 +639,41 @@ manager1. Worked reliably every time via
 this specific symptom shows up on a Keycloak-hosted page, rather than
 repeating plain coordinate/ref clicks.
 
-*(A session should overwrite this line, not append to it — it always
-reflects only the current resume point.)*
+**Phase 17 (Proactive active-account product-type elimination) added
+after Phase 16 closed and its follow-ups settled** — a UX enhancement
+discussed and confirmed with the user, then designed, built, and
+live-verified in the same session. **All three tasks (P17-1 through
+P17-3) are done.** `application.service.get_available_product_types(...)`
+filters `bff_customer`'s product picker to only product types the
+applicant doesn't already hold an `ACTIVE` account for — a hard
+elimination, confirmed with the user as deliberate, no "apply anyway"
+override — while `check_decision_allowed`'s approval-time gate stays
+completely unchanged as the authoritative backstop against a bypass.
+Full unit suite (245 tests) and `lint-imports` (8/8) green; live-
+verified against the real stack for both the partial-elimination case
+(one product type still offered) and the all-active empty-state case.
+**Committed and pushed** (`23a7136`).
+
+**Phase 18 (Account closure workflow) added after Phase 17 closed** —
+the necessary follow-up Phase 17 itself surfaced: once a product type
+is hard-eliminated from the picker, there was no path back, since
+nothing in this codebase can ever move an account from `ACTIVE` to
+`CLOSED`. `CLAUDE.md`'s new "Account closure" section and `PRD.md`'s
+new §6.6 (plus updates to §4/§8.1/§8.2/§9.2/§11) describe the full
+target design, confirmed with the user first: a `CloseAccountWorkflow`
+alongside the existing `LoanApplicationWorkflow`, `account/` gaining the
+same "stops being a pure leaf, gains an `activities.py`" treatment
+`application/` already has, a new shared `notifications/` leaf module
+(promoted out of `bff_customer/notifications.py` so a Temporal activity
+can send email without reaching into a BFF), staff decision reusing the
+existing Underwriter/Manager roles with no new Keycloak config, and
+balance verification as a staff attestation rather than a real ledger
+(this POC has none). **This was a documentation-only session, per
+explicit user instruction — none of Phase 18's eight tasks
+(P18-1 through P18-8) are implemented yet.** Start at P18-1.
+
+*(A session should overwrite this paragraph, not append to it — it
+always reflects only the current resume point.)*
 
 ## Decisions Needed
 
@@ -3179,6 +3212,186 @@ exact call sequence each task below implements.
 
 ---
 
+## Phase 17 — Proactive active-account product-type elimination
+
+**Depends on:** Phase 13 (`account.service.has_active_account_of_type`,
+`application.service.check_decision_allowed`) and Phase 14
+(`customer.service.find_by_identifier`'s role in resolving a returning
+applicant). **Not part of the original build-out** — a UX enhancement
+discussed, designed, and built in one session (not a separate
+documentation-only pass the way Phase 16 started). `CLAUDE.md`'s "One
+customer, one active account per product type" section and `PRD.md`
+§8.1/§9.2/§11 describe the confirmed design: a **hard elimination, no
+"apply anyway" override**, with the back-office approval-time check
+kept as the unconditional, unchanged authoritative backstop.
+
+- [x] **P17-1** — `application/service.py`:
+      `get_available_product_types(applicant_identifier) -> list[str]`
+      — resolves the customer via `find_by_identifier`; returns every
+      `KNOWN_PRODUCT_TYPES` entry for a first-time applicant (no
+      resolvable customer), filtered by `has_active_account_of_type`
+      otherwise.
+      DoD: `tests/unit/application/test_service.py` gained four tests —
+      new applicant gets every product type; an active account excludes
+      just that type; a `CLOSED`-only account of the same type doesn't
+      exclude anything; a customer active in all three returns `[]`.
+      > DONE — see commit `23a7136`.
+- [x] **P17-2** — `bff_customer/routes.py`: `GET /apply/new` filters the
+      picker to `get_available_product_types`'s result;
+      `POST /apply/new/start` re-runs the same check server-side (a
+      direct POST past the picker still gets refused, not silently
+      trusted). `new_product_picker.html` shows an explanatory message
+      instead of an empty list when nothing is available.
+      DoD: manual/live verification only (no dedicated route-level test
+      file exists for `bff_customer/routes.py` in this project — see
+      Phase 16's P16-3 note for the same, already-accepted gap).
+      > DONE — see commit `23a7136`.
+- [x] **P17-3** — Live verification against the real stack (rebuilt
+      `app` image first): confirmed a customer active in `personal_loan`
+      + `auto_loan` sees only Mortgage in the picker; confirmed a
+      customer active in all three product types sees the empty-state
+      message instead of a dead-end list. Full unit suite (245 tests,
+      excluding the pre-existing, unrelated `BACKOFFICE_REDIS_URL`
+      Redis-fixture failures — not caused by this phase) and
+      `lint-imports` (8/8 contracts) both green. `CLAUDE.md`/`PRD.md`
+      updated to describe the built feature.
+      > DONE — see commit `23a7136`, pushed to `origin/main`.
+
+---
+
+## Phase 18 — Account closure workflow
+
+**Depends on:** Phase 17 (this phase is exactly the "path back" `PRD.md`
+§11 flagged as missing once Phase 17's hard elimination shipped) and
+Phase 13 (the account/application id scheme and activity-writing
+pattern this phase's `account/activities.py` reuses). **Not part of the
+original build-out** — a product enhancement discussed and confirmed
+with the user. `CLAUDE.md`'s new "Account closure" section and
+`PRD.md`'s new §6.6 (plus updates to §4, §8.1, §8.2, §9.2, §11) describe
+the target design, written first per this project's own convention —
+**three scoping decisions already confirmed, not open questions for
+whoever picks this up**: balance verification is a staff attestation,
+not a real ledger computation; the closure-decision email is a narrow,
+one-decision-only exception to `PRD.md` §4's no-notification non-goal;
+either the existing `Underwriter` or `Manager` Keycloak role may decide
+a request, no new realm config, no escalation tier.
+
+**This is a documentation-only session, per explicit user instruction —
+none of Phase 18's tasks below are implemented yet.** Start at P18-1.
+
+- [ ] **P18-1** — `db/schema.sql`: extend `accounts.status`'s `CHECK`
+      constraint to add `'CLOSURE_REQUESTED'` alongside `ACTIVE`/
+      `CLOSED`; add nullable `closure_workflow_id`,
+      `closure_requested_at`, `closure_decision_comment`,
+      `closure_decided_by`, `closure_decided_at` columns.
+      DoD: schema applies cleanly to a fresh database; every existing
+      row is unaffected (current `status` value still valid, new
+      columns all `NULL`).
+- [ ] **P18-2** — Promote `bff_customer/notifications.py` into a new
+      shared leaf module, `notifications/service.py` (same "zero
+      dependency on anything else in this codebase" shape as `idgen/`)
+      — moves the existing `send_verification_code`/fake-delivery logic
+      there unchanged; `bff_customer/identity.py` and `routes.py`
+      updated to import from the new location. Adds a new
+      `send_account_closure_decision(applicant_identifier, account_id,
+      product_type, decision, comment)`, same fake/dev-only delivery
+      style. Add a `notifications/ never imports anything else in this
+      codebase` contract to `.importlinter`/`pyproject.toml`.
+      DoD: existing OTP-delivery unit tests still pass unchanged (import
+      path only); a new unit test for
+      `send_account_closure_decision`; `lint-imports` green with the new
+      contract.
+- [ ] **P18-3** — `workflow/task_queues.py`:
+      `task_queue_for_account_closure()` (a single, non-product-type-keyed
+      queue name — closure review doesn't vary by product).
+      `workflow/workflows.py`: new `CloseAccountWorkflow` class — states
+      per `CLAUDE.md`'s "Account closure" (`ACTIVE` →
+      `CLOSURE_REQUESTED` → `CLOSED`/back to `ACTIVE`), one
+      `submit_decision(actor_role, decision, actor_name, comment)`
+      signal plus a `cancel()` signal the customer can send while still
+      `CLOSURE_REQUESTED`. `workflow/service.py`:
+      `start_close_account_workflow(...)`,
+      `signal_close_account_decision(...)`,
+      `signal_close_account_cancel(...)`.
+      DoD: `tests/unit/workflow/test_workflows.py` covers the new
+      workflow via `WorkflowEnvironment` (time-skipping), same pattern
+      `LoanApplicationWorkflow`'s own tests already use — approve path,
+      reject-reverts-to-`ACTIVE` path, customer-cancel path — with fake
+      activities registered under the same string names
+      `CloseAccountWorkflow` calls by name (not import), so this task
+      doesn't depend on P18-4 existing first.
+- [ ] **P18-4** — `account/service.py`: `request_closure(account_id) ->
+      str` (workflow id) — calls `start_close_account_workflow`, same
+      `_wait_until`-style confirm-then-return pattern
+      `application/service.py`'s `create_application` already uses.
+      New `account/activities.py`: `persist_closure_request(account_id,
+      workflow_id)` and `persist_closure_decision(account_id, decision,
+      actor_name, comment)` — the latter writes `CLOSED` or reverts to
+      `ACTIVE`, writes the `closure_decided_*` columns, and calls
+      `notifications_service.send_account_closure_decision(...)` on
+      either outcome. Update `.importlinter`/`pyproject.toml` so
+      `account/` may now also import `workflow/` and `notifications/`
+      (the planned exception `CLAUDE.md`'s module-dependency-graph
+      section already documents).
+      DoD: `tests/unit/account/test_service.py` covers `request_closure`;
+      new `tests/unit/account/test_activities.py` covers
+      `persist_closure_request` and both of
+      `persist_closure_decision`'s outcomes (approve → `CLOSED` + email
+      sent; reject → reverts to `ACTIVE` + email sent), mocking
+      `workflow_service`/`notifications_service` at the function-call
+      boundary, same convention `application/activities.py`'s own tests
+      already follow. `lint-imports` green with `account/`'s widened
+      contract.
+- [ ] **P18-5** — `worker_main.py`: register a second `Worker` (or
+      extend `workflow/worker.py`'s `_build_workers`) for the new
+      account-closure task queue, wiring `account/activities.py`'s two
+      new activities plus `CloseAccountWorkflow`.
+      DoD: a unit test covers the new queue/workflow/activities being
+      registered under the existing `WORKER_MODE` split; integration-
+      verify: a live `worker_main.py` process can actually pick up and
+      run a `CloseAccountWorkflow` execution against a real local
+      Temporal server.
+- [ ] **P18-6** — `bff_backoffice/routes.py`: new closure-request queue
+      screen (e.g. `/ui/{underwriter,manager}/closures`), a decision
+      dialog with the staff attestation comment field plus
+      Approve/Reject calling `signal_close_account_decision`. Gated by
+      **role only** (`_role_dependency`), not a new Keycloak permission
+      scope — same reasoning the existing Consent-upload action already
+      uses.
+      DoD: covered consistently with however this project's existing
+      back-office routes are tested today (see P17-2's note on the
+      accepted route-level-testing gap for `bff_customer`; if
+      `bff_backoffice` has no route-level test file either, at minimum
+      the underlying service-layer decision logic gets unit tests the
+      way `application/service.py`'s decision paths already do); a
+      role-mismatch (e.g. neither `Underwriter` nor `Manager`) gets a
+      test.
+- [ ] **P18-7** — `bff_customer/routes.py`: a "Request account closure"
+      action on the account/application detail page (shown only once
+      `application.status == APPROVED` and the resolved account's own
+      `status == 'ACTIVE'`, reusing the existing `_owned_account`
+      ownership check the Consent-upload feature already built), calling
+      `account.service.request_closure(...)`. Shows the pending
+      request's status plus a Cancel-request action while
+      `CLOSURE_REQUESTED`.
+      DoD: covered the same way this project's existing customer-facing
+      decision actions (Cancel, Resubmit) are already tested.
+- [ ] **P18-8** — Live end-to-end verification against the real stack:
+      request a closure, approve it via a real Keycloak-authenticated
+      staff session, confirm the account flips to `CLOSED`, confirm the
+      fake/dev-only email fires, and confirm
+      `application.service.get_available_product_types` now re-offers
+      that product type in the picker again on the customer's next
+      visit — **the actual payoff this whole phase exists for**.
+      Separately verify the reject path (account reverts to `ACTIVE`, no
+      product type freed up) and the customer-cancel path. Full unit
+      suite and `lint-imports` both green. Update `CLAUDE.md`'s "Account
+      closure" section and `PRD.md` §6.6/§9.2/§11 from "planned" to
+      reflect built + live-verified status. Commit, push, confirm CI
+      green.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -3187,6 +3400,38 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-05 (Phase 17 built + Phase 18 planned)** — Live-tested the
+  existing active-account-per-product-type rule through the real
+  back-office/customer UIs (Approve blocked with a clear reason,
+  Reject/decision cycle unaffected, customer-side status in sync),
+  which surfaced the UX gap this session then fixed: the picker offered
+  product types the applicant was guaranteed to be rejected for.
+  Discussed the fix, confirmed three decisions with the user (hard
+  elimination, no override; back-office check stays as the backstop),
+  designed and built Phase 17 in one pass — `application.service.get_available_product_types`,
+  `bff_customer`'s picker filter + server-side re-check, the
+  empty-state template. Live-verified both the partial (one type still
+  offered) and full-elimination (empty-state message) cases against the
+  real stack; full unit suite (245) and `lint-imports` (8/8) green.
+  **Committed and pushed (`23a7136`)** — this Session Log entry and
+  Phase 17's own retroactive write-up above were both added in a later
+  pass within the same session, since the original commit only touched
+  code/tests plus `CLAUDE.md`/`PRD.md`, not this file.
+
+  Discussed the natural follow-up the user raised: a "close account"
+  feature, since Phase 17's hard elimination otherwise leaves no path
+  back for a customer who wants to apply for a product type again.
+  Confirmed three scoping decisions (staff attestation instead of a
+  real balance check; a narrow, one-decision-only exception to the
+  no-notification non-goal; reuse the existing Underwriter/Manager
+  roles, no new Keycloak config) via `AskUserQuestion` before designing
+  further. Wrote the full target design into `CLAUDE.md`'s new "Account
+  closure" section and `PRD.md`'s new §6.6 (plus updates to §4/§8.1/
+  §8.2/§9.2/§11), then added Phase 18's eight-task breakdown above.
+  **Explicit user instruction: documentation/planning only this
+  session — no Phase 18 code was written.** Next session starts at
+  P18-1 (`db/schema.sql`).
 
 - **2026-09-04 (docs consolidation)** — User asked to review the project
   and optimize `CLAUDE.md`, moving content out to `PRD.md`/`README.md`/

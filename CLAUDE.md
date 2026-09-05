@@ -114,6 +114,11 @@ arrow above would grow a second, parallel arrow to `idgen/`), not
 because the edge is unusual; it's the plainest possible leaf
 dependency, a pure function with zero I/O and zero state.
 
+**Planned, not yet built (Phase 18, "Account closure" below)**: a sixth
+leaf module, `notifications/`, same shape as `idgen/` — promoted out of
+`bff_customer/notifications.py` so `account/activities.py` can send an
+email from inside a Temporal activity without reaching into a BFF.
+
 Rules, in order of how often a shortcut will tempt someone to break
 them:
 
@@ -125,7 +130,12 @@ them:
   I/O, no other module's types, see next bullet) that depending on it
   doesn't compromise the "pure data module" claim this rule otherwise
   makes about these two — they still have zero business logic reaching
-  outside themselves.
+  outside themselves. **Planned exception, not yet built (see "Account
+  closure" below, Phase 18): once account closure ships, `account/`
+  gains two more justified exceptions — `workflow/` (to start/signal
+  `CloseAccountWorkflow`, the same role `application/` already has) and
+  a new shared `notifications/` leaf.** `customer/` stays exactly as
+  described here, unaffected.
 - **`idgen/` never imports anything else in this codebase either** —
   the plainest leaf in the graph, one pure function
   (`generate_id(prefix, length) -> str`, `secrets.choice` over the
@@ -550,6 +560,109 @@ re-uploading a Government ID they already have on file.
      transition, same as today; the no-op-vs-supersede behavior above
      lives entirely inside `document/service.py`.
 
+### Account closure (planned — Phase 18, not yet built)
+
+This section describes the target design for `IMPLEMENTATION_PLAN.md`'s
+Phase 18, written first per this project's own convention — **nothing
+in this section is implemented yet.** Raised directly by the user as
+the natural follow-up to the product-picker's hard elimination (see
+"Modules, in detail" → `application/`'s `get_available_product_types`):
+once that shipped, a customer approved for a product type can never
+apply for that type again, because nothing in this codebase can ever
+move an `accounts.status` row from `ACTIVE` back to `CLOSED`. Three
+scoping decisions were confirmed with the user before any design work
+below: (1) balance verification is a **staff attestation** (a comment
+field staff fills in confirming the balance is zero), not a real ledger
+computation — this POC has no ledger at all, consistent with PRD §4's
+disbursement/servicing non-goal; (2) the closure-decision email is a
+**narrow, deliberate reversal** of PRD §4's "no proactive notification"
+non-goal, scoped to this one decision only, not a general notification
+feature; (3) either the **existing `Underwriter` or `Manager` Keycloak
+role** may decide a closure request — no new Keycloak Resource/Scope/
+Policy/Permission, no escalation tier (there's no dollar amount to
+escalate on for a closure, unlike the loan-approval threshold).
+
+- **State machine — a third `accounts.status` value, not a separate
+  entity.** `ACTIVE` → (customer requests) → `CLOSURE_REQUESTED` →
+  (staff decides) → `CLOSED` (approved) or back to `ACTIVE` (rejected —
+  a closure request has no terminal "rejected" status of its own; the
+  account simply resumes being usable). The customer may also
+  `CANCEL` their own still-`CLOSURE_REQUESTED` request back to
+  `ACTIVE`, same shape as an application's existing Cancel action.
+  New nullable `accounts` columns: `closure_workflow_id`,
+  `closure_requested_at`, `closure_decision_comment` (the staff
+  attestation text), `closure_decided_by`, `closure_decided_at`. Only
+  the *current* request's data is kept — like `applications`' own
+  decision columns, a second request after a rejection overwrites these
+  rather than preserving history, an accepted POC-scale simplification
+  consistent with this project's existing stance elsewhere in this
+  file.
+- **A second Temporal workflow, `CloseAccountWorkflow`, in
+  `workflow/workflows.py` alongside `LoanApplicationWorkflow`** — same
+  "generic orchestration, concrete activities live in the owning domain
+  module" split `application/`/`workflow/` already established (see
+  "Breaking the application ↔ workflow cycle"). A single dedicated task
+  queue (`task_queue_for_account_closure()`, not product-type-keyed —
+  closure review doesn't vary by product the way underwriting does),
+  registered by `worker_main.py` alongside the existing per-product-type
+  workers.
+- **`account/` stops being a leaf module — a real, deliberate change to
+  the dependency graph, not an oversight.** Today's rule ("`customer/`
+  and `account/` never import anything else in this codebase, with one
+  exception: `idgen/`") gains a second exception for `account/` only:
+  `workflow/` (to start/signal `CloseAccountWorkflow`, exactly the same
+  justified exception `application/` already has) and the new shared
+  `notifications/` leaf (below). `customer/` is unaffected — it gains no
+  new responsibilities here. The concrete activities
+  (`persist_closure_request`, `persist_closure_decision` — the actual
+  `UPDATE accounts SET status = ...` and the email trigger) live in a
+  new `account/activities.py`, the same role `application/activities.py`
+  already plays; `account/service.py` gains `request_closure(account_id)`
+  (starts the workflow) plus whatever read/decision-signal wrappers
+  `bff_backoffice`/`bff_customer` need. `.importlinter`'s contract for
+  `account/` needs updating alongside this — not automatic just because
+  this file says so.
+- **A new shared leaf module, `notifications/`** (same "zero dependency
+  on anything else in this codebase" shape as `idgen/`) — promoted out
+  of `bff_customer/notifications.py`, which today is the only place
+  fake/dev-only email delivery exists, reachable only from a BFF's
+  synchronous HTTP request handler. `persist_closure_decision` needs to
+  send an email from inside a Temporal *activity* (the backend worker
+  process, not a BFF), and `account/activities.py` cannot reach into
+  `bff_customer` (wrong direction entirely — BFFs are consumers of
+  domain modules, never the reverse). Promoting the existing
+  `send_verification_code`-style fake delivery into its own leaf module
+  lets both `bff_customer`'s OTP flow and `account/activities.py`'s
+  closure-decision email share one mechanism instead of duplicating it.
+  Gains one new function, `send_account_closure_decision(applicant_identifier,
+  account_id, product_type, decision, comment)`, fake/dev-only exactly
+  like the existing OTP delivery (printed/logged, not a real provider —
+  same accepted POC limitation `bff_customer/notifications.py`'s
+  docstring already states, just no longer confined to that one file).
+- **Staff review surface**: a new `bff_backoffice` queue
+  (`/ui/{underwriter,manager}/closures` or similar), listing accounts at
+  `CLOSURE_REQUESTED`, a decision dialog with the staff attestation
+  comment field plus Approve/Reject, gated by **role only** (either
+  `Underwriter` or `Manager`), not a new Keycloak permission scope —
+  same reasoning the existing Consent-upload action already uses
+  ("this isn't one of the five decision scopes, it's a supplementary
+  action available to anyone who can see the account at all").
+- **Customer-facing trigger**: a "Request account closure" action on
+  `bff_customer`'s account/application detail page, shown only once
+  `application.status == APPROVED` and the resolved account's own
+  `status == 'ACTIVE'` (reusing the existing `_owned_account` ownership
+  check the Consent-upload feature already built) — hidden entirely
+  once a request is already pending or the account is already `CLOSED`.
+  A pending request shows its own status plus a Cancel action.
+- **The payoff this exists for**: once `persist_closure_decision`
+  writes `CLOSED`, `account.service.has_active_account_of_type` (and
+  therefore `application.service.get_available_product_types`) stops
+  counting this account at all — the product picker automatically
+  re-offers that product type on the customer's very next visit, with
+  no change needed to either of those two functions. This is the "path
+  back" PRD §11 flagged as missing when the picker's hard elimination
+  first shipped.
+
 ## Modules, in detail
 
 ### 1. `bff_customer/` — Customer BFF
@@ -851,6 +964,12 @@ doubles as `persist_decision`'s idempotency guard).
   a BFF (mirrors `customer.service.find_by_identifier`'s role: a
   read-only check `application/service.py` is allowed to make).
 - `service.get(account_id) -> Account`.
+- **Planned, not yet built (Phase 18)**: `service.request_closure(account_id)`
+  (starts `CloseAccountWorkflow`), plus decision-signal wrappers for
+  `bff_backoffice`'s closure-review screen, and `account/activities.py`
+  (`persist_closure_request`, `persist_closure_decision`). This is what
+  ends `account/`'s current status as a pure leaf module — see "Account
+  closure" above for the full design and why.
 
 ### 5. `application/` — Application module
 
@@ -1902,6 +2021,9 @@ loan-onboarding-poc/
     │   └── db.py               # the ONLY code touching the `customers` table
     ├── account/
     │   ├── service.py
+    │   ├── activities.py        # PLANNED (Phase 18, not yet built) --
+    │   │                        # concrete CloseAccountWorkflow activities,
+    │   │                        # see "Account closure"
     │   ├── models.py
     │   └── db.py               # the ONLY code touching the `accounts` table
     ├── application/
@@ -1921,11 +2043,14 @@ loan-onboarding-poc/
     │   │                        # imports nothing from application/
     │   ├── task_queues.py
     │   └── service.py
-    └── idgen/
-        └── service.py           # generate_id(prefix, length) -- the only
-                                  # function in this module, zero I/O, zero
-                                  # state; every module that assigns a
-                                  # primary key imports this one
+    ├── idgen/
+    │   └── service.py           # generate_id(prefix, length) -- the only
+    │                             # function in this module, zero I/O, zero
+    │                             # state; every module that assigns a
+    │                             # primary key imports this one
+    └── notifications/           # PLANNED (Phase 18, not yet built) --
+        └── service.py           # promoted out of bff_customer/notifications.py,
+                                  # see "Account closure"
 ```
 
 Every module imports every other module it's allowed to by its full

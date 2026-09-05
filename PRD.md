@@ -125,7 +125,11 @@ scoped to exactly what they're responsible for.
   `REJECTED` / `CANCELLED`. Funding, repayment schedules, and servicing
   are not modeled.
 - **Push/SMS/email notifications.** Status changes are visible only when
-  the customer opens the app; no proactive notification.
+  the customer opens the app; no proactive notification. **One planned,
+  deliberately narrow exception (§6.6, not yet built)**: the decision on
+  an account-closure request gets emailed (fake/dev-only delivery, same
+  mechanism §7.1's OTP code already uses) — every other status change in
+  this POC stays notification-free as described here.
 - **Multi-tenancy.** Single organization, single Mayan instance, single
   Postgres/Temporal namespace.
 - **Production-grade security hardening.** This is a local
@@ -270,6 +274,44 @@ terminal `APPROVED` (§6.2, §9.2):
   from the review dialog once the application is `APPROVED` — both
   write to the same underlying document, versioned either way.
 
+### 6.6 Account closure (planned — not yet built, see `IMPLEMENTATION_PLAN.md` Phase 18)
+
+Raised directly by the user as the necessary follow-up to §8.1's
+product-picker change: once that picker hard-eliminates a product type
+the customer already holds an `ACTIVE` account for, there needs to be a
+way back — otherwise a customer approved once for, say, a personal
+loan can never apply for another one again, even long after the
+real-world loan is paid off.
+
+- **Customer-initiated, staff-decided, single-stage** — no escalation
+  tier (there's no dollar amount to escalate on for a closure, unlike
+  §6.3's approval threshold). A customer requests closure of one of
+  their own `ACTIVE` accounts from the account/application detail page;
+  either an Underwriter or a Manager may decide it — no new role.
+- **States**: `ACTIVE` → (customer requests) → `CLOSURE_REQUESTED` →
+  (staff decides) → `CLOSED`, or back to `ACTIVE` if rejected (a
+  rejected closure request isn't a terminal state for the account — it
+  simply resumes being usable). The customer may also cancel their own
+  still-pending request, same as an application's existing Cancel
+  action.
+- **Balance verification is a staff attestation, not a real
+  computation.** This POC has no ledger anywhere (§4's disbursement/
+  servicing non-goal) — staff confirms in a comment field that the
+  outstanding balance is zero before approving; nothing in the system
+  computes or checks a real number. Confirmed with the user as
+  acceptable for this POC, same "manual step instead of a live
+  integration" precedent §6.4's document gate already sets for
+  KYC/credit checks.
+- **The customer gets an email on the decision** — approved or
+  rejected — using the same fake/dev-only delivery mechanism §7.1's
+  verification code already uses (no real email provider in this POC).
+  This is a deliberate, narrow exception to §4's "no proactive
+  notification" non-goal, scoped to this one decision only.
+- **The actual payoff**: once an account reaches `CLOSED`, §9.2's
+  active-account rule no longer counts it, so §8.1's product picker
+  automatically re-offers that product type again on the customer's
+  next visit — no change needed to the picker itself.
+
 ## 7. Identity: customer side unauthenticated, back office real Keycloak
 
 The two sides of this app have deliberately different identity models —
@@ -402,6 +444,11 @@ the concrete Resource/Scope/Policy layout and Docker Compose wiring.
   (submitted → under review → [escalated] → decision), the ability to
   add documents/edit fields and resubmit when in `MORE_INFO_REQUESTED`,
   and a Cancel action while non-terminal.
+- **(Planned, §6.6, not yet built)**: once `APPROVED`, a "Request account
+  closure" action, shown only while the resulting account is `ACTIVE`.
+  While a request is pending, the page shows its status instead, with a
+  Cancel-request option; once decided, the page reflects `CLOSED` (or
+  reverts to showing the normal `ACTIVE` account state if rejected).
 
 Design constraints: single-column layout, large touch targets, no
 hover-only affordances, `<input type="file" capture>` for camera
@@ -445,6 +492,15 @@ screen design:
 - Decision buttons (single-item and bulk) only render for a logged-in
   session that actually holds the corresponding Keycloak permission
   (§7.2) — enforced server-side regardless of what the UI shows.
+- **(Planned, §6.6, not yet built)**: a closure-request queue, same
+  paginated/row-click-to-detail shape as the existing Underwriter/
+  Manager queues, listing accounts at `CLOSURE_REQUESTED`. The decision
+  dialog has a staff attestation comment field ("confirm balance is
+  $0") plus Approve/Reject. **Gated by role only** (either `Underwriter`
+  or `Manager`), not a new Keycloak permission scope — same reasoning
+  §6.5's Consent-upload action already uses: this isn't one of the
+  existing decision scopes, it's a supplementary action available to
+  any staff member who can see the account at all.
 
 ## 9. Data model
 
@@ -502,7 +558,8 @@ exactly the trust signal that makes "current" worth updating. See
 | `customer_id` | reference to the owning customer (resolved via a `service.py` function call, not a database join or foreign key — see `CLAUDE.md`'s "Data storage") |
 | `application_id` | **`NOT NULL`, unique** — the application that produced this account. Corrected from an earlier draft, which put the pointer on `applications.account_id` instead; flipped so an account can always be traced back to its originating application, and so this column's own uniqueness constraint is what makes approval-provisioning idempotent under a Temporal retry (see `CLAUDE.md`'s "Applying without being a customer yet") |
 | `product_type` | `personal_loan` \| `auto_loan` \| `mortgage` — the product this account resulted from |
-| `opened_at`, `status` | `status` is `ACTIVE` \| `CLOSED` |
+| `opened_at`, `status` | `status` is `ACTIVE` \| `CLOSURE_REQUESTED` \| `CLOSED` — the middle value is **planned, not yet built** (§6.6) |
+| `closure_workflow_id`, `closure_requested_at`, `closure_decision_comment`, `closure_decided_by`, `closure_decided_at` | **planned, not yet built (§6.6)** — only the *current* closure request's data is kept; a later request after a rejection overwrites these, same "no history, most-recent-wins" precedent §9.1's customer-profile refresh already sets |
 
 **Not one account per customer.** A customer can hold multiple
 accounts over time — one per approved application. An account is
@@ -536,14 +593,13 @@ run through underwriting, and still gets caught at the Approve gate
 exactly as before, converted to a clean `REJECTED` rather than ever
 silently producing a second `ACTIVE` account of the same type.
 
-**Closing an account is a real, not-yet-built product gap this
-surfaces.** There is no "close account" operation anywhere in this
-codebase — once approved, an account stays `ACTIVE` forever. Combined
-with the picker's hard elimination above, this means a customer can
-never re-apply for a product type they were once approved for, even if
-the real-world loan has long since been paid off — there's no path
-back. See §11's open question for the product decision this still
-needs.
+**Closing an account was a real, not-yet-built product gap this
+surfaced — now designed (§6.6), not yet built.** There is still no
+"close account" operation anywhere in this codebase today — once
+approved, an account stays `ACTIVE` forever, until Phase 18 ships. See
+§6.6 for the full design (customer-initiated, staff-decided, single
+stage, staff-attestation balance check) and §11 for the confirmed
+scoping decisions behind it.
 
 ### 9.3 Application (owned by the Application module)
 
@@ -625,26 +681,23 @@ gets attached.
 
 ## 11. Open questions (for the implementer / reviewer to resolve early)
 
-- **Should there be a "close account" operation?** Raised directly by
-  the product owner after the §8.1/§9.2 picker change (the customer app
-  now hard-eliminates any product type the applicant already holds an
-  `ACTIVE` account for, with no override). Today that elimination is
-  permanent in practice — since nothing in this codebase can ever
-  transition an account from `ACTIVE` to `CLOSED`, a customer approved
-  once for a product type can never apply for that type again, even
-  long after the real-world loan would have been paid off. `accounts.status`
-  (§9.2) already has a `CLOSED` value in its domain and the partial
-  unique index is already scoped to `WHERE status = 'ACTIVE'`
-  specifically so a closed-and-reopened history is representable — the
-  schema anticipated this, the operation to drive it was just never
-  built. A real "close account" feature would need: who can trigger it
-  (staff-only via `bff_backoffice`? customer-initiated?), what if
-  anything happens to the account's documents/Consent record, and
-  whether closing should be its own decision needing an audit trail
-  (comment, actor, timestamp) the way Approve/Reject already do.
-  Deliberately not designed further here — flagged as a real gap to
-  resolve before the hard-elimination picker change ships anywhere
-  beyond this POC, not designed or built as part of it.
+- **Should there be a "close account" operation? — resolved: yes,
+  designed in §6.6, not yet built (`IMPLEMENTATION_PLAN.md` Phase 18).**
+  Raised directly by the product owner after the §8.1/§9.2 picker change
+  (the customer app now hard-eliminates any product type the applicant
+  already holds an `ACTIVE` account for, with no override) made this gap
+  concrete: without a way to close an account, a customer approved once
+  for a product type could never apply for that type again. Three
+  scoping decisions were confirmed before designing §6.6: **balance
+  verification is a staff attestation, not a real ledger computation**
+  (this POC has no ledger at all); **the closure-decision email is a
+  narrow, deliberate exception to §4's "no proactive notification"
+  non-goal**, scoped to this one decision only; and **either the
+  existing Underwriter or Manager role may decide it**, no new Keycloak
+  Resource/Scope/Policy/Permission, no escalation tier. Documents/Consent
+  records are left untouched by closure — out of scope, not addressed —
+  and closure does carry its own audit trail (comment, actor, timestamp,
+  §9.2's new `closure_*` columns), same as Approve/Reject already do.
 - **Should ID reuse (§6.5, §8.1) extend to resubmit, not just new
   applications?** Deliberately deferred in Phase 14 — a customer
   resubmitting from `MORE_INFO_REQUESTED` who never uploaded a
