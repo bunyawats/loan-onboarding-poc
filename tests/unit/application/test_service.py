@@ -554,6 +554,47 @@ async def test_check_decision_allowed_permits_when_no_conflicting_account_exists
 
 
 # ----------------------------------------------------------------------
+# get_available_product_types -- proactive UX filter for the picker
+# ----------------------------------------------------------------------
+
+async def test_get_available_product_types_all_for_new_applicant():
+    result = await service.get_available_product_types("brand-new-picker@example.com")
+    assert result == ["personal_loan", "auto_loan", "mortgage"]
+
+
+async def test_get_available_product_types_excludes_active_product_type():
+    customer = await customer_db.get_or_create("picker-conflict@example.com")
+    customer_id = customer["customer_id"]
+    await account_db.create(customer_id, "personal_loan", _fake_application_id())
+
+    result = await service.get_available_product_types("picker-conflict@example.com")
+    assert "personal_loan" not in result
+    assert "auto_loan" in result
+    assert "mortgage" in result
+
+
+async def test_get_available_product_types_includes_type_with_only_closed_account():
+    customer = await customer_db.get_or_create("picker-closed-ok@example.com")
+    customer_id = customer["customer_id"]
+    account = await account_db.create(customer_id, "personal_loan", _fake_application_id())
+    acct_pool = await account_db._get_pool()
+    await acct_pool.execute("UPDATE accounts SET status = 'CLOSED' WHERE account_id = $1", account["account_id"])
+
+    result = await service.get_available_product_types("picker-closed-ok@example.com")
+    assert result == ["personal_loan", "auto_loan", "mortgage"]
+
+
+async def test_get_available_product_types_empty_when_all_active():
+    customer = await customer_db.get_or_create("picker-all-active@example.com")
+    customer_id = customer["customer_id"]
+    for product_type in ("personal_loan", "auto_loan", "mortgage"):
+        await account_db.create(customer_id, product_type, _fake_application_id())
+
+    result = await service.get_available_product_types("picker-all-active@example.com")
+    assert result == []
+
+
+# ----------------------------------------------------------------------
 # check_decision_allowed_bulk -- closes the in-batch active-account race
 # ----------------------------------------------------------------------
 

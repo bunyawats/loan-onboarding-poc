@@ -31,7 +31,11 @@ from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.idgen import service as idgen_service
 from loan_onboarding.workflow import service as workflow_service
-from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
+from loan_onboarding.workflow.task_queues import (
+    DEFAULT_TEMPORAL_HOST,
+    DEFAULT_TEMPORAL_NAMESPACE,
+    KNOWN_PRODUCT_TYPES,
+)
 from loan_onboarding.workflow.workflows import DECISION_APPROVE
 
 # start_workflow()/handle.signal() only confirm Temporal *accepted* the
@@ -86,6 +90,36 @@ async def _wait_until(
         if time.monotonic() >= deadline:
             return record
         await asyncio.sleep(_CONFIRM_INTERVAL_S)
+
+
+async def get_available_product_types(applicant_identifier: str) -> list[str]:
+    """Which of `workflow.task_queues.KNOWN_PRODUCT_TYPES` this applicant
+    may still apply for -- the proactive half of PRD §9.2's
+    one-active-account-per-product-type rule, surfaced in
+    `bff_customer`'s product picker (PRD §8.1) instead of letting a
+    customer submit an application that's doomed to be rejected at
+    approval. A first-time applicant (no resolvable customer yet) may
+    always apply for any product type, since there's nothing yet to
+    conflict with.
+
+    **UX-only filter, not a new enforcement path** -- this reuses the
+    same `account_service.has_active_account_of_type` read
+    `check_decision_allowed` already relies on, so the two can never
+    disagree. The approval-time gate stays the sole authority: a
+    customer who bypasses this filter (a direct POST past the picker)
+    still gets caught there, converted to a clean `REJECTED` outcome on
+    approval rather than ever silently succeeding -- see
+    `check_decision_allowed`'s own docstring."""
+    customer = await customer_service.find_by_identifier(applicant_identifier)
+    if customer is None:
+        return list(KNOWN_PRODUCT_TYPES)
+
+    available: list[str] = []
+    for product_type in KNOWN_PRODUCT_TYPES:
+        has_active = await account_service.has_active_account_of_type(customer.customer_id, product_type)
+        if not has_active:
+            available.append(product_type)
+    return available
 
 
 async def create_application(

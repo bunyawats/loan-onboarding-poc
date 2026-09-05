@@ -5,6 +5,7 @@
 <h1 class="text-xl font-semibold mb-1">What are you applying for?</h1>
 <p class="text-sm text-gray-600 mb-6">Step 1 of 4</p>
 
+{% if products %}
 <div class="space-y-3">
   {% for product_type, label in products.items() %}
   <form method="post" action="/apply/new/start">
@@ -16,4 +17,8 @@
   </form>
   {% endfor %}
 </div>
+{% else %}
+<p class="text-sm text-gray-600">You already have an active account for every loan
+  product we offer, so there's nothing new to apply for right now.</p>
+{% endif %}
 {% endblock %}

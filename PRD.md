@@ -378,7 +378,18 @@ the concrete Resource/Scope/Policy layout and Docker Compose wiring.
   common + product-specific fields → upload required documents (camera
   capture for ID, file picker for statements/reports) → review & submit.
   Blocked (with a specific, actionable message) until required documents
-  are present. **(Phase 14, built)**: for a returning
+  are present. **(Built)**: the product-type picker is filtered to only
+  the types the applicant doesn't already hold an `ACTIVE` account for
+  (§9.2's rule) — a **hard elimination, no "apply anyway" override**. A
+  first-time applicant (no resolvable customer yet) sees all product
+  types; a returning customer already active in every product type sees
+  an explanatory message instead of a dead-end list. This moves the
+  active-account rejection from "discovered by staff during
+  underwriting" to "never offered as a choice" for the common case — see
+  `CLAUDE.md`'s `application.service.get_available_product_types` for
+  the mechanics, and the note below on why the back-office check
+  (§8.2) still stays in place as the authoritative backstop, not made
+  redundant by this. **(Phase 14, built)**: for a returning
   customer (identified by `applicant_identifier` already matching a
   `customers` row), the common fields (name/email/phone) are prefilled
   from their current profile, still editable — a correction made here
@@ -425,7 +436,12 @@ screen design:
 - **Approve can be refused with a reason**, same as the document gate:
   an application whose applicant already holds an active account of the
   same product type (§9.2) doesn't get signaled at all — the decision
-  form shows the conflict instead of submitting.
+  form shows the conflict instead of submitting. **This check stays in
+  place unconditionally**, even after §8.1's product-picker filter was
+  added on the customer side — it's the authoritative enforcement, not
+  a redundant leftover; the picker only stops the common case from
+  reaching this screen in the first place, it doesn't change what staff
+  can be asked to approve.
 - Decision buttons (single-item and bulk) only render for a logged-in
   session that actually holds the corresponding Keycloak permission
   (§7.2) — enforced server-side regardless of what the UI shows.
@@ -505,6 +521,29 @@ principle as §6.4's document gate. See `CLAUDE.md`'s "Applying without
 being a customer yet" for exactly where this check runs and its one
 accepted gap (a narrow race between two near-simultaneous approvals for
 the same customer and product type).
+
+**This same rule is now also checked proactively, at intake (§8.1),
+not just at approval.** The customer app's product picker hides any
+product type the applicant already holds an `ACTIVE` account for, so
+the common case never reaches underwriting as a doomed application in
+the first place. This is a UX layer only, not a second source of
+truth — it reuses the same read (`account.service.has_active_account_of_type`)
+the approval-time check already relies on, so the two can never
+disagree. **The approval-time check above remains the sole
+authoritative enforcement** — a customer who bypasses the picker (e.g.
+a direct POST past the UI) still has their application submitted and
+run through underwriting, and still gets caught at the Approve gate
+exactly as before, converted to a clean `REJECTED` rather than ever
+silently producing a second `ACTIVE` account of the same type.
+
+**Closing an account is a real, not-yet-built product gap this
+surfaces.** There is no "close account" operation anywhere in this
+codebase — once approved, an account stays `ACTIVE` forever. Combined
+with the picker's hard elimination above, this means a customer can
+never re-apply for a product type they were once approved for, even if
+the real-world loan has long since been paid off — there's no path
+back. See §11's open question for the product decision this still
+needs.
 
 ### 9.3 Application (owned by the Application module)
 
@@ -586,6 +625,26 @@ gets attached.
 
 ## 11. Open questions (for the implementer / reviewer to resolve early)
 
+- **Should there be a "close account" operation?** Raised directly by
+  the product owner after the §8.1/§9.2 picker change (the customer app
+  now hard-eliminates any product type the applicant already holds an
+  `ACTIVE` account for, with no override). Today that elimination is
+  permanent in practice — since nothing in this codebase can ever
+  transition an account from `ACTIVE` to `CLOSED`, a customer approved
+  once for a product type can never apply for that type again, even
+  long after the real-world loan would have been paid off. `accounts.status`
+  (§9.2) already has a `CLOSED` value in its domain and the partial
+  unique index is already scoped to `WHERE status = 'ACTIVE'`
+  specifically so a closed-and-reopened history is representable — the
+  schema anticipated this, the operation to drive it was just never
+  built. A real "close account" feature would need: who can trigger it
+  (staff-only via `bff_backoffice`? customer-initiated?), what if
+  anything happens to the account's documents/Consent record, and
+  whether closing should be its own decision needing an audit trail
+  (comment, actor, timestamp) the way Approve/Reject already do.
+  Deliberately not designed further here — flagged as a real gap to
+  resolve before the hard-elimination picker change ships anywhere
+  beyond this POC, not designed or built as part of it.
 - **Should ID reuse (§6.5, §8.1) extend to resubmit, not just new
   applications?** Deliberately deferred in Phase 14 — a customer
   resubmitting from `MORE_INFO_REQUESTED` who never uploaded a

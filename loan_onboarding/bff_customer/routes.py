@@ -530,7 +530,14 @@ def _validate_product_fields(product_type: str, fields: dict[str, str]) -> dict[
 
 @router.get("/new", response_class=HTMLResponse)
 async def new_application_picker(request: Request, applicant_identifier: str = Depends(_require_applicant)):
-    return templates.TemplateResponse(request, "new_product_picker.html", {"products": PRODUCT_LABELS})
+    """Only offers product types the applicant doesn't already hold an
+    active account for -- CLAUDE.md's proactive active-account UX rule,
+    a hard elimination with no "apply anyway" override. A customer
+    already active in every product type sees an empty picker with an
+    explanatory message instead of a dead-end list."""
+    available = await application_service.get_available_product_types(applicant_identifier)
+    products = {pt: label for pt, label in PRODUCT_LABELS.items() if pt in available}
+    return templates.TemplateResponse(request, "new_product_picker.html", {"products": products})
 
 
 @router.post("/new/start", response_class=RedirectResponse)
@@ -541,9 +548,21 @@ async def new_application_start(
     returning applicant's form is prefilled from their existing
     profile, still editable. `find_by_identifier` is read-only (the
     same call already used for "welcome back" copy elsewhere) -- a
-    brand-new applicant simply gets an empty draft, same as today."""
+    brand-new applicant simply gets an empty draft, same as today.
+
+    Re-checks `get_available_product_types` here too, not just in the
+    picker's own GET -- the picker only hides the option, it doesn't
+    stop a direct POST. The authoritative backstop stays
+    `check_decision_allowed`'s approval-time gate; this is a second,
+    earlier UX guard, not a replacement for it."""
     if product_type not in PRODUCT_FIELDS:
         raise HTTPException(status_code=400, detail=f"unknown product_type {product_type!r}")
+
+    available = await application_service.get_available_product_types(applicant_identifier)
+    if product_type not in available:
+        raise HTTPException(
+            status_code=400, detail=f"you already have an active {product_type} account"
+        )
 
     customer = await customer_service.find_by_identifier(applicant_identifier)
     fields = {}

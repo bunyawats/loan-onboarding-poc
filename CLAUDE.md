@@ -376,6 +376,34 @@ the *outcome* of an approved loan, not something that pre-exists it.**
   `REJECTED` outcome instead of a stuck application and a `FAILED`
   Temporal workflow — see "Known gaps" below for the full mechanism,
   the live repro, and why the window itself was left open on purpose.
+- **The same rule is now also enforced proactively, at intake, not just
+  at approval — a UX addition, not a second source of truth.**
+  `application.service.get_available_product_types(applicant_identifier)
+  -> list[str]` resolves the customer via the existing read-only
+  `find_by_identifier`, then filters `workflow.task_queues.KNOWN_PRODUCT_TYPES`
+  down to the ones `account.service.has_active_account_of_type(customer_id,
+  product_type)` returns `False` for — the exact same read
+  `check_decision_allowed` already relies on, so the two can never
+  disagree. A first-time applicant (no resolvable customer yet) gets
+  every product type back, since there's nothing yet to conflict with.
+  `bff_customer`'s product picker (`GET /apply/new`) calls this to
+  render only the eligible types — a **hard elimination, confirmed with
+  the user as deliberate: no "apply anyway" override.** A customer
+  already active in every product type sees an explanatory message
+  instead of an empty list. `POST /apply/new/start` re-runs the same
+  check server-side before accepting the submitted `product_type` — the
+  picker only hides the option, it doesn't stop a direct POST past it.
+  **`check_decision_allowed`'s approval-time gate is deliberately left
+  completely unchanged and un-simplified by this** — it remains the
+  sole authoritative enforcement; this new function only ever narrows
+  what the customer is *offered*, it never replaces the backstop that
+  catches a bypass. See `PRD.md` §8.1/§9.2 for the product framing and
+  §11 for the real gap this surfaced: there is still no way to ever
+  transition an `accounts.status` row from `ACTIVE` back to `CLOSED` in
+  this codebase, so combined with this hard elimination, a customer
+  approved once for a product type can now never apply for that type
+  again through the UI — raised directly by the user as a "close
+  account" feature worth designing, not designed or built here.
 - **Document upload/completeness-check at submission time never needs
   an `account_id`**, since no account can possibly exist before
   submission — `document.service.upload(...)` attaches
@@ -627,6 +655,19 @@ the domain modules' `service.py` functions.
   prefill+fresh-upload superseding the old copy on the third) — full
   sweep moved to `IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04
   docs-consolidation entry.
+- **Built**: the product picker (`GET /apply/new`) calls
+  `application.service.get_available_product_types(applicant_identifier)`
+  and renders only the product types it returns — a **hard
+  elimination** of any product type the applicant already holds an
+  `ACTIVE` account for, confirmed with the user as deliberate, with no
+  "apply anyway" override. Empty result (a customer active in every
+  product type) renders an explanatory message instead of an empty
+  list. `POST /apply/new/start` re-runs the same check before accepting
+  the submitted `product_type`, so a direct POST past the picker still
+  gets refused here — not just silently trusted because the UI happened
+  to hide the option. See "One customer, one active account per product
+  type" above for the full design and why `check_decision_allowed`'s
+  approval-time gate is unaffected by this.
 
 ### 2. `bff_backoffice/` — Back-Office BFF (the "LOS")
 
@@ -820,6 +861,14 @@ completeness gate, PRD §6.4) — the direct successor to
 application domain specifically now that other domains have their own
 modules.
 
+- `service.get_available_product_types(applicant_identifier) ->
+  list[str]` — **read-only**, the proactive half of the
+  one-active-account-per-product-type rule (PRD §9.2), called by
+  `bff_customer`'s product picker before `create_application` is ever
+  reached. See "One customer, one active account per product type"
+  above for the full design and why this is a UX filter layered on top
+  of `check_decision_allowed`'s approval-time gate, never a replacement
+  for it.
 - `service.create_application(applicant_identifier, product_type,
   payload, applicant_name, applicant_email, applicant_phone, amount,
   application_id=None)` — **no `customer_id`/`account_id` params** —
