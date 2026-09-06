@@ -2372,6 +2372,38 @@ entry, unless a more specific pointer is given.)*
   image and Mayan's live config directly before trusting a "clear test
   data and re-verify" pass to exercise current code. Full write-up: see
   this file's own "2026-09-04 (new session)" Session Log entry.
+- **This project has no schema migration tooling — `db/schema.sql`
+  changes only ever apply to a brand-new `db` volume (via
+  `db/init/01-init.sh`, first container start only), never to an
+  already-running one, and this bit for real after Phase 18.** Every
+  Phase 18 build/verify session deliberately tested against a separate
+  disposable `loan_onboarding_test` database specifically to avoid
+  touching the live stack's own `loan_onboarding` volume — but that
+  also meant the live volume's `accounts` table was never actually
+  migrated to add `CLOSURE_REQUESTED`/the five `closure_*` columns.
+  Rebuilding and restarting the `app`/`worker-*` containers with the
+  merged Phase 18 code (`docker compose up -d --build`) then made
+  *every* loan-application Approve/Reject fail outright — not just
+  account closure — because `account/activities.py`'s `persist_decision`
+  provisioning path unconditionally calls `Account.from_record()`
+  (`account/models.py`), which reads `record["closure_workflow_id"]`
+  unconditionally; a `RETURNING *` against the old, un-migrated table
+  simply doesn't have that key, so this raised `KeyError` inside a
+  Temporal activity, exhausted its retries, and failed the whole
+  workflow (same permanently-stuck-with-no-error-surfaced shape as this
+  file's other Temporal-activity-failure entries below). **Fixed by
+  hand-applying the same `ALTER TABLE` this file's schema section
+  already describes** (widen the `status` `CHECK`, add the five
+  nullable columns) directly against the live database — confirmed
+  correct against a subsequent real approval, which then provisioned an
+  account and rendered the "Request account closure" button correctly.
+  **The operating rule this confirms**: a schema change landing in
+  `db/schema.sql` is not "deployed" just because it's merged and the
+  images are rebuilt — an existing `db` volume needs either this same
+  manual `ALTER` or a full `docker compose down -v` (destroying all
+  data) before new code that assumes the new columns exist can run
+  safely against it. No tooling in this project currently detects or
+  prevents this mismatch.
 - **Reconciliation (`reconcile.py`) only detects and fixes drift — it
   never prevents it, and nothing runs it automatically.** It has to be
   invoked by a human or a scheduled job, neither of which this project

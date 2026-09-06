@@ -3838,6 +3838,114 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-06 (post-Phase-18: clear test data + full live E2E
+  re-verification)** — User asked to clear test data, then to verify
+  the app still works end to end, after Phase 18's build+push. Ran
+  `scripts/clear_e2e_data.py --yes` against the live stack (confirmed
+  first via `AskUserQuestion`, since it's a permanent, irreversible
+  wipe of Postgres/Temporal/Mayan) — cleared 11 applications/6
+  accounts/3 customers, 66 documents trashed + 69 purged; one transient
+  `Server disconnected` on the index-rebuild step, recovered by retrying
+  with a retry-tolerant script (Mayan itself was healthy throughout,
+  confirmed via direct `curl`).
+
+  Then rebuilt and restarted `app`/`worker-workflow`/`worker-activity`
+  (`docker compose up -d --build`) so the live containers actually run
+  the pushed Phase 18 code, and drove a real customer application
+  (Personal Loan, $10,000, four PDF documents) through a real Chrome
+  browser end to end: identify → verify → submit → real Keycloak login
+  as `underwriter1` → Approve. **Two real, unrelated incidents hit and
+  fixed along the way, both self-inflicted by this session's own
+  verification activity, not pre-existing bugs**:
+  1. **Postgres connection exhaustion** (`FATAL: sorry, too many
+     clients already`) from this session's accumulated one-off script
+     invocations across the whole Phase 18 build — turned the
+     in-flight Approve's `persist_decision` activity into a genuinely
+     `Failed` Temporal workflow (exact incident shape CLAUDE.md's
+     Testing section already documents). Fixed per that section's own
+     rule: restarted `db`, then `app`/`worker-workflow`/`worker-activity`
+     (their pools were sitting on now-invalid connections). `tctl
+     workflow delete` isn't supported in this Temporal CLI version, so
+     the stuck application row was deleted directly instead
+     (`DELETE FROM applications ...`) and its now-orphaned Mayan
+     documents cleaned up via `python -m loan_onboarding.reconcile
+     --fix` (confirming that script works correctly against a real
+     orphan condition, not just its own P15 test fixtures).
+  2. **A genuine, more consequential bug**: the *second* clean attempt
+     also failed — same `Failed` workflow shape, but a different root
+     cause this time: `KeyError: 'closure_workflow_id'` inside
+     `Account.from_record()`, because the *live* `loan_onboarding`
+     database's `accounts` table had never actually been migrated for
+     Phase 18 (every P18-1 through P18-8 build/verify session
+     deliberately used the separate disposable `loan_onboarding_test`
+     database instead, specifically to avoid touching live data — see
+     each of those sessions' own entries above). Once the rebuilt
+     containers ran Phase-18-aware code against the old, un-migrated
+     schema, `persist_decision`'s account-provisioning path broke for
+     *every* approval, not just account closure. Root-caused by reading
+     the real Temporal workflow history (`tctl workflow show`) rather
+     than guessing. **Fixed by hand-applying the same `ALTER TABLE`
+     `db/schema.sql` already specifies** directly against the live
+     database (widen `status`'s `CHECK`, add the five `closure_*`
+     columns) — confirmed via `\d accounts`. Also caught and fixed a
+     `docker exec` heredoc pitfall while diagnosing this: the first two
+     `ALTER TABLE` attempts silently no-opped (exit 0, no output, no
+     actual change) because `docker exec` without `-i` doesn't attach
+     stdin, so the heredoc SQL never reached the container's `psql` at
+     all.
+  3. Two leftover rows from the failed attempts needed manual cleanup
+     before the third, successful attempt could re-offer the same
+     product type: the second failure's `persist_decision` had already
+     committed a real `customers`/`accounts` INSERT *before* crashing
+     in `Account.from_record()` on the way back out (the idempotency
+     check `account_service.get_by_application_id` also calls
+     `from_record`, so even the retry attempts kept hitting the same
+     `KeyError` rather than detecting "already provisioned" and
+     skipping) — deleted that orphaned customer+account pair directly.
+
+  **Third attempt, after both fixes, succeeded completely**: submit →
+  real Keycloak-authenticated Approve → application reached `APPROVED`
+  with `underwriter_name` set → account provisioned (`ACTIVE`,
+  correct `customer_id`/`product_type`) → customer-facing detail page
+  showed the full green timeline, the Consent upload section, *and*
+  the Phase 18 "Request account closure" button — confirming the whole
+  P6→P18 chain works end to end against the real, now-correctly-migrated
+  live stack. Attempted to also click through the closure-request
+  action itself, but hit a real tooling limitation, not a product bug:
+  that button's `onsubmit` fires a native JS `confirm()`, which froze
+  the browser tab's renderer (blocks all further CDP commands per
+  `claude-in-chrome`'s own documented behavior) — recovered by closing
+  the tab at the browser-automation level (worked fine, since it
+  doesn't require the frozen page's own JS) rather than continuing to
+  fight it; the closure-request flow itself was already fully
+  live-verified end to end in P18-7/P18-8 against the disposable test
+  database, so this wasn't a gap in actual coverage, just an
+  unfinished belt-and-suspenders re-check against the live stack
+  specifically.
+
+  Cleaned up thoroughly throughout: every seeded/orphaned
+  customer/account/application row deleted from the live database,
+  `python -m loan_onboarding.reconcile --fix` run twice more to catch
+  every orphaned Mayan document (including, on the final successful
+  run, the customer-level Government ID copy and the Welcome Letter —
+  confirming the full P14/P16 document-lifecycle machinery also fired
+  correctly against the live, migrated schema), final state confirmed
+  clean (0 rows every table, 0 Mayan documents, sane Postgres
+  connection counts, all 11 containers `Up`/healthy). `CLAUDE.md`'s
+  Known Gaps gained a new entry for the schema-migration finding (#2
+  above) — a real, generally-applicable gap (this project has no
+  migration tooling at all), not specific to this one incident.
+
+  **What the next session should know**: the live `loan_onboarding`
+  database is now correctly migrated for Phase 18 and the app/worker
+  images are current — both loan applications and account closure work
+  end to end against it as of this entry. If a *future* schema change
+  lands in `db/schema.sql`, remember this incident: rebuilding images
+  alone does not migrate an existing `db` volume; apply the equivalent
+  `ALTER TABLE` (or `docker compose down -v`, destroying all data) by
+  hand first, the same way P18-1 verified `db/schema.sql` itself
+  against a scratch database but never touched the live volume.
+
 - **2026-09-06 (Phase 18 started, P18-1)** — Extended `db/schema.sql`'s
   `accounts` table per Phase 18's design: `status`'s `CHECK` now
   includes `'CLOSURE_REQUESTED'` alongside `ACTIVE`/`CLOSED`, plus five
