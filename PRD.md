@@ -132,11 +132,12 @@ scoped to exactly what they're responsible for.
   emailed at the same moment it's generated (account creation, on
   approval). Every other status change in this POC stays
   notification-free as described here. **Delivery for these two**
-  (planned, see `IMPLEMENTATION_PLAN.md` Phase 20): fake/dev-only by
-  default (same mechanism §7.1's OTP code always uses), with an
-  optional real path via Gmail SMTP when the operator configures an App
-  Password — still just these same two named moments, not a reopening
-  of the non-goal itself.
+  (built and live-verified, see `IMPLEMENTATION_PLAN.md` Phase 20):
+  fake/dev-only by default (same mechanism §7.1's OTP code always
+  uses), with an optional real path via Gmail SMTP when the operator
+  configures an App Password — still just these same two named moments,
+  not a reopening of the non-goal itself. §7.1's OTP code stays
+  fake-only regardless of SMTP configuration, deliberately.
 - **Multi-tenancy.** Single organization, single Mayan instance, single
   Postgres/Temporal namespace.
 - **Production-grade security hardening.** This is a local

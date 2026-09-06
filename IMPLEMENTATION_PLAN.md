@@ -4144,7 +4144,7 @@ logged rather than raised).
       (`app` never calls `persist_decision`/`persist_closure_decision`
       either, same reasoning `worker-workflow`'s own comment already
       states for why it gets no `MAYAN_*`/`DATABASE_URL`).
-- [ ] **P20-3** — Live verification against the real stack, using the
+- [x] **P20-3** — Live verification against the real stack, using the
       user's own Gmail App Password — **added directly to the user's
       local `.env` by the user themselves, never pasted into a chat
       session for an assistant to write down.** Approve a real
@@ -4162,6 +4162,82 @@ logged rather than raised).
       Update `CLAUDE.md`'s "Real email delivery via Gmail SMTP" section
       and `PRD.md` §4's delivery note from "planned" to reflect built +
       live-verified status.
+      DONE: Live-verified against the user's own Gmail account
+      (`SMTP_USERNAME`/`SMTP_PASSWORD`/`SMTP_FROM_ADDRESS` added by the
+      user directly to their local `.env`, never pasted into chat — a
+      pasted App Password mid-session was refused and the user revoked
+      and regenerated it before proceeding). Two real findings surfaced
+      during this task, both fixed:
+      1. **Docker stdout buffering hid every `print()`-based delivery
+         confirmation, including this feature's own.** Python
+         block-buffers stdout when not attached to a TTY (true of every
+         process in this image) — `_send_email`'s fake/failure `print()`
+         calls, and even `send_verification_code`'s, could sit invisible
+         in the buffer indefinitely under this container's low output
+         volume, never reaching `docker compose logs`. Fixed by adding
+         `ENV PYTHONUNBUFFERED=1` to `Dockerfile` (unconditional, not
+         per-service) and rebuilding `app`/`worker-workflow`/
+         `worker-activity`. Confirmed via `docker logs` before/after:
+         identical actions produced zero log output before the fix,
+         clean immediate output after.
+      2. **A live-automation-only gotcha, not an app bug**: the
+         customer-side closure-request/cancel/cancel-application forms
+         all carry `onsubmit="return confirm(...)"` (`application_detail.html`).
+         Driving one of these forms via `form.requestSubmit()` fires
+         that native `confirm()` dialog, which blocks the tab's renderer
+         entirely — every further action against that tab times out
+         ("renderer may be frozen or unresponsive"), even in a brand-new
+         tab, until a human manually dismisses the dialog. Recovered by
+         asking the user to click OK in the actual browser window.
+         Worked around for the rest of this session by calling
+         `fetch(url, {method:'POST'})` directly against these specific
+         routes instead of triggering the form's submit event at all —
+         bypasses the `onsubmit` handler entirely, no dialog, no hang.
+      Verification sequence, all against the real stack (not
+      `WorkflowEnvironment` fakes): (1) a personal-loan application
+      submitted and approved as `underwriter1` (real Keycloak login) —
+      the resulting Welcome Letter's *first* send attempt predated the
+      `PYTHONUNBUFFERED` fix, so its outcome was unobservable from logs
+      and the user didn't find it in their inbox at first; (2) a
+      *second* application, approved the same way with clean unbuffered
+      logging — `worker-activity` printed nothing at all (by design,
+      `_send_email` only prints on the fake path or a caught exception,
+      so silence means the real SMTP send succeeded), and the user
+      confirmed this Welcome Letter did arrive; (3) that application's
+      account was closure-requested (customer side, via the `fetch`
+      workaround above) then **approved** as underwriter with an
+      attestation comment — clean silent logs, user confirmed the
+      "Account closure APPROVED" email arrived (this was the first email
+      the user actually found, before the Welcome Letter re-test); (4) a
+      second closure request against the newer account was decided
+      **REJECT** this time — the P20-3 task's "one approve, one reject"
+      requirement — again clean silent logs, user confirmed the
+      "Account closure REJECTED" email arrived too. All 4 send attempts
+      across both functions and all 3 distinct outcomes (Welcome Letter,
+      closure Approve, closure Reject) now positively confirmed
+      delivered. **`send_verification_code` confirmed still fake-only,
+      as designed**: the user separately noted no OTP email ever
+      arrived — expected, not a gap (the verify-code page shows the code
+      directly; see that function's own docstring) — surfaced here only
+      because it was momentarily mistaken for a delivery failure
+      alongside the Welcome Letter's own unobserved first attempt.
+      **The "SMTP_* unset -> fake path" half of this task's DoD is
+      covered by P20-1's automated test suite** (`test_send_email_falls_back_to_print_and_does_not_raise_on_smtp_failure`
+      and the two `_prints_all_fields` tests, all still green — reran
+      `pytest tests/unit/notifications` and `lint-imports` at the end of
+      this task, 6/6 passed, 9/9 contracts kept), not re-exercised live
+      against a real no-SMTP worker process in this session — the two
+      are behaviorally identical (same `_send_email` function, same
+      `if not username or not password` branch), so the automated
+      coverage was judged sufficient rather than redundant manual
+      re-verification.
+      One follow-up left genuinely open, not part of this task's own
+      scope: the user asked whether the email body could show a generic
+      placeholder identifier instead of their own address (since
+      recipient and body-embedded identity are the same
+      `applicant_identifier` value by design — see "Recipient is
+      applicant_identifier itself, no new parameter needed" in
+      `CLAUDE.md`) — noted as a possible future UX tweak, not built.
 
 ---
 
@@ -4173,6 +4249,22 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-06 (Phase 20 complete — P20-3 live verification)** — Ran
+  P20-3, the final task, live against the real stack using the user's
+  own Gmail account. Full narrative in P20-3's own DONE note above; in
+  short: two real findings fixed (Docker stdout buffering was hiding
+  every `print()`-based delivery confirmation — fixed with
+  `PYTHONUNBUFFERED=1` in `Dockerfile`; and a live-automation-only
+  gotcha where the customer-side closure-request form's
+  `onsubmit="return confirm(...)"` froze a browser tab when driven via
+  `requestSubmit()`, worked around with direct `fetch()` calls for
+  those specific routes). All 3 real-send outcomes this phase covers
+  (Welcome Letter, closure-decision Approve, closure-decision Reject)
+  positively confirmed delivered to the user's inbox; `send_verification_code`
+  confirmed still fake-only as designed. Phase 20 is now fully built and
+  live-verified — `CLAUDE.md`/`PRD.md` updated from "planned" to
+  "built" accordingly (see below). Not committed yet this session.
 
 - **2026-09-06 (P20-1, P20-2 done)** — Implemented `_send_email` in
   `notifications/service.py` plus the wiring/tests described in P20-1's

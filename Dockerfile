@@ -1,5 +1,15 @@
 FROM python:3.12-slim
 
+# Python block-buffers stdout when it isn't attached to a TTY (true of
+# every process in this image) -- print()-based output (this project's
+# deliberate choice over the logging module, see notifications/service.py's
+# send_verification_code) can sit invisible in that buffer indefinitely
+# under low output volume, never reaching `docker compose logs` even
+# though the code ran. Found live in P20-3's own verification. Set
+# unconditionally, not per-service, since every process here relies on
+# print() being actually visible.
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY pyproject.toml .

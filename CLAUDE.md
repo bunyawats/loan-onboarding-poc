@@ -820,20 +820,58 @@ escalate on for a closure, unlike the loan-approval threshold).
   excluded (it reverted to `ACTIVE`, nothing freed up), matching the
   design exactly.
 
-### Real email delivery via Gmail SMTP (planned — Phase 20, not yet built)
+### Real email delivery via Gmail SMTP (built and live-verified — Phase 20)
 
-This section describes the target design for `IMPLEMENTATION_PLAN.md`'s
-Phase 20, written first per this project's own convention — **nothing
-in this section is implemented yet.** Raised directly by the user:
-`notifications/service.py`'s own docstring has said, since Phase 18,
-that fake `print()` delivery is "the one thing that would need to
-change (same signatures, real bodies) if a real provider is ever wired
-up" — this phase is that. The user has a Gmail account they can send
-from; the design below wires it in as an **optional** real delivery
-path, confirmed with the user as SMTP + a Gmail App Password (stdlib
-`smtplib`, zero new dependencies), not the Gmail API/OAuth2 (heavier
-setup — a Google Cloud project, an OAuth consent screen, token
+This section originally described the target design for
+`IMPLEMENTATION_PLAN.md`'s Phase 20, written first per this project's
+own convention, before any of it was implemented. **All three tasks
+(P20-1 through P20-3) are now built and live-verified against the real
+stack** — every "planned"/"not yet built" marker below that hasn't
+already been corrected in place describes a real implementation detail,
+not a future intention; see `IMPLEMENTATION_PLAN.md`'s own Phase 20
+section and Session Log for the full build history. Raised directly by
+the user: `notifications/service.py`'s own docstring had said, since
+Phase 18, that fake `print()` delivery is "the one thing that would
+need to change (same signatures, real bodies) if a real provider is
+ever wired up" — this phase is that. The user has a Gmail account they
+can send from; the design below wires it in as an **optional** real
+delivery path, confirmed with the user as SMTP + a Gmail App Password
+(stdlib `smtplib`, zero new dependencies), not the Gmail API/OAuth2
+(heavier setup — a Google Cloud project, an OAuth consent screen, token
 storage/refresh — out of proportion to what this POC needs).
+
+**Live-verified, P20-3**: against the real stack, using the user's own
+Gmail account (App Password added directly to the user's local `.env`,
+never pasted into chat — a pasted App Password mid-session was refused
+and the user revoked and regenerated it before proceeding, per this
+project's own credential-handling discipline). All 3 real-send outcomes
+this phase covers — Welcome Letter, closure-decision Approve, and
+closure-decision Reject — were positively confirmed delivered to the
+user's inbox across two real applications and two real closure
+decisions, driven through the actual browser UI with real Keycloak
+staff logins, not `WorkflowEnvironment` fakes. `send_verification_code`
+confirmed still fake-only, as designed (no OTP email ever arrives, by
+design — the verify-code page shows the code directly). Two real,
+previously-unknown gaps were found and fixed along the way:
+1. **Docker stdout buffering was hiding every `print()`-based delivery
+   confirmation in this codebase, not just this feature's.** Python
+   block-buffers stdout when it isn't attached to a TTY (true of every
+   process in this image), so `print()` output could sit invisible in
+   the buffer indefinitely under this container's low output volume,
+   never reaching `docker compose logs` even though the code ran.
+   Fixed by adding `ENV PYTHONUNBUFFERED=1` to `Dockerfile`
+   (unconditional, not per-service — every process here relies on
+   `print()` being actually visible, per `send_verification_code`'s own
+   deliberate print-not-logging design).
+2. **A live-browser-automation-only gotcha, not an app bug**: the
+   customer-side closure-request/cancel/cancel-application forms all
+   carry `onsubmit="return confirm(...)"` — programmatically calling
+   `form.requestSubmit()` on one of these fires that native `confirm()`
+   dialog, which blocks the browser tab's renderer entirely until a
+   human dismisses it. Recovered by asking the user to click OK in the
+   real browser window; worked around afterward by calling
+   `fetch(url, {method:'POST'})` directly against those specific routes
+   instead of triggering the form's submit event.
 
 - **Scoped to exactly the two functions the user named — `send_account_closure_decision`
   and `send_welcome_letter_email` — not `send_verification_code`.**
