@@ -130,9 +130,13 @@ scoped to exactly what they're responsible for.
   email — see `IMPLEMENTATION_PLAN.md` Phase 19): the decision on an
   account-closure request gets emailed, and the Welcome Letter gets
   emailed at the same moment it's generated (account creation, on
-  approval). Both use the same fake/dev-only delivery mechanism §7.1's
-  OTP code already uses — every other status change in this POC stays
-  notification-free as described here.
+  approval). Every other status change in this POC stays
+  notification-free as described here. **Delivery for these two**
+  (planned, see `IMPLEMENTATION_PLAN.md` Phase 20): fake/dev-only by
+  default (same mechanism §7.1's OTP code always uses), with an
+  optional real path via Gmail SMTP when the operator configures an App
+  Password — still just these same two named moments, not a reopening
+  of the non-goal itself.
 - **Multi-tenancy.** Single organization, single Mayan instance, single
   Postgres/Temporal namespace.
 - **Production-grade security hardening.** This is a local

@@ -220,6 +220,17 @@ services:
       MAYAN_BASE_URL: http://mayan:8000
       MAYAN_SERVICE_ACCOUNT_USERNAME: ${MAYAN_SERVICE_ACCOUNT_USERNAME:-admin}
       MAYAN_SERVICE_ACCOUNT_PASSWORD: ${MAYAN_SERVICE_ACCOUNT_PASSWORD:-changeme}
+      # P20-2: optional real email delivery (CLAUDE.md's "Real email
+      # delivery via Gmail SMTP") -- only this service calls
+      # persist_decision/persist_closure_decision, the two activities
+      # that send notifications/service.py's two email-sending calls.
+      # Left unset (the .env.example default), notifications/service.py
+      # falls through to its existing fake print()-only delivery.
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
     restart: on-failure
 
   # --- P12-3: the single web process (app.py mounts both bff_customer

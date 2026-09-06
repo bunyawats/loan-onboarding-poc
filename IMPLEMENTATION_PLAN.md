@@ -4024,6 +4024,147 @@ block).
 
 ---
 
+## Phase 20 — Real email delivery via Gmail SMTP
+
+This section describes the target design for this phase, written first
+per this project's own convention — **nothing in this section is
+implemented yet.** Raised directly by the user, who has a Gmail account
+they can send from: `notifications/service.py`'s own docstring has said,
+since Phase 18, that fake `print()` delivery is "the one thing that
+would need to change... if a real provider is ever wired up" — this
+phase is that, for the two functions that email at all
+(`send_account_closure_decision`, `send_welcome_letter_email`).
+`send_verification_code` (OTP) is deliberately untouched — see
+`CLAUDE.md`'s new "Real email delivery via Gmail SMTP" section for the
+full design and every confirmed scoping decision (opt-in via env vars,
+SMTP + Gmail App Password over the Gmail API/OAuth2, recipient =
+`applicant_identifier` with no new parameter, send failures caught and
+logged rather than raised).
+
+- [x] **P20-1** — `notifications/service.py`: new private
+      `_send_email(to_address, subject, body)` helper — checks
+      `SMTP_USERNAME`/`SMTP_PASSWORD` (both required for real sending);
+      if set, sends via `smtplib.SMTP(SMTP_HOST, SMTP_PORT)` +
+      `starttls()` + `login()` + `send_message()` (a plain-text
+      `email.message.EmailMessage`, `From` = `SMTP_FROM_ADDRESS` or
+      `SMTP_USERNAME`), the whole send wrapped in `try`/`except
+      Exception` — print a failure notice, never raise; if unset, falls
+      through to the module's existing `print(...)` behavior, byte-for-
+      byte unchanged. `send_account_closure_decision`/
+      `send_welcome_letter_email` call this helper instead of `print(...)`
+      directly (same message text as today, now framed as
+      subject/body); `send_verification_code` is not touched at all.
+      Zero new `pyproject.toml` dependencies (`smtplib`/`email` are
+      stdlib).
+      DoD: `tests/unit/notifications/test_service.py`'s existing two
+      tests keep passing unchanged with no `SMTP_*` env vars set
+      (confirming the fake-path fallback still works byte-for-byte).
+      Two new tests, using `monkeypatch.setenv` for the four `SMTP_*`
+      vars plus a mocked `smtplib.SMTP` (a fake context manager
+      recording `login`/`send_message` calls, no real network
+      connection ever attempted) — one per email-sending function,
+      asserting the right `to`/`subject`/body content and that no
+      `print(...)` fake-path output leaked through. A third new test:
+      `smtplib.SMTP` raises inside the mock, assert the call still
+      returns normally (doesn't raise) and that *something* is printed
+      (the failure notice) — proving the "never fail the caller" design
+      point for real, not just by inspection.
+      DONE: `_send_email(to_address, subject, body)` added to
+      `notifications/service.py`. **One design refinement beyond the
+      plan's literal wording**: the fake-path fallback string is built
+      as `f"{body} (POC: ...)"` inside `_send_email` itself, rather than
+      each caller pre-formatting its own full fake message and passing
+      that as `body` — `body` is deliberately the *clean*, real-email-
+      appropriate content only (no "(POC: no real email/SMS provider
+      configured...)" trailer baked in), since that trailer would be
+      actively wrong text to include in a genuinely-sent email. This
+      keeps the fake print output byte-for-byte identical to the
+      pre-Phase-20 text (verified by construction, not just by the
+      existing tests' substring checks) while the real email body stays
+      clean. `send_account_closure_decision`/`send_welcome_letter_email`
+      both call `_send_email` with a subject + clean body;
+      `send_verification_code` untouched, still a bare `print()`, still
+      documented inline as deliberately not using the logging module
+      (no logging config exists anywhere in this codebase, so
+      `logger.info()` would silently vanish at the default root
+      WARNING level — confirmed live in a prior session, see the
+      existing comment carried over from before this phase).
+      Tests: added a local `_no_smtp_env` autouse `monkeypatch.delenv`
+      fixture (clears all five `SMTP_*` vars before every test in this
+      file, guarding against a developer's own local `.env`/shell
+      leaking real values in) plus 3 new tests — one per email-sending
+      function's real-send path (mocked `smtplib.SMTP` context manager,
+      asserting `To`/`From`/`Subject`/body content and confirming the
+      "(POC: ...)" fake trailer does *not* appear in a real send), and
+      one asserting a mocked `smtplib.SMTP` raising `OSError` is caught,
+      never propagates, and prints a failure notice containing both the
+      recipient and the original exception text. All 3 original tests
+      pass unchanged. `pytest tests/unit/notifications -v`: 6/6 passed.
+      `lint-imports`: 9/9 contracts kept (unaffected — no import graph
+      change, `smtplib`/`email` are stdlib). Full `pytest tests/unit -q`
+      run also attempted from the host shell: pre-existing, unrelated
+      failures/errors in `tests/unit/customer`, `tests/unit/application`
+      (DB-backed tests) and `tests/unit/bff_backoffice/test_session_store.py`
+      (Redis-backed) — traced to the local `.env` holding Docker-internal
+      hostnames (`db`, `backoffice-redis`) that aren't reachable from the
+      host process directly (the compose stack publishes `db` on host
+      port `5433` and `backoffice-redis` on `6380`, per `CLAUDE.md`'s
+      "Data storage"/Compose sections) — not a regression from this
+      task; `tests/unit/notifications` itself needs neither service.
+- [x] **P20-2** — `.env.example`: new `SMTP_HOST` (default
+      `smtp.gmail.com`), `SMTP_PORT` (default `587`), and empty
+      placeholders for `SMTP_USERNAME`/`SMTP_PASSWORD`/`SMTP_FROM_ADDRESS`
+      (never a real credential — same "placeholder only" discipline
+      every other secret in this file already follows). `docker-compose.yml`'s
+      `worker-activity` service (only — the one process that actually
+      calls `persist_decision`/`persist_closure_decision`; `worker-workflow`
+      does no I/O and doesn't need these) gains the matching
+      `${SMTP_*:-default}` environment entries, same pattern `MAYAN_*`
+      already uses there.
+      DoD: `docker compose config` (or an equivalent local render) shows
+      the new vars correctly interpolated on `worker-activity` and
+      absent from `worker-workflow`; no code change needed here beyond
+      config (P20-1 already reads the env vars directly).
+      DONE: `.env.example` gained a new "SMTP" section (after Mayan) —
+      `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, empty
+      `SMTP_USERNAME`/`SMTP_PASSWORD`/`SMTP_FROM_ADDRESS` placeholders,
+      with inline comments explaining the App Password requirement, the
+      "never commit, never paste into chat" discipline, and that only
+      `worker-activity` reads these. `docker-compose.yml`'s
+      `worker-activity` service gained the matching 5-line
+      `${SMTP_*:-default}` block (SMTP_USERNAME/SMTP_PASSWORD/
+      SMTP_FROM_ADDRESS default to empty string, not a placeholder
+      value — an empty `SMTP_USERNAME`/`SMTP_PASSWORD` is exactly what
+      keeps `_send_email`'s fake-path fallback active). Verified via
+      `docker compose config`: all 5 `SMTP_*` vars render correctly on
+      `worker-activity` (`SMTP_HOST: smtp.gmail.com`, `SMTP_PORT: "587"`,
+      the other three `""`) and `grep -c SMTP` against the full rendered
+      config returns exactly 5 — confirming no other service (`app`,
+      `worker-workflow`) picked up any of them, matching the design
+      (`app` never calls `persist_decision`/`persist_closure_decision`
+      either, same reasoning `worker-workflow`'s own comment already
+      states for why it gets no `MAYAN_*`/`DATABASE_URL`).
+- [ ] **P20-3** — Live verification against the real stack, using the
+      user's own Gmail App Password — **added directly to the user's
+      local `.env` by the user themselves, never pasted into a chat
+      session for an assistant to write down.** Approve a real
+      application and separately decide a real account-closure request
+      (one approve, one reject — same two outcomes P18-8/P19-3 already
+      exercised), each time with `SMTP_USERNAME`/`SMTP_PASSWORD` set to
+      the user's Gmail account and the applicant identifier set to an
+      address the user can actually check (their own, per "simulate
+      sending"). Confirm a real email actually lands in that inbox for
+      both the Welcome Letter and the closure decision, with correct
+      subject/body content, and confirm the existing fake-path behavior
+      is untouched when `SMTP_*` is left unset (e.g. the OTP flow, and
+      a decision made against a worker process with no `SMTP_*`
+      configured). Full unit suite and `lint-imports` both green.
+      Update `CLAUDE.md`'s "Real email delivery via Gmail SMTP" section
+      and `PRD.md` §4's delivery note from "planned" to reflect built +
+      live-verified status.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -4032,6 +4173,45 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-06 (P20-1, P20-2 done)** — Implemented `_send_email` in
+  `notifications/service.py` plus the wiring/tests described in P20-1's
+  DONE note above. Unit tests and `lint-imports` green. Then wired the
+  five `SMTP_*` env vars into `.env.example` (placeholders only) and
+  `docker-compose.yml`'s `worker-activity` service only, verified via
+  `docker compose config` — see P20-2's DONE note above. P20-3 (live
+  Gmail verification, needs the user's own App Password added directly
+  to their local `.env`, never pasted into chat) remains. Not committed
+  yet this session.
+
+- **2026-09-06 (Phase 20 planned)** — User asked, having their own
+  Gmail account available to send from, whether this POC could use it
+  to simulate really sending the Welcome Letter and account-closure-
+  decision emails, instead of the current fake `print()` delivery.
+  Asked one genuinely open question via `AskUserQuestion` (SMTP + a
+  Gmail App Password vs. the Gmail API/OAuth2 — the two functionally
+  different ways to authenticate, materially different implementation
+  weight) — confirmed SMTP + App Password, matching this POC's existing
+  "keep it simple" philosophy (stdlib `smtplib`, zero new dependencies,
+  no OAuth consent flow to stand up). Wrote the full target design into
+  `CLAUDE.md` (a new "Real email delivery via Gmail SMTP" section) and
+  `PRD.md` (§4's notifications non-goal bullet gains a "delivery" note),
+  then added Phase 20's three-task breakdown above. Every other scoping
+  decision (opt-in via env vars so CI/tests never need real credentials;
+  scoped to exactly the two functions the user named, not
+  `send_verification_code`; recipient is the existing
+  `applicant_identifier` parameter, no new one needed; a send failure is
+  caught and logged, never allowed to fail the Temporal activity — the
+  exact same "retry skips it permanently" tradeoff P19-3 already
+  confirmed live for the sibling calls in these same provisioning
+  blocks) followed necessarily from the technical constraints already
+  documented elsewhere in this codebase, not additional open questions.
+  **Documentation/planning only this session — the assistant's own
+  judgment call, not a restated explicit instruction this time**,
+  following the same "design in CLAUDE.md/PRD.md before writing code"
+  convention Phases 18 and 19 both used. No code written this session.
+  Next session starts at P20-1 (`notifications/service.py`'s
+  `_send_email` helper).
 
 - **2026-09-06 (Phase 19 complete — P19-3 live verification)** — Ran
   P19-3, the final task, in a dedicated session. Full narrative in
