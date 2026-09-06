@@ -125,9 +125,9 @@ scoped to exactly what they're responsible for.
   `REJECTED` / `CANCELLED`. Funding, repayment schedules, and servicing
   are not modeled.
 - **Push/SMS/email notifications.** Status changes are visible only when
-  the customer opens the app; no proactive notification. **One planned,
-  deliberately narrow exception (§6.6, not yet built)**: the decision on
-  an account-closure request gets emailed (fake/dev-only delivery, same
+  the customer opens the app; no proactive notification. **One built,
+  deliberately narrow exception (§6.6)**: the decision on an
+  account-closure request gets emailed (fake/dev-only delivery, same
   mechanism §7.1's OTP code already uses) — every other status change in
   this POC stays notification-free as described here.
 - **Multi-tenancy.** Single organization, single Mayan instance, single
@@ -274,7 +274,7 @@ terminal `APPROVED` (§6.2, §9.2):
   from the review dialog once the application is `APPROVED` — both
   write to the same underlying document, versioned either way.
 
-### 6.6 Account closure (planned — not yet built, see `IMPLEMENTATION_PLAN.md` Phase 18)
+### 6.6 Account closure (built and live-verified, see `IMPLEMENTATION_PLAN.md` Phase 18)
 
 Raised directly by the user as the necessary follow-up to §8.1's
 product-picker change: once that picker hard-eliminates a product type
@@ -354,7 +354,8 @@ deployment of this POC as non-public** until a real provider replaces
 the fake one — the code being visible in the page response today would
 defeat the whole point outside a controlled demo/dev setting. Swapping
 in a real provider is meant to be a small, isolated change (one
-function, same signature, in `bff_customer/notifications.py`) plus
+function, same signature, in `notifications/service.py` — promoted
+there from `bff_customer/notifications.py` in Phase 18, P18-2) plus
 dropping the dev-mode code display, not a redesign of the flow itself.
 
 Also dropped: phone-number identifiers. The original design let a
@@ -444,11 +445,11 @@ the concrete Resource/Scope/Policy layout and Docker Compose wiring.
   (submitted → under review → [escalated] → decision), the ability to
   add documents/edit fields and resubmit when in `MORE_INFO_REQUESTED`,
   and a Cancel action while non-terminal.
-- **(Planned, §6.6, not yet built)**: once `APPROVED`, a "Request account
-  closure" action, shown only while the resulting account is `ACTIVE`.
-  While a request is pending, the page shows its status instead, with a
-  Cancel-request option; once decided, the page reflects `CLOSED` (or
-  reverts to showing the normal `ACTIVE` account state if rejected).
+- **(Built, §6.6)**: once `APPROVED`, a "Request account closure" action,
+  shown only while the resulting account is `ACTIVE`. While a request is
+  pending, the page shows its status instead, with a Cancel-request
+  option; once decided, the page reflects `CLOSED` (or reverts to
+  showing the normal `ACTIVE` account state if rejected).
 
 Design constraints: single-column layout, large touch targets, no
 hover-only affordances, `<input type="file" capture>` for camera
@@ -492,15 +493,20 @@ screen design:
 - Decision buttons (single-item and bulk) only render for a logged-in
   session that actually holds the corresponding Keycloak permission
   (§7.2) — enforced server-side regardless of what the UI shows.
-- **(Planned, §6.6, not yet built)**: a closure-request queue, same
-  paginated/row-click-to-detail shape as the existing Underwriter/
-  Manager queues, listing accounts at `CLOSURE_REQUESTED`. The decision
-  dialog has a staff attestation comment field ("confirm balance is
-  $0") plus Approve/Reject. **Gated by role only** (either `Underwriter`
-  or `Manager`), not a new Keycloak permission scope — same reasoning
-  §6.5's Consent-upload action already uses: this isn't one of the
-  existing decision scopes, it's a supplementary action available to
-  any staff member who can see the account at all.
+- **(Built, §6.6)**: a closure-request queue (`/ui/{underwriter,manager}/closures`),
+  listing every account at `CLOSURE_REQUESTED`. **Deliberately a
+  simpler shape than the existing Underwriter/Manager queues above, not
+  a match for it** — corrected during implementation: unpaginated (no
+  count-cache/`query_id` machinery) and no bulk actions, since closure
+  requests are expected to be rare enough at POC scale that a plain list
+  is the right-sized answer; each row is its own plain form (a staff
+  attestation comment field plus Approve/Reject submit buttons,
+  POST-redirect-GET rather than a dialog), not the row-click-to-detail
+  pattern the loan-application queues use. **Gated by role only**
+  (either `Underwriter` or `Manager`), not a new Keycloak permission
+  scope — same reasoning §6.5's Consent-upload action already uses: this
+  isn't one of the existing decision scopes, it's a supplementary action
+  available to any staff member who can see the account at all.
 
 ## 9. Data model
 
@@ -558,8 +564,8 @@ exactly the trust signal that makes "current" worth updating. See
 | `customer_id` | reference to the owning customer (resolved via a `service.py` function call, not a database join or foreign key — see `CLAUDE.md`'s "Data storage") |
 | `application_id` | **`NOT NULL`, unique** — the application that produced this account. Corrected from an earlier draft, which put the pointer on `applications.account_id` instead; flipped so an account can always be traced back to its originating application, and so this column's own uniqueness constraint is what makes approval-provisioning idempotent under a Temporal retry (see `CLAUDE.md`'s "Applying without being a customer yet") |
 | `product_type` | `personal_loan` \| `auto_loan` \| `mortgage` — the product this account resulted from |
-| `opened_at`, `status` | `status` is `ACTIVE` \| `CLOSURE_REQUESTED` \| `CLOSED` — the middle value is **planned, not yet built** (§6.6) |
-| `closure_workflow_id`, `closure_requested_at`, `closure_decision_comment`, `closure_decided_by`, `closure_decided_at` | **planned, not yet built (§6.6)** — only the *current* closure request's data is kept; a later request after a rejection overwrites these, same "no history, most-recent-wins" precedent §9.1's customer-profile refresh already sets |
+| `opened_at`, `status` | `status` is `ACTIVE` \| `CLOSURE_REQUESTED` \| `CLOSED` — the middle value is **built** (§6.6) |
+| `closure_workflow_id`, `closure_requested_at`, `closure_decision_comment`, `closure_decided_by`, `closure_decided_at` | **built (§6.6)** — only the *current* closure request's data is kept; a later request after a rejection overwrites these, same "no history, most-recent-wins" precedent §9.1's customer-profile refresh already sets |
 
 **Not one account per customer.** A customer can hold multiple
 accounts over time — one per approved application. An account is
@@ -593,13 +599,12 @@ run through underwriting, and still gets caught at the Approve gate
 exactly as before, converted to a clean `REJECTED` rather than ever
 silently producing a second `ACTIVE` account of the same type.
 
-**Closing an account was a real, not-yet-built product gap this
-surfaced — now designed (§6.6), not yet built.** There is still no
-"close account" operation anywhere in this codebase today — once
-approved, an account stays `ACTIVE` forever, until Phase 18 ships. See
-§6.6 for the full design (customer-initiated, staff-decided, single
-stage, staff-attestation balance check) and §11 for the confirmed
-scoping decisions behind it.
+**Closing an account was a real product gap this surfaced — designed
+and built (§6.6, Phase 18).** A customer can now request closure of
+their own `ACTIVE` account, and staff can approve (→ `CLOSED`) or
+reject (→ back to `ACTIVE`) it. See §6.6 for the full design
+(customer-initiated, staff-decided, single stage, staff-attestation
+balance check) and §11 for the confirmed scoping decisions behind it.
 
 ### 9.3 Application (owned by the Application module)
 
@@ -682,7 +687,8 @@ gets attached.
 ## 11. Open questions (for the implementer / reviewer to resolve early)
 
 - **Should there be a "close account" operation? — resolved: yes,
-  designed in §6.6, not yet built (`IMPLEMENTATION_PLAN.md` Phase 18).**
+  designed and built in §6.6 (`IMPLEMENTATION_PLAN.md` Phase 18,
+  live-verified against the real stack).**
   Raised directly by the product owner after the §8.1/§9.2 picker change
   (the customer app now hard-eliminates any product type the applicant
   already holds an `ACTIVE` account for, with no override) made this gap

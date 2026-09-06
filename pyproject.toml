@@ -49,12 +49,25 @@ root_packages = ["loan_onboarding"]
 [[tool.importlinter.contracts]]
 name = "Overall layering (leaves -> application -> BFFs -> composition roots)"
 type = "layers"
+# P18-4 split account/ out of the "customer | account | document |
+# workflow" bar and below workflow/ -- account/ now imports workflow/
+# (to start/signal CloseAccountWorkflow, CLAUDE.md's "Account closure")
+# and a `layers` contract enforces sibling independence between modules
+# sharing one "|" bar, so account/ importing a same-bar sibling
+# (workflow/) would have broken this contract even though the module-
+# specific forbidden contracts below both already allow it. customer/
+# and document/ still don't depend on workflow/ or account/, so they
+# stay paired above both. workflow/ itself imports nothing internal
+# (see its own forbidden contract), so it needs no layer below it
+# except the shared leaves.
 layers = [
     "(app) | worker_main | reconcile",
     "bff_customer | bff_backoffice",
     "application",
-    "customer | account | document | workflow",
-    "idgen",
+    "customer | document",
+    "account",
+    "workflow",
+    "idgen | notifications",
 ]
 containers = ["loan_onboarding"]
 
@@ -74,13 +87,20 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "account/ never imports anything else in this codebase"
+name = "account/ never imports anything else in this codebase, except workflow/ and notifications/ (Phase 18)"
 type = "forbidden"
+# P18-4: account/ gained two justified exceptions -- workflow/ (to
+# start/signal CloseAccountWorkflow, the same role application/ already
+# has) and notifications/ (the closure-decision email) -- see CLAUDE.md's
+# "Account closure" and module-dependency-graph sections. customer/
+# stays fully forbidden: account/ still doesn't resolve
+# customer_id -> applicant_identifier itself (see
+# account/service.py's request_closure() docstring for why that value
+# is threaded through as an opaque parameter instead).
 source_modules = ["loan_onboarding.account"]
 forbidden_modules = [
     "loan_onboarding.customer",
     "loan_onboarding.document",
-    "loan_onboarding.workflow",
     "loan_onboarding.application",
     "loan_onboarding.bff_customer",
     "loan_onboarding.bff_backoffice",
@@ -92,6 +112,22 @@ forbidden_modules = [
 name = "idgen/ never imports anything else in this codebase"
 type = "forbidden"
 source_modules = ["loan_onboarding.idgen"]
+forbidden_modules = [
+    "loan_onboarding.customer",
+    "loan_onboarding.account",
+    "loan_onboarding.document",
+    "loan_onboarding.workflow",
+    "loan_onboarding.application",
+    "loan_onboarding.bff_customer",
+    "loan_onboarding.bff_backoffice",
+    "loan_onboarding.worker_main",
+    "loan_onboarding.reconcile",
+]
+
+[[tool.importlinter.contracts]]
+name = "notifications/ never imports anything else in this codebase"
+type = "forbidden"
+source_modules = ["loan_onboarding.notifications"]
 forbidden_modules = [
     "loan_onboarding.customer",
     "loan_onboarding.account",

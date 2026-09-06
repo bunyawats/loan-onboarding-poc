@@ -34,3 +34,11 @@ DEFAULT_TEMPORAL_NAMESPACE = "default"
 
 def task_queue_for_product_type(product_type: str) -> str:
     return f"loan-onboarding-{product_type}-task-queue"
+
+
+# Account closure (Phase 18, "Account closure" -- see CLAUDE.md) is a
+# single, non-product-type-keyed queue -- unlike loan underwriting,
+# closure review doesn't vary by product, so there's no per-product_type
+# fan-out the way task_queue_for_product_type() needs.
+def task_queue_for_account_closure() -> str:
+    return "loan-onboarding-account-closure-task-queue"

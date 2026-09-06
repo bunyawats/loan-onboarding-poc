@@ -20,13 +20,27 @@ from typing import Any, Optional
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from loan_onboarding.workflow.task_queues import task_queue_for_product_type
+from loan_onboarding.workflow.task_queues import (
+    task_queue_for_account_closure,
+    task_queue_for_product_type,
+)
 from loan_onboarding.workflow.workflows import (
+    DECISION_APPROVE,
+    DECISION_REJECT,
+    ROLE_MANAGER,
+    ROLE_UNDERWRITER,
     VALID_ACTOR_ROLES,
     VALID_DECISIONS,
     ApplicationWorkflowInput,
+    CloseAccountWorkflow,
+    CloseAccountWorkflowInput,
     LoanApplicationWorkflow,
 )
+
+# Only Underwriter/Manager decide a closure request -- the customer's
+# own path is signal_close_account_cancel(), not this validation set.
+_VALID_CLOSURE_ACTOR_ROLES = (ROLE_UNDERWRITER, ROLE_MANAGER)
+_VALID_CLOSURE_DECISIONS = (DECISION_APPROVE, DECISION_REJECT)
 
 
 def _workflow_id_for_application(application_id: str) -> str:
@@ -170,3 +184,75 @@ async def bulk_signal_decision(
             return BulkActionResult(wf_id, False, str(e))
 
     return list(await asyncio.gather(*(_one(wid) for wid in ids)))
+
+
+# ----------------------------------------------------------------------
+# CloseAccountWorkflow (Phase 18, "Account closure" -- see CLAUDE.md).
+# ----------------------------------------------------------------------
+
+
+def _workflow_id_for_account_closure(account_id: str) -> str:
+    """Deterministic, not a fresh uuid per call -- deliberately, same
+    reasoning as _workflow_id_for_application. A later closure request
+    against the same account always starts after the prior
+    CloseAccountWorkflow execution has already reached a terminal state
+    (account/service.request_closure() is only reachable while the
+    account is ACTIVE -- see CLAUDE.md), so there's never a live
+    execution under this id for a new start_workflow call to collide
+    with; Temporal's default WorkflowIDReusePolicy (AllowDuplicate)
+    permits starting a new execution once the previous one has closed.
+    """
+    return f"account-closure-{account_id}"
+
+
+async def start_close_account_workflow(
+    client: Client, account_id: str, applicant_identifier: str
+) -> str:
+    """Called only by account.service.request_closure(...).
+    `applicant_identifier` is an opaque pass-through -- see
+    CloseAccountWorkflowInput's own docstring for why account/ threads it
+    through here instead of resolving it from customer_id itself. Only
+    confirms Temporal *accepted* the start -- same "accepted != applied"
+    caveat start_workflow's own docstring states; a caller that needs to
+    know persist_closure_request has actually committed polls for that
+    itself, the same _wait_until()-style pattern
+    application.service.create_application already uses."""
+    wf_id = _workflow_id_for_account_closure(account_id)
+    await client.start_workflow(
+        CloseAccountWorkflow.run,
+        CloseAccountWorkflowInput(account_id=account_id, applicant_identifier=applicant_identifier),
+        id=wf_id,
+        task_queue=task_queue_for_account_closure(),
+    )
+    return wf_id
+
+
+async def signal_close_account_decision(
+    client: Client,
+    workflow_id: str,
+    actor_role: str,
+    decision: str,
+    actor_name: str,
+    comment: str = "",
+) -> None:
+    """Called by bff_backoffice's closure-review screen -- actor_role in
+    {"underwriter", "manager"} only (no escalation tier for closure, see
+    CLAUDE.md's "Account closure"); the customer's own decision path is
+    signal_close_account_cancel() below, not this function."""
+    if actor_role not in _VALID_CLOSURE_ACTOR_ROLES:
+        raise ValueError(f"actor_role must be one of {_VALID_CLOSURE_ACTOR_ROLES}")
+    if decision not in _VALID_CLOSURE_DECISIONS:
+        raise ValueError(f"decision must be one of {_VALID_CLOSURE_DECISIONS}")
+    handle = client.get_workflow_handle(workflow_id)
+    await handle.signal(
+        CloseAccountWorkflow.submit_decision,
+        args=[actor_role, decision, actor_name, comment],
+    )
+
+
+async def signal_close_account_cancel(client: Client, workflow_id: str) -> None:
+    """Called only by bff_customer, while the customer's own closure
+    request is still pending -- CloseAccountWorkflow.cancel() itself is
+    a no-op once the request has already been decided."""
+    handle = client.get_workflow_handle(workflow_id)
+    await handle.signal(CloseAccountWorkflow.cancel)

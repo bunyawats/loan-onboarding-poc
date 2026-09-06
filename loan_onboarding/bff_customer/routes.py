@@ -34,12 +34,13 @@ from loan_onboarding.account.models import Account
 from loan_onboarding.application import schemas as application_schemas
 from loan_onboarding.application import service as application_service
 from loan_onboarding.application.models import Application, ApplicationNotFound
-from loan_onboarding.bff_customer import identity, notifications
+from loan_onboarding.bff_customer import identity
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.document.models import DocumentStream, UploadedFile
 from loan_onboarding.document.service import CATEGORY_CONSENT, CATEGORY_GOVERNMENT_ID
 from loan_onboarding.idgen import service as idgen_service
+from loan_onboarding.notifications import service as notifications_service
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
 from loan_onboarding.workflow.workflows import (
@@ -188,7 +189,7 @@ async def identify_submit(request: Request, applicant_identifier: str = Form(...
     """Starts email verification -- does NOT set the real session cookie
     directly anymore (see `identity.py`'s module docstring for the gap
     this closes). Generates a fresh code, "sends" it (fake delivery,
-    `notifications.py`), and stashes its hash in a short-lived pending-
+    `notifications/service.py`), and stashes its hash in a short-lived pending-
     verification cookie; the applicant has to prove they received it,
     via `identify_verify` below, before `set_applicant_identifier` is
     ever called."""
@@ -199,7 +200,7 @@ async def identify_submit(request: Request, applicant_identifier: str = Form(...
         )
 
     code = identity.generate_verification_code()
-    notifications.send_verification_code(applicant_identifier, code)
+    notifications_service.send_verification_code(applicant_identifier, code)
 
     response = templates.TemplateResponse(
         request,
@@ -207,8 +208,8 @@ async def identify_submit(request: Request, applicant_identifier: str = Form(...
         {
             "applicant_identifier": applicant_identifier,
             # Shown only because delivery is fake for this POC -- see
-            # notifications.py's docstring. A real provider integration
-            # would drop this entirely.
+            # notifications/service.py's docstring. A real provider
+            # integration would drop this entirely.
             "dev_code": code,
         },
     )
@@ -503,6 +504,39 @@ async def consent_document_preview(
     except document_service.DocumentNotFound:
         raise HTTPException(status_code=404)
     return _stream_response(stream)
+
+
+# ------------------------------------------------------- account closure ----
+# Phase 18, P18-7 -- see CLAUDE.md's "Account closure". Reuses
+# _owned_account (built for Consent upload above) for ownership +
+# APPROVED-application + account-exists checks; the account's own
+# `status` is what actually gates which of the two actions below applies
+# -- "the UI hides it, the route still enforces it" discipline, same as
+# every other decision route in this codebase, since a customer with two
+# open tabs could otherwise double-submit against a stale page.
+
+@router.post("/applications/{application_id}/closure/request", response_class=RedirectResponse)
+async def request_account_closure(
+    request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
+):
+    _, account = await _owned_account(application_id, applicant_identifier)
+    if account.status != "ACTIVE":
+        raise HTTPException(status_code=400, detail="account is not ACTIVE, cannot request closure")
+    await account_service.request_closure(account.account_id, applicant_identifier)
+    return RedirectResponse(url=f"/apply/applications/{application_id}", status_code=303)
+
+
+@router.post("/applications/{application_id}/closure/cancel", response_class=RedirectResponse)
+async def cancel_account_closure(
+    request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
+):
+    _, account = await _owned_account(application_id, applicant_identifier)
+    if account.status != "CLOSURE_REQUESTED" or account.closure_workflow_id is None:
+        raise HTTPException(status_code=400, detail="account has no pending closure request")
+    client = await _get_temporal_client()
+    await workflow_service.signal_close_account_cancel(client, account.closure_workflow_id)
+    await account_service.wait_for_status_change(account.account_id, account.status)
+    return RedirectResponse(url=f"/apply/applications/{application_id}", status_code=303)
 
 
 # --------------------------------------------------------- new application ----

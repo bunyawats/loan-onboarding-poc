@@ -33,8 +33,13 @@ from loan_onboarding.workflow.workflows import (
     MANAGER_ESCALATION_THRESHOLD_USD,
     ApplicationStatus,
     ApplicationWorkflowInput,
+    CloseAccountStatus,
+    CloseAccountWorkflow,
+    CloseAccountWorkflowInput,
     LoanApplicationWorkflow,
     PersistApplicationInput,
+    PersistClosureDecisionInput,
+    PersistClosureRequestInput,
     PersistDecisionInput,
     PersistResubmitInput,
 )
@@ -388,3 +393,180 @@ async def test_two_concurrent_terminal_signals_only_write_once(env: WorkflowEnvi
     assert len(decision_calls) == 1
     assert result.status == decision_calls[0].inp.resulting_status
     assert result.status in ("APPROVED", "REJECTED")
+
+
+# ----------------------------------------------------------------------
+# CloseAccountWorkflow (Phase 18, "Account closure") -- same
+# WorkflowEnvironment (time-skipping) pattern as LoanApplicationWorkflow
+# above, with persist_closure_request/persist_closure_decision faked
+# under the same string names CloseAccountWorkflow calls by name -- this
+# is what lets these tests exist before account/activities.py does (see
+# CLAUDE.md's "Breaking the application <-> workflow cycle").
+# ----------------------------------------------------------------------
+
+
+def _make_fake_closure_activities(calls: list[_RecordedCall]):
+    @activity.defn(name="persist_closure_request")
+    async def persist_closure_request(inp: PersistClosureRequestInput) -> None:
+        calls.append(_RecordedCall("persist_closure_request", inp))
+
+    @activity.defn(name="persist_closure_decision")
+    async def persist_closure_decision(inp: PersistClosureDecisionInput) -> str:
+        calls.append(_RecordedCall("persist_closure_decision", inp))
+        return inp.resulting_status
+
+    return [persist_closure_request, persist_closure_decision]
+
+
+async def _start_closure(
+    env: WorkflowEnvironment,
+    task_queue: str,
+    account_id: str,
+    applicant_identifier: str = "applicant@example.com",
+) -> WorkflowHandle:
+    return await env.client.start_workflow(
+        CloseAccountWorkflow.run,
+        CloseAccountWorkflowInput(account_id=account_id, applicant_identifier=applicant_identifier),
+        id=f"account-closure-{account_id}",
+        task_queue=task_queue,
+    )
+
+
+async def _wait_for_closure_status(
+    handle: WorkflowHandle, expected_status: str
+) -> CloseAccountStatus:
+    deadline = time.monotonic() + _POLL_TIMEOUT_S
+    while True:
+        status = await handle.query(CloseAccountWorkflow.get_status)
+        if status.status == expected_status:
+            return status
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"status never reached {expected_status!r}, last seen {status.status!r}"
+            )
+        await asyncio.sleep(_POLL_INTERVAL_S)
+
+
+async def test_close_account_approve_path(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[CloseAccountWorkflow],
+        activities=_make_fake_closure_activities(calls),
+    ):
+        handle = await _start_closure(
+            env, task_queue, "ACC-000000001", applicant_identifier="alice@example.com"
+        )
+        await _wait_for_call_count(calls, 1)  # persist_closure_request landed
+        await handle.signal(
+            CloseAccountWorkflow.submit_decision,
+            args=["underwriter", "APPROVE", "u1", "balance confirmed zero"],
+        )
+        result = await handle.result()
+
+    assert result.status == "CLOSED"
+    assert result.closed_by == "u1"
+    assert _names(calls) == ["persist_closure_request", "persist_closure_decision"]
+    assert calls[1].inp.resulting_status == "CLOSED"
+    assert calls[1].inp.account_id == "ACC-000000001"
+    assert calls[1].inp.applicant_identifier == "alice@example.com"
+
+
+async def test_close_account_reject_reverts_to_active(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[CloseAccountWorkflow],
+        activities=_make_fake_closure_activities(calls),
+    ):
+        handle = await _start_closure(env, task_queue, "ACC-000000002")
+        await _wait_for_call_count(calls, 1)
+        await handle.signal(
+            CloseAccountWorkflow.submit_decision,
+            args=["manager", "REJECT", "m1", "balance not yet zero"],
+        )
+        result = await handle.result()
+
+    assert result.status == "ACTIVE"
+    assert result.closed_by == "m1"
+    assert calls[-1].inp.resulting_status == "ACTIVE"
+
+
+async def test_close_account_customer_cancel_path(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[CloseAccountWorkflow],
+        activities=_make_fake_closure_activities(calls),
+    ):
+        handle = await _start_closure(env, task_queue, "ACC-000000003")
+        await _wait_for_call_count(calls, 1)
+        await handle.signal(CloseAccountWorkflow.cancel)
+        result = await handle.result()
+
+    assert result.status == "ACTIVE"
+    assert result.closed_by == "customer"
+    assert calls[-1].inp.decision == "CANCELLED"
+
+
+async def test_close_account_concurrent_decision_and_cancel_only_write_once(
+    env: WorkflowEnvironment,
+):
+    """Same _claim_transition() single-writer guard
+    test_two_concurrent_terminal_signals_only_write_once exercises for
+    LoanApplicationWorkflow -- here a staff decision races the
+    customer's own cancel() signal. Only the first to synchronously
+    claim the transition ever runs persist_closure_decision; the loser
+    is silently ignored (both are terminal, so there's no valid "undo"
+    once one has landed)."""
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[CloseAccountWorkflow],
+        activities=_make_fake_closure_activities(calls),
+    ):
+        handle = await _start_closure(env, task_queue, "ACC-000000004")
+        await _wait_for_call_count(calls, 1)  # persist_closure_request landed first
+        await asyncio.gather(
+            handle.signal(
+                CloseAccountWorkflow.submit_decision,
+                args=["underwriter", "APPROVE", "u1", "confirmed"],
+            ),
+            handle.signal(CloseAccountWorkflow.cancel),
+        )
+        result = await handle.result()
+
+    decision_calls = [c for c in calls if c.name == "persist_closure_decision"]
+    assert len(decision_calls) == 1
+    assert result.status == decision_calls[0].inp.resulting_status
+    assert result.status in ("CLOSED", "ACTIVE")
+
+
+async def test_close_account_wrong_actor_role_is_rejected(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[CloseAccountWorkflow],
+        activities=_make_fake_closure_activities(calls),
+    ):
+        handle = await _start_closure(env, task_queue, "ACC-000000005")
+        await _wait_for_call_count(calls, 1)
+        await handle.signal(
+            CloseAccountWorkflow.submit_decision,
+            args=["customer", "APPROVE", "applicant@example.com", "self-approving"],
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+
+    assert isinstance(exc_info.value.cause, ApplicationError)
+    assert _names(calls) == ["persist_closure_request"]

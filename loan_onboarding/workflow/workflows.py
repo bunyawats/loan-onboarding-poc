@@ -331,3 +331,208 @@ class LoanApplicationWorkflow:
             closed_by=self._closed_by,
             closed_comment=self._closed_comment,
         )
+
+
+# ----------------------------------------------------------------------
+# CloseAccountWorkflow (Phase 18, "Account closure" -- see CLAUDE.md).
+# One execution per closure *request*, not per account -- a rejected or
+# customer-cancelled request always reverts the account to ACTIVE and
+# this workflow's own run() then completes; a later request against the
+# same account starts a brand-new execution (account/service.py's
+# request_closure() is only reachable while the account is ACTIVE, so
+# there's never a live CloseAccountWorkflow to collide with). Reuses
+# this module's ROLE_*/DECISION_* constants -- the same actor-role and
+# decision taxonomy LoanApplicationWorkflow uses -- since Account
+# closure decisions are made by the same Underwriter/Manager roles, no
+# new taxonomy needed. Same "activities called by string name" contract
+# as LoanApplicationWorkflow -- see this module's own docstring and
+# CLAUDE.md's "Breaking the application <-> workflow cycle" (the
+# equivalent split for account/ is account/activities.py, not built
+# until P18-4).
+# ----------------------------------------------------------------------
+
+STATUS_ACCOUNT_CLOSURE_REQUESTED = "CLOSURE_REQUESTED"
+STATUS_ACCOUNT_ACTIVE = "ACTIVE"
+STATUS_ACCOUNT_CLOSED = "CLOSED"
+
+
+@dataclass
+class CloseAccountWorkflowInput:
+    account_id: str
+    # Opaque pass-through, never inspected here -- accounts carries no
+    # applicant_identifier column of its own (only customer_id, and
+    # account/ isn't granted a customer/ import to resolve one -- see
+    # CLAUDE.md's module dependency graph). The caller
+    # (account.service.request_closure(), which bff_customer calls
+    # already holding this value from its own session cookie) supplies
+    # it once at start; this workflow carries it in its own durable
+    # state across however many signals arrive, purely so
+    # persist_closure_decision (account/activities.py) has it to pass to
+    # notifications.service.send_account_closure_decision, the same
+    # "forward an opaque identity string, never resolve it" role
+    # ApplicationWorkflowInput's own applicant_* fields already play for
+    # LoanApplicationWorkflow.
+    applicant_identifier: str
+
+
+@dataclass
+class CloseAccountStatus:
+    status: str  # CLOSURE_REQUESTED | ACTIVE (reverted) | CLOSED
+    closed_by: Optional[str] = None
+    closed_comment: Optional[str] = None
+
+
+@dataclass
+class PersistClosureRequestInput:
+    account_id: str
+    workflow_id: str
+
+
+@dataclass
+class PersistClosureDecisionInput:
+    account_id: str
+    applicant_identifier: str
+    decision: str  # APPROVE | REJECT | CANCELLED
+    actor_name: str
+    comment: str
+    resulting_status: str  # CLOSED | ACTIVE
+
+
+@workflow.defn
+class CloseAccountWorkflow:
+    def __init__(self) -> None:
+        self._account_id: str = ""
+        self._applicant_identifier: str = ""
+        self._status = STATUS_ACCOUNT_CLOSURE_REQUESTED
+        self._closed_by: Optional[str] = None
+        self._closed_comment: Optional[str] = None
+        self._finalized = False
+        # Same synchronous single-writer guard LoanApplicationWorkflow
+        # uses -- only the first signal to arrive while nothing else is
+        # in flight ever gets to proceed.
+        self._busy = False
+
+    def _is_final(self) -> bool:
+        return self._finalized
+
+    def _claim_transition(self) -> bool:
+        if self._finalized or self._busy:
+            return False
+        self._busy = True
+        return True
+
+    def _resolve_decision(self, actor_role: str, decision: str) -> str:
+        """Returns resulting_status, or raises ValueError. Unlike
+        LoanApplicationWorkflow's multi-stage _resolve_transition, this
+        has exactly one state to decide from (CLOSURE_REQUESTED) and no
+        escalation tier -- either Underwriter or Manager may decide, per
+        CLAUDE.md's "Account closure" scoping."""
+        if actor_role not in (ROLE_UNDERWRITER, ROLE_MANAGER):
+            raise ValueError(
+                f"a closure decision requires actor_role in "
+                f"{(ROLE_UNDERWRITER, ROLE_MANAGER)!r}, got {actor_role!r}"
+            )
+        if decision == DECISION_APPROVE:
+            return STATUS_ACCOUNT_CLOSED
+        if decision == DECISION_REJECT:
+            return STATUS_ACCOUNT_ACTIVE
+        raise ValueError(f"invalid closure decision {decision!r}")
+
+    @workflow.run
+    async def run(self, req: CloseAccountWorkflowInput) -> CloseAccountStatus:
+        self._account_id = req.account_id
+        self._applicant_identifier = req.applicant_identifier
+
+        await workflow.execute_activity(
+            "persist_closure_request",
+            PersistClosureRequestInput(
+                account_id=req.account_id,
+                workflow_id=workflow.info().workflow_id,
+            ),
+            start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
+        await workflow.wait_condition(self._is_final)
+
+        return CloseAccountStatus(
+            status=self._status,
+            closed_by=self._closed_by,
+            closed_comment=self._closed_comment,
+        )
+
+    @workflow.signal
+    async def submit_decision(
+        self, actor_role: str, decision: str, actor_name: str, comment: str = ""
+    ) -> None:
+        if not self._claim_transition():
+            return  # already decided, or another transition in flight -- ignore
+
+        try:
+            resulting_status = self._resolve_decision(actor_role, decision)
+        except ValueError as e:
+            self._busy = False  # this attempt never actually transitioned
+            raise ApplicationError(str(e))
+
+        actual_status = await workflow.execute_activity(
+            "persist_closure_decision",
+            PersistClosureDecisionInput(
+                account_id=self._account_id,
+                applicant_identifier=self._applicant_identifier,
+                decision=decision,
+                actor_name=actor_name,
+                comment=comment,
+                resulting_status=resulting_status,
+            ),
+            start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+            result_type=str,
+        )
+        self._status = actual_status
+        self._finalized = True
+        self._closed_by = actor_name
+        self._closed_comment = comment
+        self._busy = False
+
+    @workflow.signal
+    async def cancel(self) -> None:
+        """The customer's own cancel -- only meaningful while still
+        CLOSURE_REQUESTED (an already-decided request has nothing left
+        to cancel). No actor_name/comment parameter, unlike
+        submit_decision -- this is always the requesting customer,
+        attributed generically ("customer") rather than needing a second
+        signal parameter; self._applicant_identifier (captured once, at
+        run() start) is what actually reaches the closure-decision email,
+        not this signal's own arguments."""
+        if self._finalized or self._status != STATUS_ACCOUNT_CLOSURE_REQUESTED:
+            return  # nothing pending to cancel -- ignore
+        if not self._claim_transition():
+            return
+
+        actual_status = await workflow.execute_activity(
+            "persist_closure_decision",
+            PersistClosureDecisionInput(
+                account_id=self._account_id,
+                applicant_identifier=self._applicant_identifier,
+                decision=DECISION_CANCELLED,
+                actor_name="customer",
+                comment="closure request cancelled by customer",
+                resulting_status=STATUS_ACCOUNT_ACTIVE,
+            ),
+            start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+            result_type=str,
+        )
+        self._status = actual_status
+        self._finalized = True
+        self._closed_by = "customer"
+        self._closed_comment = "closure request cancelled by customer"
+        self._busy = False
+
+    @workflow.query
+    def get_status(self) -> CloseAccountStatus:
+        return CloseAccountStatus(
+            status=self._status,
+            closed_by=self._closed_by,
+            closed_comment=self._closed_comment,
+        )

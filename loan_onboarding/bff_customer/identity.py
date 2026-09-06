@@ -9,9 +9,9 @@ sufficient to view and act on every application filed under that
 identifier -- no proof of ownership required. See CLAUDE.md's Known
 Gaps for the incident this closes and the design this file now
 implements: a one-time, 6-digit email verification code, generated
-here and "sent" via `bff_customer.notifications` (a fake, POC-scoped
-delivery -- this project has no real email/SMS provider configured;
-see that module's own docstring), that the applicant must type back
+here and "sent" via `loan_onboarding.notifications.service` (a fake,
+POC-scoped delivery -- this project has no real email/SMS provider
+configured; see that module's own docstring), that the applicant must type back
 correctly before the real session cookie below is ever set. Password-
 based auth was deliberately not chosen -- see PRD §7.1's "no password
 needed" framing, which this preserves; verifying *the identifier
@@ -71,7 +71,7 @@ _MAX_AGE_S = 60 * 60 * 24 * 365
 # and skip ever needing the "sent" one. Hashing means reading the
 # cookie only reveals the hash; passing verification still requires
 # knowing the actual code, which only reaches the applicant through
-# `notifications.send_verification_code`.
+# `notifications.service.send_verification_code`.
 # ----------------------------------------------------------------------
 
 _PENDING_COOKIE_NAME = "customer_pending_verification"

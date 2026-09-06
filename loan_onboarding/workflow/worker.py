@@ -49,9 +49,10 @@ from loan_onboarding.workflow.task_queues import (
     DEFAULT_TEMPORAL_HOST,
     DEFAULT_TEMPORAL_NAMESPACE,
     KNOWN_PRODUCT_TYPES,
+    task_queue_for_account_closure,
     task_queue_for_product_type,
 )
-from loan_onboarding.workflow.workflows import LoanApplicationWorkflow
+from loan_onboarding.workflow.workflows import CloseAccountWorkflow, LoanApplicationWorkflow
 
 VALID_MODES = ("both", "workflow", "activity")
 
@@ -108,3 +109,56 @@ async def run_worker(
         f"serving product types: {product_type or list(KNOWN_PRODUCT_TYPES)}"
     )
     await asyncio.gather(*(w.run() for w in workers))
+
+
+# ----------------------------------------------------------------------
+# Account closure (Phase 18, P18-5, "Account closure" -- see CLAUDE.md).
+# A single, non-product-type-keyed Worker -- no per-product_type fan-out
+# the way _build_workers/run_worker need for LoanApplicationWorkflow,
+# since closure review doesn't vary by product. Deliberately a sibling
+# function rather than a parameter grafted onto _build_workers/run_worker
+# above -- the "one Worker per product type" shape those two are built
+# around doesn't apply here at all, so forcing this into the same
+# function would mean threading a not-really-optional
+# is-this-the-closure-worker branch through code that's otherwise clean
+# generic Temporal bootstrap.
+# ----------------------------------------------------------------------
+
+
+def _build_account_closure_worker(
+    client: Client,
+    activities: Sequence[Callable],
+    worker_mode: str,
+) -> Worker:
+    if worker_mode not in VALID_MODES:
+        raise ValueError(f"worker_mode={worker_mode!r} invalid, must be one of {VALID_MODES}")
+
+    workflows = [CloseAccountWorkflow] if worker_mode in ("both", "workflow") else []
+    acts = list(activities) if worker_mode in ("both", "activity") else []
+
+    return Worker(
+        client,
+        task_queue=task_queue_for_account_closure(),
+        workflows=workflows,
+        activities=acts,
+    )
+
+
+async def run_account_closure_worker(
+    activities: Sequence[Callable],
+    worker_mode: str = "both",
+    client: Optional[Client] = None,
+) -> None:
+    """Runs forever, until cancelled -- worker_main.py gathers this
+    alongside run_worker()'s own loan-application worker(s) in the same
+    process (one `python -m loan_onboarding.worker_main`, same
+    `WORKER_MODE` value governing both). `client` is injectable, same
+    reasoning run_worker's own parameter documents."""
+    if client is None:
+        client = await Client.connect(
+            os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+            namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
+        )
+    worker = _build_account_closure_worker(client, activities, worker_mode)
+    print(f"Account-closure worker started (mode={worker_mode})")
+    await worker.run()

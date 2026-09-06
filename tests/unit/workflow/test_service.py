@@ -11,6 +11,7 @@ from loan_onboarding.workflow.service import (
     _MAX_BULK_SIZE,
     _validate_bulk_ids,
     bulk_signal_decision,
+    signal_close_account_decision,
     signal_decision,
 )
 
@@ -47,3 +48,29 @@ async def test_bulk_signal_decision_rejects_unknown_actor_role():
 async def test_bulk_signal_decision_rejects_unknown_decision():
     with pytest.raises(ValueError, match="decision"):
         await bulk_signal_decision(None, ["wf-1"], "underwriter", "MAYBE", "x")
+
+
+async def test_signal_close_account_decision_rejects_customer_actor_role():
+    """The customer's own decision path is signal_close_account_cancel(),
+    not this function -- unlike the loan workflow's signal_decision,
+    "customer" is never a valid actor_role here."""
+    with pytest.raises(ValueError, match="actor_role"):
+        await signal_close_account_decision(None, "wf-1", "customer", "APPROVE", "x")
+
+
+async def test_signal_close_account_decision_rejects_unknown_actor_role():
+    with pytest.raises(ValueError, match="actor_role"):
+        await signal_close_account_decision(None, "wf-1", "clerk", "APPROVE", "x")
+
+
+async def test_signal_close_account_decision_rejects_unknown_decision():
+    with pytest.raises(ValueError, match="decision"):
+        await signal_close_account_decision(None, "wf-1", "underwriter", "MAYBE", "x")
+
+
+async def test_signal_close_account_decision_rejects_cancelled_decision():
+    """CANCELLED is a valid LoanApplicationWorkflow decision but not a
+    valid staff closure decision -- only the customer's own cancel()
+    signal produces that outcome for CloseAccountWorkflow."""
+    with pytest.raises(ValueError, match="decision"):
+        await signal_close_account_decision(None, "wf-1", "underwriter", "CANCELLED", "x")

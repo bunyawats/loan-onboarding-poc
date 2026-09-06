@@ -3276,10 +3276,10 @@ one-decision-only exception to `PRD.md` §4's no-notification non-goal;
 either the existing `Underwriter` or `Manager` Keycloak role may decide
 a request, no new realm config, no escalation tier.
 
-**This is a documentation-only session, per explicit user instruction —
-none of Phase 18's tasks below are implemented yet.** Start at P18-1.
+**The design-only session that wrote this phase's task breakdown has
+concluded — a later session started building it, at P18-1.**
 
-- [ ] **P18-1** — `db/schema.sql`: extend `accounts.status`'s `CHECK`
+- [x] **P18-1** — `db/schema.sql`: extend `accounts.status`'s `CHECK`
       constraint to add `'CLOSURE_REQUESTED'` alongside `ACTIVE`/
       `CLOSED`; add nullable `closure_workflow_id`,
       `closure_requested_at`, `closure_decision_comment`,
@@ -3287,7 +3287,22 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       DoD: schema applies cleanly to a fresh database; every existing
       row is unaffected (current `status` value still valid, new
       columns all `NULL`).
-- [ ] **P18-2** — Promote `bff_customer/notifications.py` into a new
+      > DONE — applied the updated `schema.sql` to a scratch database
+      > inside the running `db` container (`CREATE DATABASE
+      > schema_p18_test`, applied, inspected via `\d accounts`, dropped)
+      > rather than the live `loan_onboarding` database, since
+      > `db/init/01-init.sh` only ever runs `schema.sql` on first
+      > container start (no migration mechanism exists in this
+      > project — see the P13-7/P18-8-style convention of `docker
+      > compose down -v` to pick up a schema change on the live stack,
+      > deliberately deferred to P18-8's full live verification rather
+      > than wiping the live stack's data now). Confirmed the new
+      > `accounts_status_check` constraint accepts all three values and
+      > all five new columns are nullable with no default. "Every
+      > existing row is unaffected" is true by construction here (no
+      > existing rows in a fresh database) and will be re-confirmed
+      > against the actual live stack's data at P18-8.
+- [x] **P18-2** — Promote `bff_customer/notifications.py` into a new
       shared leaf module, `notifications/service.py` (same "zero
       dependency on anything else in this codebase" shape as `idgen/`)
       — moves the existing `send_verification_code`/fake-delivery logic
@@ -3301,7 +3316,37 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       path only); a new unit test for
       `send_account_closure_decision`; `lint-imports` green with the new
       contract.
-- [ ] **P18-3** — `workflow/task_queues.py`:
+      > DONE — `loan_onboarding/notifications/service.py` created
+      > (`send_verification_code` moved verbatim, plus the new
+      > `send_account_closure_decision`); old
+      > `bff_customer/notifications.py` deleted.
+      > `bff_customer/routes.py` now imports it as `notifications_service`
+      > (same `from loan_onboarding.<module> import service as
+      > <module>_service` convention every other cross-module call in
+      > this codebase already uses — corrected from the old bare
+      > `notifications` import name in the same pass); `identity.py`'s
+      > docstrings/comments updated to point at the new path. No
+      > dedicated OTP-delivery unit tests existed before this move
+      > (confirmed by grep — this project's accepted route-level-testing
+      > gap for `bff_customer`, same one P16-3/P17-2 already note,
+      > extends to this function too), so "still pass unchanged" was
+      > vacuously true; added `tests/unit/notifications/test_service.py`
+      > covering both functions via `capsys` instead. `pyproject.toml`
+      > gained the new forbidden contract plus a spot for
+      > `notifications` in the layers contract's bottom leaf tier
+      > (`idgen | notifications`) — `account/`'s own widened contract is
+      > still P18-4, not added here. `lint-imports` green (9/9 contracts,
+      > up from 8/8). Full unit suite: 247 passed (up from 245 by the 2
+      > new tests), same pre-existing `BACKOFFICE_REDIS_URL`
+      > Redis-fixture failures as always plus one unrelated statistical
+      > flake in `idgen`'s large-sample uniqueness test (9999/10000,
+      > re-run confirmed it's a rare, expected flake in that test, not a
+      > regression from this change) — neither caused by this task.
+      > `CLAUDE.md` updated in three spots (module-dependency-graph's
+      > `notifications/` callout, the "Account closure" section's own
+      > bullet, the repo-layout diagram) from "planned" to built;
+      > `PRD.md`'s one reference to the old file path updated too.
+- [x] **P18-3** — `workflow/task_queues.py`:
       `task_queue_for_account_closure()` (a single, non-product-type-keyed
       queue name — closure review doesn't vary by product).
       `workflow/workflows.py`: new `CloseAccountWorkflow` class — states
@@ -3320,7 +3365,55 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       activities registered under the same string names
       `CloseAccountWorkflow` calls by name (not import), so this task
       doesn't depend on P18-4 existing first.
-- [ ] **P18-4** — `account/service.py`: `request_closure(account_id) ->
+      > DONE — `task_queue_for_account_closure()` added to
+      > `task_queues.py`. `CloseAccountWorkflow` added to `workflows.py`
+      > right after `LoanApplicationWorkflow`, reusing that module's own
+      > `ROLE_UNDERWRITER`/`ROLE_MANAGER`/`DECISION_APPROVE`/
+      > `DECISION_REJECT`/`DECISION_CANCELLED` constants rather than a
+      > parallel taxonomy (same actors/decisions, just one state instead
+      > of a multi-stage machine and no escalation tier) — new
+      > `CloseAccountWorkflowInput`/`CloseAccountStatus`/
+      > `PersistClosureRequestInput`/`PersistClosureDecisionInput`
+      > dataclasses, same "activities called by string name" contract
+      > (`persist_closure_request`/`persist_closure_decision`) as
+      > `LoanApplicationWorkflow`. `workflow/service.py` gained
+      > `start_close_account_workflow` (deterministic
+      > `account-closure-<account_id>` workflow id, same reasoning
+      > `_workflow_id_for_application` already documents — a later
+      > request only ever starts after the prior execution has closed),
+      > `signal_close_account_decision` (validates `actor_role` against
+      > `{underwriter, manager}` only — no `customer`, unlike the loan
+      > workflow's `signal_decision` — and `decision` against
+      > `{APPROVE, REJECT}` only, rejecting `CANCELLED` since that
+      > outcome is customer-cancel-only here), and
+      > `signal_close_account_cancel`. Tests added to the existing
+      > `tests/unit/workflow/test_workflows.py` (not a new file, per
+      > this task's own DoD wording) covering approve, reject-reverts,
+      > customer-cancel, a stray-cancel-after-a-decision-lands
+      > race (redesigned mid-session from a naive "cancel after
+      > `handle.result()`" version, which isn't a valid scenario at
+      > all — signaling an already-completed workflow execution raises
+      > `RPCError: Completed workflow` at the transport level rather
+      > than exercising any workflow-internal no-op logic; replaced with
+      > a concurrent-signals race test mirroring
+      > `test_two_concurrent_terminal_signals_only_write_once`'s own
+      > pattern, proving `_claim_transition()`'s single-writer guard
+      > holds for a decision racing a cancel too), and a wrong-actor-role
+      > rejection; plus four new `test_service.py` validation tests. Full
+      > unit suite: 257 passed (up from 247 by these 10), same
+      > pre-existing `BACKOFFICE_REDIS_URL` Redis-fixture failures as
+      > always and no repeat of the prior session's one-off `idgen`
+      > statistical flake. `lint-imports` green, still 9/9 — nothing
+      > about `CloseAccountWorkflow` touches a forbidden edge, since
+      > `workflow/` still imports nothing from `application/`/
+      > `document/`/`customer/`/`account/`. `CLAUDE.md`'s "Account
+      > closure" section's `CloseAccountWorkflow` bullet expanded from
+      > "planned" to describe the actual built shape. `account/`'s own
+      > widened `.importlinter` contract, `worker_main.py`'s
+      > registration of this queue, and the concrete
+      > `account/activities.py` implementations are all still P18-4/
+      > P18-5, not touched here.
+- [x] **P18-4** — `account/service.py`: `request_closure(account_id) ->
       str` (workflow id) — calls `start_close_account_workflow`, same
       `_wait_until`-style confirm-then-return pattern
       `application/service.py`'s `create_application` already uses.
@@ -3342,7 +3435,81 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       boundary, same convention `application/activities.py`'s own tests
       already follow. `lint-imports` green with `account/`'s widened
       contract.
-- [ ] **P18-5** — `worker_main.py`: register a second `Worker` (or
+      > DONE, with one real design gap found and fixed mid-task, not
+      > part of the original wording above: `request_closure` actually
+      > ended up as `request_closure(account_id, applicant_identifier) ->
+      > str`, not `request_closure(account_id) -> str`.
+      > `notifications.service.send_account_closure_decision` (P18-2)
+      > needs `applicant_identifier`, but `accounts` has no such column
+      > (only `customer_id`), and `account/` is *not* granted a
+      > `customer/` import (only `workflow/` and `notifications/`) — so
+      > there was no way for `account/activities.py` to resolve
+      > `customer_id -> applicant_identifier` itself. Fixed by threading
+      > it through as an opaque pass-through, the same role
+      > `ApplicationWorkflowInput`'s own `applicant_*` fields already
+      > play for `LoanApplicationWorkflow`: added to
+      > `CloseAccountWorkflowInput` and `PersistClosureDecisionInput`
+      > (both P18-3, revised in this same pass, including their already-
+      > committed tests in `test_workflows.py`), threaded through
+      > `workflow.service.start_close_account_workflow`'s new second
+      > parameter, and supplied by `account.service.request_closure`'s
+      > own new second parameter — `bff_customer` (P18-7) will pass its
+      > already-known session-cookie value straight through, no new
+      > cross-module resolution needed anywhere.
+      >
+      > `account/service.py` also gained `_get_temporal_client`/
+      > `_wait_until` (same shape as `application/service.py`'s own) and
+      > a new `AccountNotActive` exception (`account/models.py`) —
+      > `request_closure` raises it when the account isn't currently
+      > `ACTIVE`, the same "the UI hides it, the service still enforces
+      > it" discipline `application.service`'s product-type picker
+      > already follows, and what makes
+      > `workflow.service`'s deterministic `account-closure-<account_id>`
+      > workflow id safe to reuse across a later request. `account/db.py`
+      > gained `update_closure_request`/`update_closure_decision` (the
+      > former idempotent against a Temporal retry via its own `WHERE
+      > status IN ('ACTIVE', 'CLOSURE_REQUESTED')` plus
+      > `COALESCE(closure_requested_at, now())`); `account/models.py`'s
+      > `Account` widened its `status` `Literal` to include
+      > `CLOSURE_REQUESTED` and gained the five closure-tracking fields,
+      > populated by `from_record`.
+      >
+      > `account/activities.py`'s own idempotency guard (a retry of an
+      > already-decided execution is detected via the account's own
+      > current status no longer being `CLOSURE_REQUESTED`, skipping both
+      > the write and the email) mirrors
+      > `application/activities.py`'s `persist_decision` discipline —
+      > without it a Temporal retry would re-send a customer-visible
+      > closure-decision email.
+      >
+      > `pyproject.toml`'s `.importlinter` config needed more than
+      > widening `account/`'s own forbidden-imports list: the overall
+      > `layers` contract had `account/` sharing a bar with `document`/
+      > `customer`/`workflow` (a `layers` contract checks same-bar
+      > siblings for mutual independence), so `account/` importing
+      > `workflow/` would have broken that contract even with the
+      > module-specific one updated. Restructured to `customer | document`
+      > → `account` → `workflow` → `idgen | notifications` (bottom four
+      > layers) — verified this doesn't change any other contract's
+      > outcome. `lint-imports` green, still 9/9 (one contract's name and
+      > body changed, count unchanged). Full unit suite: 265 passed (up
+      > from 257 by 8 new account tests) — same pre-existing
+      > `BACKOFFICE_REDIS_URL` Redis-fixture failures as always, nothing
+      > new. **Local-environment note**: `loan_onboarding_test` (the
+      > disposable Postgres database these tests run against, per
+      > `CLAUDE.md`'s Testing section) had to be dropped and recreated
+      > from the updated `db/schema.sql` before any of this session's
+      > tests would pass — it still had the pre-P18-1 `accounts` schema
+      > from before this phase started; the live `loan_onboarding`
+      > database (the running compose stack's own) was deliberately left
+      > untouched, same P18-1 reasoning. `CLAUDE.md` updated in four
+      > spots: the module-dependency-graph "not drawn" note, its
+      > `customer`/`account` exception-list bullet, the "Account
+      > closure" design section's own `account/`-stops-being-leaf
+      > bullet, and `account/`'s own module section (the new
+      > `request_closure`/`account/activities.py` bullets, replacing the
+      > old "Planned, not yet built" one).
+- [x] **P18-5** — `worker_main.py`: register a second `Worker` (or
       extend `workflow/worker.py`'s `_build_workers`) for the new
       account-closure task queue, wiring `account/activities.py`'s two
       new activities plus `CloseAccountWorkflow`.
@@ -3351,7 +3518,80 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       verify: a live `worker_main.py` process can actually pick up and
       run a `CloseAccountWorkflow` execution against a real local
       Temporal server.
-- [ ] **P18-6** — `bff_backoffice/routes.py`: new closure-request queue
+      > DONE. Chose "extend `workflow/worker.py`" over grafting a
+      > parameter onto `_build_workers`/`run_worker` — added sibling
+      > `_build_account_closure_worker`/`run_account_closure_worker`
+      > functions instead, since the "one `Worker` per product type"
+      > shape those two are built around doesn't apply to account
+      > closure's single fixed queue. `worker_main.py`'s `main()` now
+      > `asyncio.gather()`s `run_worker(...)` and
+      > `run_account_closure_worker(...)` together, one `WORKER_MODE`
+      > value governing both. Added 4 new tests to
+      > `tests/unit/workflow/test_worker.py` (both/workflow/activity
+      > mode + invalid mode, mirroring `_build_workers`' own existing
+      > four).
+      >
+      > **A real hang found and fixed along the way, not a flaw in the
+      > new registration code itself**: the existing
+      > `tests/unit/test_worker_main.py` (3 tests, all calling the real
+      > `worker_main.main()`) only mocked `run_worker`, not the new
+      > `run_account_closure_worker` — since `main()` now gathers both,
+      > every one of those three tests hung indefinitely (the real,
+      > unmocked `run_account_closure_worker` connects to a real
+      > Temporal server and then runs its `Worker` forever). First
+      > surfaced as the *whole* `pytest tests/unit` run hanging at a
+      > fixed point (77% through, same spot every time) rather than as
+      > an obviously-related failure — diagnosed by re-running with
+      > `-v` to find the exact hanging test name. Fixed by mocking
+      > `run_account_closure_worker` in all three tests too, plus
+      > asserting it receives `[persist_closure_request,
+      > persist_closure_decision]` and the same `WORKER_MODE` value
+      > `run_worker` got. **Two local-environment complications hit
+      > while diagnosing this, neither a code bug**: (1) repeated
+      > interrupted pytest invocations across this diagnosis session
+      > left stray processes and, transiently, Postgres connections
+      > accumulating on `loan_onboarding_test` — resolved by killing
+      > the stray `pytest` processes and restarting the `db` container
+      > (safe, data on the volume — same operating rule `CLAUDE.md`'s
+      > Testing section already documents), not by anything in this
+      > task's own code; (2) `loan_onboarding_test` also still needed
+      > recreating from `db/schema.sql` at least once more this session
+      > (same class of issue P18-4 already hit) since it had been
+      > recreated *before* P18-4's own schema-affecting work landed in
+      > an earlier pass. Full unit suite after both fixes: 269 passed
+      > (up from 265 by the 4 new `test_worker.py` tests;
+      > `test_worker_main.py`'s own 3 tests were edited, not added to),
+      > in ~8s, no hang — same pre-existing `BACKOFFICE_REDIS_URL`
+      > failures as always. `lint-imports` unaffected, still 9/9 (this
+      > task adds no new cross-module import edges).
+      >
+      > **Live integration-verify, done for real, not skipped**: started
+      > `python -u -m loan_onboarding.worker_main` as a local process
+      > (not the compose stack's own `worker-workflow`/`worker-activity`
+      > containers, which run a built image predating this phase) against
+      > the real local Temporal server (`localhost:7233`, confirmed
+      > reachable via `tctl cluster health`) and the disposable
+      > `loan_onboarding_test` database (deliberately not the live
+      > stack's own `loan_onboarding`, to avoid touching real data for a
+      > throwaway verification row). A small scratch script seeded an
+      > `ACTIVE` account, called `account.service.request_closure(...)`
+      > (confirmed the row flipped to `CLOSURE_REQUESTED`, proving the
+      > live worker actually picked up and ran `persist_closure_request`),
+      > then sent a real `signal_close_account_decision(..., "APPROVE",
+      > ...)` against a real Temporal client and polled until the row
+      > reached `CLOSED` (proving `persist_closure_decision` ran too) —
+      > the worker's own stdout confirmed the fake closure-decision email
+      > fired with the correct `applicant_identifier` threaded all the
+      > way through from `request_closure`'s own parameter. Cleaned up
+      > afterward: killed the local worker process, deleted the scratch
+      > account row, left the completed Temporal workflow execution as
+      > normal history (nothing stuck or failed to clean up). `CLAUDE.md`
+      > updated: `workflow/`'s own module section's `worker.py` bullet
+      > now describes the built second bootstrap and the hang-and-fix
+      > story; the "Account closure" design section's own
+      > `CloseAccountWorkflow` bullet's "still P18-5, not done yet" note
+      > updated to point at it instead.
+- [x] **P18-6** — `bff_backoffice/routes.py`: new closure-request queue
       screen (e.g. `/ui/{underwriter,manager}/closures`), a decision
       dialog with the staff attestation comment field plus
       Approve/Reject calling `signal_close_account_decision`. Gated by
@@ -3366,7 +3606,54 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       way `application/service.py`'s decision paths already do); a
       role-mismatch (e.g. neither `Underwriter` nor `Manager`) gets a
       test.
-- [ ] **P18-7** — `bff_customer/routes.py`: a "Request account closure"
+      > DONE, with two scope calls made explicit rather than left
+      > implicit: (1) "a decision dialog" became a plain per-row
+      > `<form>` (POST-redirect-GET, not an htmx dialog) — deliberately,
+      > matching `bff_customer`'s own Cancel/Resubmit pattern rather
+      > than the applications queue's htmx machinery, appropriate for a
+      > low-frequency staff action; (2) the queue itself is
+      > unpaginated, no bulk-select — confirmed against this task's own
+      > wording (no mention of pagination/bulk actions, unlike every
+      > application-queue task before it) and against
+      > `account.service.list_pending_closure_requests`'s own framing as
+      > a supplementary, low-volume screen. Added `account/db.py`'s
+      > `list_by_status(status)` (unpaginated by design, docstring
+      > explains why) and `account/service.py`'s
+      > `list_pending_closure_requests()` + `wait_for_status_change()`
+      > (the latter identical in shape to
+      > `application.service.wait_for_status_change`, reusing P18-4's
+      > own `_wait_until`). New `closures.html` template plus a nav link
+      > from the existing `staff.html` queue screen (otherwise the new
+      > screen would have been unreachable from the UI at all). Confirmed
+      > `bff_backoffice` has no route-level test file (per this task's
+      > own DoD fallback) — added 5 new `tests/unit/account/test_service.py`
+      > tests for the two new service functions instead.
+      > **"A role-mismatch gets a test" is satisfied by P18-3's own
+      > existing coverage, not a new test written here**:
+      > `workflow/service.py`'s `signal_close_account_decision` (which
+      > this route calls) already rejects `actor_role="customer"` and
+      > any unknown role (`tests/unit/workflow/test_service.py`,
+      > `test_signal_close_account_decision_rejects_customer_actor_role`/
+      > `_rejects_unknown_actor_role`, both from P18-3) — the closure
+      > decision route's own role gating is entirely delegated to
+      > `_role_dependency`/`keycloak_session.require_session_role`,
+      > already covered by that module's own existing tests, so there
+      > was no new role-mismatch surface this task introduced that
+      > wasn't already tested somewhere in the stack. Full unit suite:
+      > 274 passed (up from 269 by 5 new tests), `lint-imports` still
+      > 9/9 (no new cross-module import edges — `bff_backoffice` already
+      > imported `account/`/`workflow/`). **Live Keycloak-authenticated
+      > UI verification deliberately deferred to P18-8**, per this
+      > phase's own plan (P18-8 is explicitly "Live end-to-end
+      > verification... via a real Keycloak-authenticated staff
+      > session") — this task's own verification was import/template-
+      > compile sanity checks (`templates.get_template("closures.html")`,
+      > `from loan_onboarding import app`) plus the full unit suite, not
+      > a live browser click-through. `CLAUDE.md` updated in two spots:
+      > the "Account closure" design section's "Staff review surface"
+      > bullet, and a new bullet in `bff_backoffice/`'s own module
+      > section (§2) matching how Consent-upload is documented there.
+- [x] **P18-7** — `bff_customer/routes.py`: a "Request account closure"
       action on the account/application detail page (shown only once
       `application.status == APPROVED` and the resolved account's own
       `status == 'ACTIVE'`, reusing the existing `_owned_account`
@@ -3376,7 +3663,68 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       `CLOSURE_REQUESTED`.
       DoD: covered the same way this project's existing customer-facing
       decision actions (Cancel, Resubmit) are already tested.
-- [ ] **P18-8** — Live end-to-end verification against the real stack:
+      > DONE. Added `POST /apply/applications/{application_id}/closure/request`
+      > and `.../closure/cancel` to `bff_customer/routes.py`, both reusing
+      > `_owned_account` (built for Consent upload) for
+      > ownership/`APPROVED`/account-exists checks, plus each route's own
+      > `account.status` guard (`!= "ACTIVE"` for request, `!=
+      > "CLOSURE_REQUESTED"` for cancel) since the template's own
+      > visibility rules are cosmetic, not enforcement — same "the UI
+      > hides it, the route still checks" discipline every other
+      > decision route in this codebase follows. Both are plain
+      > POST-redirect-GET forms, matching this module's existing
+      > Cancel/Resubmit pattern, not htmx. `application_detail.html`
+      > gained an "Account closure" section: the request button when
+      > `account.status == 'ACTIVE'`, pending-status-plus-Cancel when
+      > `CLOSURE_REQUESTED`, hidden entirely otherwise (matches
+      > `CLAUDE.md`'s design exactly). Confirmed `bff_customer` still has
+      > no route-level test file (same accepted gap Cancel/Resubmit
+      > already have — neither is unit-tested either, only manually/
+      > live-verified) and that `workflow.service.signal_close_account_cancel`
+      > has no dedicated unit test, matching its own closest precedent
+      > (`signal_resubmit`, also untested — a trivial one-line signal
+      > wrapper with nothing to validate); the functions this feature
+      > actually calls (`account.service.request_closure`/
+      > `wait_for_status_change`) already have full coverage from
+      > P18-4/P18-6. No new unit tests added — full suite unchanged at
+      > 274 passed, `lint-imports` unchanged at 9/9 (no new import
+      > edges — `bff_customer` already imported `account/`/`workflow/`).
+      >
+      > **Did a real live verification, not just import/template-compile
+      > checks (unlike P18-6, which deferred its live sweep to P18-8)** —
+      > `bff_customer` needs no Keycloak, so a full scripted HTTP flow
+      > was actually tractable this time: ran a local `uvicorn
+      > loan_onboarding.app:app` and a local `worker_main.py`, both
+      > against the real Postgres (`loan_onboarding_test`), Temporal
+      > (`localhost:7233`), and Mayan (`localhost:8000`) — seeded a
+      > synthetic `APPROVED` application + `ACTIVE` account directly via
+      > `application_db.insert`/`update_decision` and
+      > `account_service.create_account` (accounts carries no FK to
+      > applications' own identity fields, so a synthetic row is valid
+      > per CLAUDE.md's "Data storage"), then drove `httpx` through
+      > identify → verify (reading the dev-mode code straight out of the
+      > response, same mechanism the real UI uses) → detail page (button
+      > visible) → request closure → detail page (pending status +
+      > Cancel button, request button gone) → cancel → detail page
+      > (button back, pending status gone). One real snag hit and fixed
+      > along the way: the local app crashed with `KeyError:
+      > 'MAYAN_BASE_URL'` on the very first detail-page load, since
+      > `_detail_context` always calls `document_service.list_documents`
+      > — needed `MAYAN_BASE_URL=http://localhost:8000` (the host-
+      > published port, not the docker-internal `mayan:8000` `.env`
+      > ships) plus the service-account credentials; a separate
+      > transient `ReadTimeout` on one particular request (Mayan's own
+      > documented O(all-documents)-per-call fetch pattern, CLAUDE.md's
+      > Known Gaps) was resolved by raising the `httpx.Client`'s timeout,
+      > not a real bug. Confirmed via the worker's own stdout that the
+      > fake closure-decision email fired with the correct
+      > `applicant_identifier` on the cancel path. Cleaned up the local
+      > processes and the seeded rows afterward. `CLAUDE.md` updated in
+      > two spots (the "Account closure" design section's "Customer-
+      > facing trigger" bullet, and a new bullet in `bff_customer/`'s own
+      > module section matching how the product-picker/ID-reuse features
+      > are documented there).
+- [x] **P18-8** — Live end-to-end verification against the real stack:
       request a closure, approve it via a real Keycloak-authenticated
       staff session, confirm the account flips to `CLOSED`, confirm the
       fake/dev-only email fires, and confirm
@@ -3389,6 +3737,95 @@ none of Phase 18's tasks below are implemented yet.** Start at P18-1.
       closure" section and `PRD.md` §6.6/§9.2/§11 from "planned" to
       reflect built + live-verified status. Commit, push, confirm CI
       green.
+      > DONE — the real end-to-end sweep, not a scripted shortcut.
+      > Seeded one real customer (`customer.service.get_or_create`) with
+      > three `APPROVED` applications, each producing its own `ACTIVE`
+      > account of a different product type (`personal_loan`/
+      > `auto_loan`/`mortgage`) — confirmed the baseline first:
+      > `get_available_product_types` returned `[]` (active in all
+      > three). Ran a local `worker_main.py` and a local `uvicorn
+      > loan_onboarding.app:app` against the real Postgres
+      > (`loan_onboarding_test`, deliberately not the live compose
+      > stack's own `loan_onboarding` — same caution P18-5/P18-7 already
+      > applied), the real Temporal, the real Keycloak, the real
+      > `backoffice-redis`, and the real Mayan.
+      >
+      > **A real environment snag hit and fixed, not a code bug**: this
+      > project's Keycloak realm only registers `redirect_uri`s for
+      > `localhost:8000`/`localhost:8001` (`keycloak/import/loanrealm-realm.json`) —
+      > port 8000 was already taken by the real Mayan container and 8001
+      > by the live `app` container, so the very first login attempt on
+      > a throwaway port (8010) failed at Keycloak itself with "Invalid
+      > parameter: redirect_uri". Fixed by briefly `docker stop`-ing the
+      > live `app` container (safe and reversible — it's a stateless web
+      > process, no volume), running the local app on the now-free 8001
+      > instead, and `docker start`-ing the original container back the
+      > moment verification finished — confirmed it came back up
+      > correctly afterward.
+      >
+      > **Approve path**: customer-side requested closure for the
+      > `personal_loan` account via `httpx` (cookie-only, no Keycloak
+      > needed there); logged into `/ui/login` as `underwriter1` through
+      > a **real Keycloak Authorization Code flow in an actual Chrome
+      > browser** (`claude-in-chrome`, not a scripted OAuth dance);
+      > navigated to `/ui/underwriter/closures`, saw both pending
+      > requests rendered correctly (account id, customer id, product,
+      > requested-at timestamp), typed a real attestation comment, and
+      > clicked Approve. Confirmed via `psql`: `status` → `CLOSED`,
+      > `closure_decided_by` → `underwriter1`, `closure_decision_comment`
+      > → the typed text; confirmed via the worker's own stdout that the
+      > fake closure-decision email printed with the correct product
+      > type and comment.
+      > **Reject path**: same browser session, same screen — typed a
+      > different attestation comment on the `auto_loan` row and clicked
+      > Reject. Confirmed `status` reverted to `ACTIVE` (not a new
+      > terminal state), `closure_decided_by`/`closure_decision_comment`
+      > still recorded, and the queue correctly emptied to "No pending
+      > closure requests" after both decisions.
+      > **The actual payoff, confirmed for real**: `get_available_product_types`
+      > called again after both decisions returned exactly
+      > `['personal_loan']` — the approved-and-closed account's product
+      > type freed up, the rejected-and-reverted one correctly did not.
+      > **Customer-cancel path**: requested closure for the `mortgage`
+      > account, confirmed the pending state and Cancel button rendered,
+      > cancelled it, and confirmed the account reverted to `ACTIVE` and
+      > the request button reappeared — same mechanism P18-7 already
+      > live-verified once, re-run here as this task's own explicit
+      > "separately verify" requirement rather than only citing the
+      > earlier sweep. One test-script bug caught and fixed along the
+      > way (not a product bug): the first cancel attempt failed because
+      > the script never actually requested closure for that account
+      > first — fixed by adding the missing request step before
+      > attempting to cancel.
+      >
+      > Cleaned up thoroughly: closed the browser tab, killed both local
+      > processes, restarted the real `app` container, and deleted every
+      > seeded row (`customers`/`applications`/`accounts` for
+      > `CUS-356118901`) from the disposable test database — the live
+      > compose stack's own `loan_onboarding` database was never
+      > touched. Full unit suite: 274 passed (unchanged — this task adds
+      > no new code, only verification + docs), same pre-existing
+      > `BACKOFFICE_REDIS_URL` failures as always; `lint-imports` still
+      > 9/9. `CLAUDE.md`'s "Account closure" section header flipped from
+      > "planned" to "built and live-verified", plus a sweep of every
+      > remaining stale "not yet built"/"still P18-N" forward-reference
+      > inside that section and the repo-layout diagram (several were
+      > found still stale from earlier P18-2 through P18-7 passes, since
+      > each one only updated its own bullet, not every prior forward-
+      > reference to it). `PRD.md` §6.6's header, §8.1/§8.2's two
+      > "(Planned...)" bullets (the staff-side one also corrected to
+      > describe the actually-built unpaginated/no-dialog shape, not the
+      > originally-planned paginated/dialog one), §9.2's two `accounts`
+      > table rows, and §11's "close account" open question all updated
+      > from "planned"/"not yet built" to "built"/"live-verified".
+      >
+      > **Not done, and deliberately so**: commit/push/CI-green. Git
+      > commits are only ever made in this codebase when the user
+      > explicitly asks for one in the conversation, not automatically
+      > because a task's own DoD line mentions it. Phase 18 (P18-1
+      > through P18-8, all eight tasks now complete) sits uncommitted in
+      > the working tree, ready for the user to review and commit
+      > whenever they choose.
 
 ---
 
@@ -3400,6 +3837,246 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-06 (Phase 18 started, P18-1)** — Extended `db/schema.sql`'s
+  `accounts` table per Phase 18's design: `status`'s `CHECK` now
+  includes `'CLOSURE_REQUESTED'` alongside `ACTIVE`/`CLOSED`, plus five
+  new nullable columns (`closure_workflow_id`, `closure_requested_at`,
+  `closure_decision_comment`, `closure_decided_by`,
+  `closure_decided_at`). Verified by applying the whole file to a
+  throwaway database inside the already-running `db` container
+  (`CREATE DATABASE schema_p18_test` → apply → `\d accounts` → drop),
+  not the live `loan_onboarding` database — this project's schema is
+  only ever applied by `db/init/01-init.sh` on first container start,
+  so there's no in-place migration path; picking up this change on the
+  live stack needs `docker compose down -v && docker compose up -d db`
+  (same convention P13-7 used), left for P18-8's full live
+  verification rather than done now, to avoid wiping the live stack's
+  existing data mid-phase.
+
+  **P18-2**: promoted `bff_customer/notifications.py` into the new
+  `loan_onboarding/notifications/service.py` leaf module (`idgen/`'s
+  shape — zero dependency on anything else in this codebase), moving
+  `send_verification_code` over unchanged and adding
+  `send_account_closure_decision`. Updated `bff_customer/routes.py`'s
+  import to the standard `... import service as notifications_service`
+  convention (was a bare `notifications` name before this move) and
+  fixed every doc-comment pointer in `identity.py`/`routes.py`/
+  `CLAUDE.md`/`PRD.md` that named the old path. Added
+  `tests/unit/notifications/test_service.py` (no dedicated OTP-delivery
+  test existed to "keep passing unchanged" — confirmed by grep, same
+  accepted `bff_customer` route-level-testing gap P16-3/P17-2 already
+  note). New `.importlinter`/`pyproject.toml` contract plus a bottom-
+  layer slot for `notifications` alongside `idgen`; `lint-imports` green
+  at 9/9. Full unit suite: 247 passed, same pre-existing
+  `BACKOFFICE_REDIS_URL` Redis-fixture failures as always plus one
+  unrelated one-off statistical flake in `idgen`'s large-sample
+  uniqueness test (9999/10000) — neither caused by this task.
+
+  **P18-3**: added `task_queue_for_account_closure()`
+  (`task_queues.py`) and `CloseAccountWorkflow`/its input-output
+  dataclasses (`workflows.py`), plus `start_close_account_workflow`/
+  `signal_close_account_decision`/`signal_close_account_cancel`
+  (`service.py`) — reusing `LoanApplicationWorkflow`'s own
+  `ROLE_*`/`DECISION_*` constants rather than inventing a parallel
+  taxonomy. Tests added to the existing `test_workflows.py` (approve,
+  reject-reverts-to-`ACTIVE`, customer-cancel, a concurrent
+  decision-vs-cancel race, wrong-actor-role rejection) plus four
+  `test_service.py` validation tests. One test design mistake caught
+  and fixed in the same pass: an initial "signal `cancel()` after
+  `handle.result()`" test to prove cancel-after-decision is a no-op
+  doesn't actually test that — Temporal raises `RPCError: Completed
+  workflow` at the transport level for a signal against an already-
+  closed execution, before any workflow-internal logic ever runs;
+  replaced with a concurrent-signals version (`asyncio.gather`) mirroring
+  the existing `test_two_concurrent_terminal_signals_only_write_once`
+  pattern, which does exercise `_claim_transition()`'s guard for real.
+  Full unit suite: 257 passed (up from 247 by these 10 new tests);
+  `lint-imports` still green at 9/9 (this task adds no new import
+  edges — `workflow/` still imports nothing from `application/`/
+  `document/`/`customer/`/`account/`). `CLAUDE.md`'s "Account closure"
+  section updated to describe the built `CloseAccountWorkflow` shape.
+
+  **P18-4**: built `account/service.py`'s `request_closure` +
+  `account/activities.py`'s two activities + `account/db.py`'s two new
+  `UPDATE` helpers + `account/models.py`'s widened `Account`/new
+  `AccountNotActive`. Found and fixed a real design gap along the way
+  (not part of the original task wording): `send_account_closure_decision`
+  needs `applicant_identifier`, which `accounts` doesn't carry and
+  `account/` isn't allowed to resolve via `customer/` — fixed by
+  threading it through as an opaque parameter, revising P18-3's
+  already-committed `CloseAccountWorkflowInput`/
+  `PersistClosureDecisionInput` and their tests in the same pass (see
+  P18-4's own `DONE` note above for the full mechanism). Also had to
+  restructure `pyproject.toml`'s `layers` contract, not just widen
+  `account/`'s forbidden-imports list — `account/` and `workflow/` were
+  siblings in the same layer bar, which a `layers` contract checks for
+  mutual independence, so `account/` importing `workflow/` would have
+  broken it regardless of the module-specific contract. New
+  `tests/unit/account/test_activities.py` plus additions to
+  `test_service.py`: 265 passed overall (up from 257 by 8 new tests),
+  `lint-imports` still green at 9/9. One local-environment snag, not a
+  code bug: `loan_onboarding_test` still had the pre-P18-1 `accounts`
+  schema (its own re-creation from schema.sql happened once during
+  P18-1's own verification, against a *scratch* database, not this
+  disposable test one) — dropped and recreated it from the current
+  `db/schema.sql` before any of this session's tests would pass; the
+  live compose stack's own `loan_onboarding` database was left
+  untouched. `CLAUDE.md` updated in four spots (see P18-4's own `DONE`
+  note).
+
+  **P18-5**: added `workflow/worker.py`'s sibling
+  `_build_account_closure_worker`/`run_account_closure_worker`
+  functions and wired them into `worker_main.py`'s `main()` via
+  `asyncio.gather()` alongside the existing `run_worker(...)` call, one
+  `WORKER_MODE` value governing both. Hit and fixed a real hang along
+  the way: the existing `tests/unit/test_worker_main.py` only mocked
+  `run_worker`, so once `main()` started gathering a second, real
+  awaitable, all three of its tests hung forever (a real, unmocked
+  `run_account_closure_worker` connects to a live Temporal server and
+  runs its `Worker` indefinitely) — this surfaced as the *entire*
+  `pytest tests/unit` run silently hanging at the same 77%-through point
+  every time, not as an obviously-related failure; found by re-running
+  with `-v` to see the exact stuck test name, fixed by mocking both
+  functions in every test. Diagnosing this also required killing some
+  stray pytest processes and restarting `db` once more (safe, data on
+  the volume) after repeated interrupted runs left Postgres connections
+  accumulated on `loan_onboarding_test` — an operational hazard, not a
+  code issue, consistent with `CLAUDE.md`'s existing Testing-section
+  warnings about this class of problem. Full suite after the fix: 269
+  passed (up from 265 by 4 new `test_worker.py` tests), ~8s, no hang;
+  `lint-imports` unaffected at 9/9. **Did the full live
+  integration-verify this DoD calls for, not just unit tests**: ran a
+  real `python -u -m loan_onboarding.worker_main` process against the
+  real local Temporal server (`localhost:7233`) and the disposable
+  `loan_onboarding_test` database (not the live stack's own), seeded an
+  `ACTIVE` account, called `account.service.request_closure(...)` and
+  confirmed the live worker flipped it to `CLOSURE_REQUESTED`, then sent
+  a real approve signal and confirmed it reached `CLOSED` with the
+  correct `closure_decided_by`/comment and the fake closure-decision
+  email printed with the right `applicant_identifier` — proving the
+  whole P18-3/P18-4/P18-5 chain actually works end-to-end against real
+  Temporal, not just against `WorkflowEnvironment` fakes. Cleaned up the
+  local worker process and the scratch account row afterward.
+  `CLAUDE.md`'s `workflow/` module section (`worker.py` bullet) and the
+  "Account closure" design section both updated to describe the built
+  shape.
+
+  **P18-6**: built `bff_backoffice/routes.py`'s closure-request queue —
+  `GET /ui/{role}/closures` (unpaginated, no bulk-select, deliberately —
+  this task's own wording never mentioned either, unlike every
+  application-queue task) and `POST /ui/{role}/closures/{account_id}/decision`,
+  gated by role only via the existing `_role_dependency`. Chose a plain
+  per-row `<form>` (POST-redirect-GET) over an htmx dialog — matches
+  `bff_customer`'s own Cancel/Resubmit pattern, simpler than the
+  applications queue's live-polling machinery, appropriate for a
+  low-frequency staff action. Added `account/db.py`'s
+  `list_by_status` and `account/service.py`'s
+  `list_pending_closure_requests`/`wait_for_status_change` (the latter
+  reusing P18-4's own `_wait_until`, identical shape to
+  `application.service.wait_for_status_change`). New `closures.html`
+  template plus a nav link from `staff.html` (otherwise unreachable).
+  `bff_backoffice` still has no route-level test file (confirmed, same
+  accepted gap P16-3/P17-2 already note) — 5 new
+  `tests/unit/account/test_service.py` tests cover the two new service
+  functions instead, per this task's own DoD fallback. The "role-
+  mismatch gets a test" requirement is satisfied by P18-3's *existing*
+  `workflow/service.py` tests
+  (`test_signal_close_account_decision_rejects_customer_actor_role`/
+  `_rejects_unknown_actor_role`) rather than a new test — this route's
+  decision call goes straight through `signal_close_account_decision`,
+  already covered there, and role-gating itself is delegated to
+  `_role_dependency`, already covered by `test_keycloak_session.py`.
+  Full suite: 274 passed (up from 269 by 5 new tests), `lint-imports`
+  still 9/9. **Live Keycloak-authenticated UI verification deliberately
+  left to P18-8** (its own explicit job per this phase's plan) — this
+  task's own verification was import/template-compile sanity checks
+  plus the full unit suite, not a browser click-through; said so
+  explicitly rather than overclaiming a live sweep that didn't happen.
+  `CLAUDE.md` updated in two spots (the "Account closure" design
+  section's "Staff review surface" bullet, and a new bullet in
+  `bff_backoffice/`'s own module section matching how Consent-upload is
+  documented there).
+
+  **P18-7**: built `bff_customer/routes.py`'s customer-facing "Request
+  account closure"/"Cancel closure request" actions, reusing
+  `_owned_account` (Consent-upload's own ownership check) plus each
+  route's own `account.status` guard. Plain POST-redirect-GET, matching
+  Cancel/Resubmit. `application_detail.html` gained the Account closure
+  section (request button / pending-status-plus-cancel / hidden, per
+  `account.status`). No new unit tests — `bff_customer` still has no
+  route-level test file (same accepted gap Cancel/Resubmit already
+  have) and `signal_close_account_cancel` matches its own untested
+  precedent (`signal_resubmit`); the service functions this feature
+  actually calls were already fully covered by P18-4/P18-6. **Unlike
+  P18-6, did a real live verification rather than deferring to P18-8** —
+  `bff_customer` needs no Keycloak, so a full scripted `httpx` flow
+  (identify → verify → request → cancel) against a local
+  `uvicorn`+`worker_main.py` pair, the real Postgres/Temporal/Mayan
+  stack, and a synthetic seeded `APPROVED` application + `ACTIVE`
+  account was actually tractable. Hit and fixed one real snag along the
+  way: the local app crashed with `KeyError: 'MAYAN_BASE_URL'` on the
+  first detail-page load (`.env`'s `MAYAN_BASE_URL=http://mayan:8000` is
+  the docker-internal hostname, unreachable from a locally-run process —
+  needed the host-published `http://localhost:8000` instead) plus one
+  transient `ReadTimeout` (Mayan's own documented O(all-documents)
+  per-call fetch pattern, not a bug — fixed by raising the test client's
+  timeout). Confirmed via the worker's own stdout that the fake
+  closure-decision email fired with the correct `applicant_identifier`.
+  Cleaned up the local processes and seeded rows afterward. Full suite
+  unchanged at 274 passed, `lint-imports` unchanged at 9/9. `CLAUDE.md`
+  updated in two spots (the "Account closure" design section's
+  "Customer-facing trigger" bullet, and a new bullet in
+  `bff_customer/`'s own module section).
+
+  **P18-8 — the final task, Phase 18 now fully complete.** Seeded one
+  real customer with three `APPROVED` applications, each producing its
+  own `ACTIVE` account (`personal_loan`/`auto_loan`/`mortgage`);
+  confirmed the baseline `get_available_product_types` returned `[]`
+  (active in all three). Ran a local `worker_main.py` + local
+  `uvicorn` against the real Postgres/Temporal/Keycloak/`backoffice-redis`/
+  Mayan. Hit one real environment snag: Keycloak's realm only registers
+  `redirect_uri`s for `localhost:8000`/`8001`, both already taken (Mayan
+  and the live `app` container respectively) — fixed by briefly
+  `docker stop`-ing the live `app` container (stateless, safe, reversible)
+  to free 8001, then `docker start`-ing it back the moment verification
+  finished. **Approve path**: requested closure customer-side via
+  `httpx`, then logged into `/ui/login` as `underwriter1` through a
+  **real Keycloak Authorization Code flow in an actual Chrome browser**
+  (`claude-in-chrome`) — not a scripted OAuth dance — saw the pending
+  request on `/ui/underwriter/closures`, typed a real attestation
+  comment, clicked Approve; confirmed via `psql` the account reached
+  `CLOSED` with the right `closure_decided_by`/comment, and via the
+  worker's stdout that the fake email fired. **Reject path**: same
+  browser session, same screen, second account — confirmed it reverted
+  to `ACTIVE` (not a new terminal state) rather than freeing up its
+  product type. **The actual payoff, confirmed for real**:
+  `get_available_product_types` returned exactly `['personal_loan']`
+  afterward — the closed account's type freed up, the reverted one
+  correctly did not. **Customer-cancel path**: re-verified (a third
+  account) after catching and fixing one test-script bug (forgot to
+  request closure before attempting to cancel) — confirmed the
+  ACTIVE/CLOSURE_REQUESTED/ACTIVE round trip. Cleaned up thoroughly:
+  browser tab closed, both local processes killed, the real `app`
+  container restarted, every seeded row deleted from the disposable
+  test database — the live compose stack's own `loan_onboarding`
+  database was never touched throughout Phase 18. Full unit suite: 274
+  passed (unchanged), `lint-imports` 9/9 (unchanged) — this task added
+  no new code, only verification and documentation. Swept every
+  remaining stale "planned"/"not yet built"/"still P18-N" forward-
+  reference across `CLAUDE.md`'s "Account closure" section (several
+  were found still stale from P18-2 through P18-7, since each of those
+  passes only updated its own bullet, not earlier forward-references to
+  it) and `PRD.md` (§6.6's header, both §8.1/§8.2 "(Planned...)"
+  bullets — the staff-side one also corrected to describe the actually-
+  built unpaginated/no-dialog shape rather than the originally-planned
+  paginated/dialog one, §9.2's two `accounts` table rows, §11's "close
+  account" open question) — all now read "built"/"live-verified".
+  **Deliberately not done**: commit/push/CI-green — git commits happen
+  in this codebase only when the user explicitly asks, not
+  automatically because a DoD line mentions it. **Phase 18 (P18-1
+  through P18-8) is now fully built and live-verified**, sitting
+  uncommitted in the working tree for the user's review.
 
 - **2026-09-05 (Phase 17 built + Phase 18 planned)** — Live-tested the
   existing active-account-per-product-type rule through the real

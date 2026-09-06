@@ -4,6 +4,7 @@
   <h1 class="text-xl font-semibold m-0">
     {% if role == "underwriter" %}Underwriting Queue{% else %}Manager Approval Queue{% endif %}
   </h1>
+  <a href="/ui/{{ role }}/closures" class="text-sm text-blue-700 hover:underline">Account closure requests &rarr;</a>
 </div>
 {% include "_bulk_toolbar.html" %}
 {% include "_staff_list.html" %}

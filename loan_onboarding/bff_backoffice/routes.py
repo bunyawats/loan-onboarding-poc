@@ -37,7 +37,7 @@ from fastapi.templating import Jinja2Templates
 from temporalio.client import Client
 
 from loan_onboarding.account import service as account_service
-from loan_onboarding.account.models import Account
+from loan_onboarding.account.models import Account, AccountNotFound
 from loan_onboarding.application import service as application_service
 from loan_onboarding.application.models import ApplicationNotFound, ApplicationPage
 from loan_onboarding.bff_backoffice import keycloak_auth, keycloak_session, selection_store
@@ -786,3 +786,88 @@ async def manager_bulk_decision(
     user: dict = Depends(_role_dependency(ROLE_MANAGER)),
 ):
     return await _bulk_decision_execute(request, ROLE_MANAGER, decision, comment, page, query_id, user)
+
+
+# ------------------------------------------------------- account closure ----
+# Phase 18, P18-6 -- see CLAUDE.md's "Account closure". Deliberately a
+# much smaller surface than the application queues above: no
+# pagination, no bulk actions (account/service.py's own
+# list_pending_closure_requests docstring explains why -- a
+# supplementary, low-volume screen, same "available to anyone who can
+# see it" framing the existing Consent-upload action already uses), and
+# **gated by role only, not a Keycloak permission scope** -- either
+# Underwriter or Manager may decide a closure request, no escalation
+# tier to gate on (CLAUDE.md's three confirmed Phase 18 scoping
+# decisions).
+
+_CLOSURE_DECISIONS = (DECISION_APPROVE, DECISION_REJECT)
+
+
+async def _staff_closures(request: Request, role: str, error: Optional[str] = None) -> HTMLResponse:
+    accounts = await account_service.list_pending_closure_requests()
+    return _render(request, "closures.html", {"role": role, "accounts": accounts, "error": error})
+
+
+@router.get("/underwriter/closures", response_class=HTMLResponse)
+async def underwriter_closures(request: Request, user: dict = Depends(_role_dependency(ROLE_UNDERWRITER))):
+    return await _staff_closures(request, ROLE_UNDERWRITER)
+
+
+@router.get("/manager/closures", response_class=HTMLResponse)
+async def manager_closures(request: Request, user: dict = Depends(_role_dependency(ROLE_MANAGER))):
+    return await _staff_closures(request, ROLE_MANAGER)
+
+
+async def _staff_closure_decision(
+    request: Request, account_id: str, role: str, decision: str, comment: str, user: dict[str, Any]
+) -> HTMLResponse:
+    if decision not in _CLOSURE_DECISIONS:
+        raise HTTPException(status_code=400, detail=f"invalid closure decision {decision!r}")
+
+    try:
+        account = await account_service.get(account_id)
+    except AccountNotFound:
+        raise HTTPException(status_code=404)
+    if account.status != "CLOSURE_REQUESTED" or account.closure_workflow_id is None:
+        # Stale page (someone else already decided it, or it was
+        # cancelled) -- re-render the queue with an explanation rather
+        # than a raw error, same "the UI hides it, the route still
+        # double-checks" discipline every other decision route here
+        # follows.
+        return await _staff_closures(
+            request, role, error=f"account {account_id} no longer has a pending closure request"
+        )
+
+    client = await _get_temporal_client()
+    await workflow_service.signal_close_account_decision(
+        client, account.closure_workflow_id, role, decision, user["username"], comment
+    )
+    await account_service.wait_for_status_change(account_id, account.status)
+
+    # Plain POST-redirect-GET, not an htmx fragment swap -- same pattern
+    # bff_customer's own Cancel/Resubmit actions use, appropriate for a
+    # low-frequency staff action rather than the applications queue's
+    # live-polling, in-place row updates.
+    return RedirectResponse(url=f"/ui/{role}/closures", status_code=303)
+
+
+@router.post("/underwriter/closures/{account_id}/decision")
+async def underwriter_closure_decision(
+    request: Request,
+    account_id: str,
+    decision: str = Form(...),
+    comment: str = Form(""),
+    user: dict = Depends(_role_dependency(ROLE_UNDERWRITER)),
+):
+    return await _staff_closure_decision(request, account_id, ROLE_UNDERWRITER, decision, comment, user)
+
+
+@router.post("/manager/closures/{account_id}/decision")
+async def manager_closure_decision(
+    request: Request,
+    account_id: str,
+    decision: str = Form(...),
+    comment: str = Form(""),
+    user: dict = Depends(_role_dependency(ROLE_MANAGER)),
+):
+    return await _staff_closure_decision(request, account_id, ROLE_MANAGER, decision, comment, user)

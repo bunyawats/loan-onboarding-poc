@@ -8,7 +8,7 @@ from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 
 from loan_onboarding.workflow.task_queues import KNOWN_PRODUCT_TYPES
-from loan_onboarding.workflow.worker import VALID_MODES, _build_workers
+from loan_onboarding.workflow.worker import VALID_MODES, _build_account_closure_worker, _build_workers
 
 
 @activity.defn(name="noop_one")
@@ -75,3 +75,38 @@ def test_build_workers_rejects_unknown_product_type():
 
 def test_valid_modes_matches_worker_mode_semantics():
     assert VALID_MODES == ("both", "workflow", "activity")
+
+
+# ----------------------------------------------------------------------
+# Account closure (Phase 18, P18-5) -- a single Worker, no per-product-
+# type fan-out, so these tests are simpler than _build_workers' own.
+# ----------------------------------------------------------------------
+
+
+async def test_build_account_closure_worker_both_mode_starts_polling_without_error(
+    env: WorkflowEnvironment,
+):
+    worker = _build_account_closure_worker(env.client, [_noop_one, _noop_two], worker_mode="both")
+    async with worker:
+        pass  # entering/exiting confirms it started (and stopped) cleanly
+
+
+async def test_build_account_closure_worker_workflow_mode_registers_no_activities(
+    env: WorkflowEnvironment,
+):
+    worker = _build_account_closure_worker(env.client, [_noop_one], worker_mode="workflow")
+    async with worker:
+        pass
+
+
+async def test_build_account_closure_worker_activity_mode_registers_no_workflow(
+    env: WorkflowEnvironment,
+):
+    worker = _build_account_closure_worker(env.client, [_noop_one], worker_mode="activity")
+    async with worker:
+        pass
+
+
+def test_build_account_closure_worker_rejects_invalid_worker_mode():
+    with pytest.raises(ValueError, match="worker_mode"):
+        _build_account_closure_worker(None, [], worker_mode="bogus")

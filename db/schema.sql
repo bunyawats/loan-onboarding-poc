@@ -69,7 +69,27 @@ CREATE TABLE accounts (
                         CHECK (product_type IN ('personal_loan', 'auto_loan', 'mortgage')),
     opened_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     status          TEXT NOT NULL DEFAULT 'ACTIVE'
-                        CHECK (status IN ('ACTIVE', 'CLOSED'))
+                        CHECK (status IN ('ACTIVE', 'CLOSURE_REQUESTED', 'CLOSED')),
+
+    -- Closure request/decision tracking (Phase 18, "Account closure" --
+    -- see CLAUDE.md). All nullable, all unset until a customer requests
+    -- closure. Only the CURRENT request's data is kept -- like
+    -- applications' own decision columns, a second request after a
+    -- rejection (which reverts status back to ACTIVE) overwrites these
+    -- rather than preserving history, same POC-scale simplification
+    -- this file already accepts elsewhere.
+    closure_workflow_id        TEXT,
+    closure_requested_at       TIMESTAMPTZ,
+    -- Staff attestation text (e.g. "balance confirmed zero") -- this POC
+    -- has no ledger, so this is a manual confirmation, not a computed
+    -- check. See CLAUDE.md "Account closure".
+    closure_decision_comment   TEXT,
+    -- Authenticated Keycloak preferred_username of the deciding staff
+    -- member (Underwriter or Manager, either role may decide -- no
+    -- escalation tier for closure) -- never client-submitted free text,
+    -- same discipline as applications.underwriter_name/manager_name.
+    closure_decided_by         TEXT,
+    closure_decided_at         TIMESTAMPTZ
 );
 
 -- Deliberately NOT unique on customer_id alone -- a customer can hold
