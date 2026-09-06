@@ -118,7 +118,10 @@ dependency, a pure function with zero I/O and zero state.
 module, `notifications/`, same shape as `idgen/` — promoted out of
 `bff_customer/notifications.py` (which `bff_customer/routes.py` now
 imports from instead) so `account/activities.py` can send an email from
-inside a Temporal activity without reaching into a BFF.
+inside a Temporal activity without reaching into a BFF. **Built (Phase
+19)**: `application/activities.py` gains this same exception too, so it
+can send the Welcome Letter email — see "Applying without being a
+customer yet" above and PRD §6.5.
 
 **Also not drawn, and no longer accurate as drawn (Phase 18, P18-4,
 built)**: `account/` is no longer a pure leaf — it now has its own
@@ -174,7 +177,12 @@ them:
   directly (an in-process function call — no HTTP, no serialization
   boundary beyond normal Python objects) and
   `workflow.service.start_workflow(...)`/`signal_decision(...)`/
-  `signal_resubmit(...)`.
+  `signal_resubmit(...)`. **Built (Phase 19)**: `application/activities.py`
+  also gains `notifications/` (the Welcome Letter email) — the same
+  justified, single-file-scoped exception `account/activities.py`
+  already has from Phase 18, not a general "`application/` may import
+  `notifications/`" opening (nothing
+  in `application/service.py` needs it).
 - **`application/service.py` may only call `customer/` and `account/`'s
   read-only functions — never their writes.** Corrected from an earlier
   draft of this file, which claimed `service.py` "never imports
@@ -353,6 +361,28 @@ the *outcome* of an approved loan, not something that pre-exists it.**
      an earlier draft of this file already accepted; only the mechanism
      that makes the retry recognize "already provisioned" has moved,
      from a column on `applications` to the `accounts` row itself.)
+     **Built (Phase 19)**: a fourth call in this same block,
+     `notifications.service.send_welcome_letter_email(applicant_identifier,
+     account_id, product_type, amount)`, right alongside
+     `generate_welcome_letter` — the second of PRD §4's two narrow
+     exceptions to the no-proactive-notification non-goal (the first,
+     already built, is the account-closure-decision email — see
+     "Account closure" below). Deliberately placed inside this same
+     `existing_account is None` guard, not a separate check: same
+     "a retry skips it, permanently, rather than resending" tradeoff
+     this bullet already accepts for the other three calls, not a new
+     idempotency mechanism — **confirmed live, not just in theory**,
+     during P19-3's own verification sweep: an unrelated local-environment
+     mistake (a worker process missing its Mayan env vars) made a real
+     retry take exactly this skip path, proving the accepted tradeoff
+     holds for the new call too, not only the original three. Requires a
+     new import edge, `application/activities.py` → `notifications/` —
+     `application/`
+     doesn't have this exception yet (only `account/` does, from Phase
+     18); no `.importlinter`/`pyproject.toml` layers restructuring
+     needed to add it, unlike `account/`'s own case, since
+     `application/` already sits above the bottom `idgen | notifications`
+     tier in the existing layers contract.
   4. Write `status` and the underwriter/manager decision columns on
      `applications` — `customer_id` travels along in this same
      `UPDATE` (harmless if it's already set: `COALESCE` preserves it
@@ -1349,6 +1379,13 @@ modules.
   `customer.service.update_profile(...)` when already set (an existing
   customer, unconditionally refreshed from this application's fields).
   See "Returning-customer profile refresh and ID reuse" above.
+  **(Phase 19, built)**: `activities.py` also gains
+  `notifications/` — same activities.py-only-exception shape as
+  `customer/`/`account/` already are (unlike `document/`, which
+  `application/` as a whole is already allowed to import) — used only
+  for the one `notifications.service.send_welcome_letter_email(...)`
+  call inside the same provisioning block — see "Applying without being
+  a customer yet" above.
 
 **Denormalized applicant fields, on purpose**: `applicant_name`/
 `applicant_email`/`applicant_phone` are captured on the application
@@ -2404,6 +2441,29 @@ entry, unless a more specific pointer is given.)*
   data) before new code that assumes the new columns exist can run
   safely against it. No tooling in this project currently detects or
   prevents this mismatch.
+- **A local `worker_main.py` process and the dockerized
+  `worker-workflow`/`worker-activity` containers silently race each
+  other for the same Temporal task queues if both are left running at
+  once — found live during Phase 19's own verification, not previously
+  documented.** Multiple workers polling one task queue is normal,
+  intentional Temporal behavior (this file's own "Deployment" section
+  says so), but it becomes a real hazard the moment those workers point
+  at *different* databases — exactly the situation every P18/P19
+  local-process verification session creates on purpose (a local worker
+  against the disposable `loan_onboarding_test`, so the live stack's own
+  data is never touched), if the session only stops the `app` container
+  and forgets the two worker containers are still up and still polling
+  against the *live* `loan_onboarding` database. Whichever worker
+  happens to win a given activity attempt determines whether it succeeds
+  (found the row in the database it's pointed at) or fails outright
+  (`AssertionError: application ... not found`) — confirmed live via
+  `tctl workflow show`'s full event history, whose `/app/...` stack-trace
+  paths (vs. this machine's own `/Users/...` ones) revealed a dockerized
+  worker had picked up a retry meant for the local one. **The operating
+  rule this confirms**: any local-worker verification session must stop
+  *all three* of `app`/`worker-workflow`/`worker-activity`, not just
+  `app` — the two worker containers hold no port to conflict with, so
+  it's easy to forget they're still silently polling and racing.
 - **Reconciliation (`reconcile.py`) only detects and fixes drift — it
   never prevents it, and nothing runs it automatically.** It has to be
   invoked by a human or a scheduled job, neither of which this project

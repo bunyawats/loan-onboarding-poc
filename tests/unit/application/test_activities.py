@@ -60,6 +60,22 @@ def _mock_document_service(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def _mock_notifications_service(monkeypatch):
+    """Not autouse, unlike `_mock_document_service` -- the real
+    `notifications.service.send_welcome_letter_email` is a harmless
+    `print()` with no external dependency (unlike `document_service`,
+    which needs a real Mayan this test suite doesn't stand up), so it's
+    only mocked in the tests that actually assert on its calls."""
+    calls = []
+
+    def fake_send_welcome_letter_email(applicant_identifier, account_id, product_type, amount):
+        calls.append((applicant_identifier, account_id, product_type, amount))
+
+    monkeypatch.setattr(activities.notifications_service, "send_welcome_letter_email", fake_send_welcome_letter_email)
+    return calls
+
+
 def _application_input(**overrides):
     application_id = _new_application_id()
     defaults = dict(
@@ -169,6 +185,53 @@ async def test_persist_decision_approve_provisions_customer_and_account(_mock_do
     assert len(_mock_document_service["welcome_letter"]) == 1
     assert _mock_document_service["welcome_letter"][0][0] == record["applicant_identifier"]
     assert _mock_document_service["welcome_letter"][0][1] == account.account_id
+
+
+async def test_persist_decision_approve_sends_welcome_letter_email(_mock_document_service, _mock_notifications_service):
+    application_id = await _seed_application()
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="approved",
+            resulting_status="APPROVED",
+        )
+    )
+
+    record = await application_db.get(application_id)
+    account = await account_service.get_by_application_id(application_id)
+
+    assert len(_mock_notifications_service) == 1
+    applicant_identifier, account_id, product_type, amount = _mock_notifications_service[0]
+    assert applicant_identifier == record["applicant_identifier"]
+    assert account_id == account.account_id
+    assert product_type == "personal_loan"
+    assert amount == str(record["amount"])
+
+
+async def test_persist_decision_approve_does_not_resend_welcome_letter_email_on_retry(
+    _mock_document_service, _mock_notifications_service
+):
+    application_id = await _seed_application()
+    decision_input = PersistDecisionInput(
+        application_id=application_id,
+        actor_role="underwriter",
+        decision="APPROVE",
+        actor_name="u1",
+        comment="approved",
+        resulting_status="APPROVED",
+    )
+
+    await activities.persist_decision(decision_input)
+    # Simulates Temporal retrying an already-completed execution -- same
+    # existing_account-is-not-None guard that already skips
+    # document.service's own three calls, permanently.
+    await activities.persist_decision(decision_input)
+
+    assert len(_mock_notifications_service) == 1
 
 
 async def test_persist_decision_approve_seeds_new_customer_profile(_mock_document_service):

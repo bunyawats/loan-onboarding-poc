@@ -22,3 +22,17 @@ def test_send_account_closure_decision_prints_all_fields(capsys):
     assert "personal_loan" in out
     assert "APPROVED" in out
     assert "balance confirmed zero" in out
+
+
+def test_send_welcome_letter_email_prints_all_fields(capsys):
+    service.send_welcome_letter_email(
+        applicant_identifier="carol@example.com",
+        account_id="ACC-000000002",
+        product_type="auto_loan",
+        amount="15000.00",
+    )
+    out = capsys.readouterr().out
+    assert "carol@example.com" in out
+    assert "ACC-000000002" in out
+    assert "auto_loan" in out
+    assert "15000.00" in out

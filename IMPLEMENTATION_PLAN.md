@@ -3829,6 +3829,201 @@ concluded — a later session started building it, at P18-1.**
 
 ---
 
+## Phase 19 — Welcome Letter email notification
+
+This section describes the target design for this phase, written first
+per this project's own convention — **nothing in this section is
+implemented yet.** Raised directly by the user, in the same spirit as
+Phase 18's own account-closure-decision email: PRD §4's "no proactive
+notification" non-goal already carries one deliberately narrow,
+confirmed exception (the account-closure decision email, built in
+Phase 18); this phase adds a second, equally narrow one — the customer
+gets emailed at the same moment their Welcome Letter is generated
+(i.e. the moment their account is created, on approval). See PRD §4 and
+§6.5, and `CLAUDE.md`'s "Applying without being a customer yet" and
+module-dependency-graph sections, for the confirmed design this phase
+builds.
+
+**Scoping, confirmed before any code is written, same discipline Phase
+18's own three confirmed decisions followed**: (1) this is not a
+reopening of "notify on every status change" — it's one more
+specific, named moment, chosen because the account's existence is new
+information the customer has no other way to learn proactively (unlike
+every other status change, which the customer already knows to check
+for); (2) same fake/dev-only delivery mechanism every other
+notification in this codebase already uses — no real email provider;
+(3) the trigger point is `application/activities.py`'s `persist_decision`,
+inside the exact same `existing_account is None`-guarded provisioning
+block that already calls `document.service.generate_welcome_letter(...)`
+— not a new activity, not a new idempotency mechanism, the email just
+rides along inside the same guard (a retry skips it, permanently, same
+accepted tradeoff already documented for the other three calls in that
+block).
+
+- [x] **P19-1** — `notifications/service.py`: new
+      `send_welcome_letter_email(applicant_identifier, account_id,
+      product_type, amount)`, same fake/dev-only `print(...)` delivery
+      style as the existing `send_account_closure_decision`.
+      DoD: `tests/unit/notifications/test_service.py` gains a test for
+      the new function (same `capsys`-based style the existing two
+      tests already use).
+      > DONE — added the function exactly as designed, plus updated the
+      > module docstring's "Both functions below log to stdout" to "Every
+      > function below" (stale now that there are three). New
+      > `test_send_welcome_letter_email_prints_all_fields` test added,
+      > same `capsys` style. Full unit suite: 275 passed (up from 274 by
+      > this one new test — a re-run confirmed, after one run showed the
+      > same known one-off statistical flake in `idgen`'s large-sample
+      > uniqueness test this file already documents elsewhere, unrelated
+      > to this change). `lint-imports` unaffected, still 9/9 (this task
+      > touches no imports — `notifications/` itself still imports
+      > nothing, per its own contract).
+- [x] **P19-2** — `application/activities.py`: import
+      `notifications/service.py` (a new activities.py-only exception,
+      same shape `customer/`/`account/` already are — `document/` stays
+      a normal whole-module import, unaffected). Inside `persist_decision`'s
+      `existing_account is None` provisioning block, call
+      `notifications_service.send_welcome_letter_email(record["applicant_identifier"],
+      account.account_id, record["product_type"], str(record["amount"]))`
+      alongside the existing `document.service` calls (order doesn't
+      matter — none of the four calls in this block depend on each
+      other's side effects). **No `.importlinter`/`pyproject.toml`
+      change needed** — confirmed by inspection: unlike `account/`'s own
+      Phase 18 case (which needed the layers contract restructured),
+      no contract in this codebase currently restricts what
+      `application/` itself may import, and the existing layers
+      ordering already puts `application/` above the bottom
+      `idgen | notifications` tier, so this import is already permitted
+      structurally.
+      DoD: `tests/unit/application/test_activities.py` gains a test
+      mocking `notifications_service.send_welcome_letter_email` at the
+      function-call boundary (same convention that file's existing
+      `_mock_document_service` fixture already uses for
+      `document.service`), asserting it's called with the right
+      arguments on a fresh approval and **not** called again on a
+      simulated retry (the existing `existing_account is not None`
+      idempotency path). `lint-imports` still green (confirming the "no
+      contract change needed" claim above was correct, not just
+      assumed).
+      > DONE — implemented exactly as designed, no surprises. Added the
+      > `notifications_service` import and the call, placed right after
+      > `generate_welcome_letter` in the provisioning block. New
+      > `_mock_notifications_service` fixture in `test_activities.py`
+      > (deliberately **not** `autouse`, unlike `_mock_document_service`
+      > — the real function is a harmless `print()` with no external
+      > dependency, unlike `document_service`, which needs a real Mayan
+      > this suite doesn't stand up, so only the two new tests that
+      > assert on its calls actually mock it). Two new tests:
+      > `test_persist_decision_approve_sends_welcome_letter_email`
+      > (asserts all four arguments match the just-created account/
+      > record) and
+      > `test_persist_decision_approve_does_not_resend_welcome_letter_email_on_retry`
+      > (calls `persist_decision` twice with the same input, simulating
+      > a Temporal retry, asserts exactly one call). Full unit suite:
+      > 277 passed (up from 275 by these two), `lint-imports` still 9/9
+      > with the exact same 9 contracts as before — confirming the "no
+      > config change needed" prediction was correct, not just assumed.
+- [x] **P19-3** — Live verification against the real stack: approve a
+      real application, confirm the Welcome Letter document still
+      generates in Mayan exactly as before, and confirm the new email
+      prints in the worker's own stdout with the correct applicant/
+      account/product/amount. Full unit suite and `lint-imports` both
+      green. Update `CLAUDE.md` (the "Applying without being a customer
+      yet" step 3 addendum, the module-dependency-graph `notifications/`
+      callout, the `application/` import rule bullet, and the
+      `activities.py` module-detail bullet — all four currently say
+      "planned, Phase 19, not yet built") and `PRD.md` (§4's second
+      exception, §6.5's `welcome_letter` bullet) from "planned" to
+      reflect built + live-verified status.
+      > DONE, on the third attempt — the first two failed for real
+      > operational reasons unrelated to the P19 code itself, both
+      > diagnosed and fixed in-session, not worked around.
+      >
+      > **Setup**: stopped the live `app` container (freeing port 8001
+      > for Keycloak's registered redirect URI, same maneuver P18-8
+      > used) and ran a local `worker_main.py -u` (unbuffered, so the
+      > new `print()` would actually be visible) plus a local `uvicorn`
+      > against the real Postgres (`loan_onboarding_test`), Temporal,
+      > Keycloak, and Mayan.
+      >
+      > **Attempt 1**: submitted and approved a real application via a
+      > real Chrome browser + Keycloak login. `persist_decision`'s
+      > provisioning block failed with `KeyError: 'MAYAN_BASE_URL'` — a
+      > real setup mistake, not a code bug: the local worker launch
+      > command exported `DATABASE_URL`/`TEMPORAL_HOST`/`WORKER_MODE`
+      > but not the `MAYAN_*` vars `document_service` needs. Fixed by
+      > restarting the worker with the full env. The workflow then
+      > self-recovered to `Completed` — but the actual approved account
+      > was left **without** its documents tagged, without the
+      > Government-ID promotion, without a Welcome Letter, and without
+      > the new email: `create_account` had already committed on the
+      > very first (failing) attempt, so every retry — including the one
+      > that finally "succeeded" once the env was fixed — took the
+      > `existing_account is not None` idempotency-skip path and never
+      > re-ran any of the four provisioning calls at all. A live,
+      > unplanned confirmation of the exact accepted tradeoff this
+      > file's "Applying without being a customer yet" section already
+      > documents, now proven to also cover the new 4th call, not just
+      > the original three (see that section's own updated note).
+      > Cleaned up the partially-provisioned row and its orphaned
+      > uploaded documents (`reconcile.py --fix`) rather than trying to
+      > salvage it.
+      >
+      > **A second, more consequential mistake found while investigating
+      > attempt 1's failure, via `tctl workflow show`'s full event
+      > history**: the docker-composed `worker-workflow`/`worker-activity`
+      > containers were still running and still polling the *same*
+      > Temporal task queues as the local worker the whole time — only
+      > the `app` container had been stopped. One of the retry attempts
+      > was picked up by the dockerized `worker-activity` (visible from
+      > its `/app/...` stack-trace paths, not this machine's own
+      > `/Users/...` ones) instead of the local one, and since that
+      > container points at the *live* `loan_onboarding` database (not
+      > `loan_onboarding_test`, where this session's test application
+      > actually lived), it threw `AssertionError: application
+      > APP-... not found` on that attempt. **This is a real,
+      > previously-undocumented operational hazard**, not unique to this
+      > session — any prior P18 session that ran a local worker against
+      > `loan_onboarding_test` without also stopping the dockerized
+      > workers was exposed to the same silent cross-database race,
+      > whichever worker happened to win a given activity attempt.
+      > Fixed properly: stopped the docker `worker-workflow`/
+      > `worker-activity` containers too (not just `app`), leaving only
+      > the correctly-configured local worker polling.
+      >
+      > **Attempt 2 (clean, after both fixes)**: submitted a fresh
+      > application (all four PDF documents via real Mayan upload),
+      > approved it via a real Keycloak-authenticated `underwriter1`
+      > session. Confirmed everything fired correctly on the first,
+      > uninterrupted try: `APPROVED` status, `ACTIVE` account, and —
+      > **the actual deliverable this task exists to confirm** — the
+      > worker's own stdout printed `Welcome letter email for
+      > e2e-verify@example.com (account ACC-..., personal_loan,
+      > $12345.00) ...` with every field correct. Independently
+      > confirmed via `document.service.list_account_documents(...)`
+      > that the Welcome Letter document still generated in Mayan
+      > exactly as before, and via `list_customer_documents(...)` that
+      > the customer-level Government ID copy (Phase 14/16's own
+      > lifecycle) also still fired — the whole provisioning chain
+      > working end to end on a real, uninterrupted run, not just the
+      > one new call in isolation.
+      >
+      > Cleaned up thoroughly: closed the browser tab, killed both local
+      > processes, restarted **all three** docker containers this
+      > session had stopped (`app`, `worker-workflow`, `worker-activity`
+      > — confirmed all healthy afterward), deleted every seeded row
+      > from `loan_onboarding_test`, and ran `reconcile.py --fix` once
+      > more to clear the second attempt's orphaned documents. Confirmed
+      > final state clean: 0 rows every table, 0 Mayan documents, sane
+      > Postgres connection counts. Full unit suite: 277 passed
+      > (unchanged — this task added no new code), `lint-imports` still
+      > 9/9. `CLAUDE.md` updated in all four spots this task's own DoD
+      > lists (plus a note on the live-confirmed retry-skip behavior);
+      > `PRD.md` updated in both spots. **Phase 19 (P19-1 through P19-3)
+      > is now fully built and live-verified.**
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -3837,6 +4032,91 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-06 (Phase 19 complete — P19-3 live verification)** — Ran
+  P19-3, the final task, in a dedicated session. Full narrative in
+  P19-3's own `DONE` note above; summary: two real operational mistakes
+  hit and fixed before a clean, successful third attempt. (1) The local
+  `worker_main.py` launch forgot the `MAYAN_*` env vars, causing the
+  first approval's `persist_decision` to fail partway through
+  provisioning — the account had already been created before the
+  failure, so every retry (even after fixing the env) took the
+  already-provisioned idempotency-skip path and silently never ran
+  `tag_application_documents`/`promote`/`generate_welcome_letter`/the
+  new email at all. A live, unplanned confirmation that the existing
+  accepted "retry skips provisioning permanently" tradeoff now also
+  covers the new 4th call. (2) While diagnosing (1) via `tctl workflow
+  show`'s event history, found that the dockerized
+  `worker-workflow`/`worker-activity` containers had been left running
+  the whole time, silently racing the local worker for the same
+  Temporal task queues — one retry was picked up by the dockerized
+  worker, which points at the *live* database, not the
+  `loan_onboarding_test` this session's test data actually lived in,
+  producing a confusing `AssertionError: application ... not found`.
+  **A new, previously-undocumented, generally-applicable hazard** — not
+  unique to this session; every prior P18 local-worker verification was
+  equally exposed, just never hit it. Added to `CLAUDE.md`'s Known Gaps.
+  Fixed by stopping all three containers (`app`/`worker-workflow`/
+  `worker-activity`), not just `app`. Third attempt succeeded cleanly:
+  real Keycloak-authenticated approval, `Welcome letter email for
+  e2e-verify@example.com (account ACC-..., personal_loan, $12345.00)`
+  printed correctly in the worker's own stdout, Welcome Letter document
+  and customer-level Government-ID copy both independently confirmed
+  still generating in Mayan exactly as before. Cleaned up thoroughly:
+  every seeded row deleted, `reconcile.py --fix` run twice, all three
+  stopped containers restarted and confirmed healthy. Full unit suite
+  unchanged at 277 passed (no code changes this task), `lint-imports`
+  unchanged at 9/9. `CLAUDE.md` updated in all four spots P19-3's own
+  DoD names, plus the new Known Gaps entry; `PRD.md` updated in both
+  spots. **Phase 19 (P19-1 through P19-3) is now fully built and
+  live-verified** — the Welcome Letter email exists as a second, narrow,
+  confirmed exception to PRD §4's no-proactive-notification non-goal,
+  exactly parallel to the account-closure-decision email Phase 18
+  already shipped.
+
+- **2026-09-06 (Phase 19 planned)** — User asked, after confirming the
+  account-closure-decision email's existence, whether the Welcome
+  Letter is similarly emailed on account creation — it isn't (the
+  letter is a Mayan document only, no notification). User then asked
+  for this to be added as a second narrow exception to PRD §4's
+  no-proactive-notification non-goal, explicitly documentation/planning
+  only this session ("update PRD and create implementation plan
+  first"), same convention Phase 18's own design-only session
+  followed. Wrote the full target design into `PRD.md` (§4's second
+  exception, §6.5's `welcome_letter` bullet) and `CLAUDE.md` (four
+  spots: the "Applying without being a customer yet" provisioning-block
+  step 3, the module-dependency-graph `notifications/` callout, the
+  `application/` import-rule bullet, and the `activities.py`
+  module-detail bullet — all marked "planned, Phase 19, not yet
+  built"), then added Phase 19's three-task breakdown above. Confirmed
+  by inspection (not just assumed) that this phase's `application/` →
+  `notifications/` import needs **no** `.importlinter`/`pyproject.toml`
+  change, unlike account/'s own Phase 18 case — no contract in this
+  codebase restricts what `application/` itself may import, and the
+  existing layers ordering already permits it structurally; P19-2's own
+  DoD includes confirming this via a green `lint-imports` run once the
+  import actually exists, not just trusting this session's own reading
+  of the config. **Explicit user instruction: no code written this
+  session.**
+
+  **P19-1 (separate session)**: built `notifications/service.py`'s
+  `send_welcome_letter_email` exactly as designed, plus a new
+  `capsys`-based test. Full unit suite 275 passed (up from 274),
+  `lint-imports` unaffected at 9/9.
+
+  **P19-2 (separate session)**: wired `application/activities.py`'s
+  `persist_decision` to call it, inside the existing provisioning
+  block, right alongside `generate_welcome_letter`. New
+  `_mock_notifications_service` fixture in `test_activities.py`
+  (deliberately not `autouse`, unlike `_mock_document_service` — the
+  real function has no external dependency to fake around, so only the
+  two new tests that assert on its calls mock it) plus two new tests
+  (fresh-approval arguments, no-resend-on-retry). Confirmed the design
+  session's own prediction for real: `lint-imports` needed zero
+  `.importlinter`/`pyproject.toml` changes, still the same 9 contracts.
+  Full suite: 277 passed (up from 275). Next: P19-3 (live verification
+  against the real stack, then flip every "planned, Phase 19" marker in
+  `CLAUDE.md`/`PRD.md` to "built").
 
 - **2026-09-06 (post-Phase-18: clear test data + full live E2E
   re-verification)** — User asked to clear test data, then to verify

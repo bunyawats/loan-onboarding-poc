@@ -15,7 +15,7 @@ mechanism instead of duplicating it.
 
 **Deliberately fake for this POC.** This project has no real email/SMS
 provider configured anywhere -- no SMTP host, no Twilio/SendGrid/SES
-credentials, nothing in `.env.example`. Both functions below log to
+credentials, nothing in `.env.example`. Every function below logs to
 stdout instead of actually sending anything; `CLAUDE.md`'s Known Gaps
 says so explicitly, and this is the one module that would need to
 change (same signatures, real bodies) if a real provider is ever wired
@@ -49,5 +49,29 @@ def send_account_closure_decision(
     print(
         f"Account closure {decision} for {applicant_identifier} "
         f"(account {account_id}, {product_type}): {comment} "
+        "(POC: no real email/SMS provider configured -- see this module's docstring)"
+    )
+
+
+def send_welcome_letter_email(
+    applicant_identifier: str,
+    account_id: str,
+    product_type: str,
+    amount: str,
+) -> None:
+    """Called only from `application/activities.py`'s `persist_decision`,
+    inside the same `existing_account is None` provisioning block that
+    already calls `document.service.generate_welcome_letter(...)` -- the
+    second of `PRD.md` §4's two narrow exceptions to the "no proactive
+    notification" non-goal, confirmed with the user as scoped to this
+    one moment (account creation), not a general notification feature.
+    Rides along inside that same idempotency guard rather than a new
+    mechanism of its own: a Temporal retry that finds the account
+    already provisioned skips this call too, permanently, same accepted
+    tradeoff already documented for the other three calls in that
+    block."""
+    print(
+        f"Welcome letter email for {applicant_identifier} "
+        f"(account {account_id}, {product_type}, ${amount}) "
         "(POC: no real email/SMS provider configured -- see this module's docstring)"
     )

@@ -1,11 +1,15 @@
 """Concrete Temporal activity implementations, registered under the
 exact string names `workflow/workflows.py` calls by name (CLAUDE.md's
 "Breaking the cycle"). This is the one file in `application/` allowed
-to import `customer/` and `account/` -- provisioning a customer/account
-is what a terminal `APPROVED` decision actually does now (see
-CLAUDE.md's "Applying without being a customer yet"). It already
-imports `document/` for the submission-gate check's sibling calls, so
-the two managed-document calls below aren't a new module-boundary edge.
+to import `customer/`, `account/`, and `notifications/` -- provisioning
+a customer/account (and telling the customer about it) is what a
+terminal `APPROVED` decision actually does now (see CLAUDE.md's
+"Applying without being a customer yet"). It already imports
+`document/` for the submission-gate check's sibling calls, so the two
+managed-document calls below aren't a new module-boundary edge; the
+Welcome Letter email (Phase 19) is, exactly the same
+activities.py-only-exception shape `account/activities.py` already has
+for its own closure-decision email.
 
 Each of the three activities writes to `application/db.py` directly --
 the one place in this module allowed to touch the `applications` table
@@ -26,6 +30,7 @@ from loan_onboarding.account import service as account_service
 from loan_onboarding.application import db as application_db
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
+from loan_onboarding.notifications import service as notifications_service
 from loan_onboarding.workflow.workflows import (
     ROLE_MANAGER,
     ROLE_UNDERWRITER,
@@ -176,6 +181,12 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
                 account.account_id,
                 customer_id,
                 record["applicant_name"],
+                record["product_type"],
+                str(record["amount"]),
+            )
+            notifications_service.send_welcome_letter_email(
+                record["applicant_identifier"],
+                account.account_id,
                 record["product_type"],
                 str(record["amount"]),
             )

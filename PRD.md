@@ -125,11 +125,14 @@ scoped to exactly what they're responsible for.
   `REJECTED` / `CANCELLED`. Funding, repayment schedules, and servicing
   are not modeled.
 - **Push/SMS/email notifications.** Status changes are visible only when
-  the customer opens the app; no proactive notification. **One built,
-  deliberately narrow exception (§6.6)**: the decision on an
-  account-closure request gets emailed (fake/dev-only delivery, same
-  mechanism §7.1's OTP code already uses) — every other status change in
-  this POC stays notification-free as described here.
+  the customer opens the app; no proactive notification. **Two built,
+  deliberately narrow exceptions** (§6.6, and §6.5's Welcome Letter
+  email — see `IMPLEMENTATION_PLAN.md` Phase 19): the decision on an
+  account-closure request gets emailed, and the Welcome Letter gets
+  emailed at the same moment it's generated (account creation, on
+  approval). Both use the same fake/dev-only delivery mechanism §7.1's
+  OTP code already uses — every other status change in this POC stays
+  notification-free as described here.
 - **Multi-tenancy.** Single organization, single Mayan instance, single
   Postgres/Temporal namespace.
 - **Production-grade security hardening.** This is a local
@@ -265,7 +268,20 @@ terminal `APPROVED` (§6.2, §9.2):
 - **`welcome_letter`** (account, exactly one) — generated automatically
   when the account is created at approval, no human involved. A simple
   templated document (applicant name, product type, amount, decision
-  date) rather than a customer-facing form.
+  date) rather than a customer-facing form. **Built, live-verified (see
+  `IMPLEMENTATION_PLAN.md` Phase 19)**: an email fires at the same
+  moment the letter is generated, telling the customer their account is
+  ready —
+  the second of §4's two narrow exceptions to the no-proactive-
+  notification non-goal, same fake/dev-only delivery mechanism the
+  account-closure-decision email (§6.6) and §7.1's OTP code already use.
+  Confirmed with the user as deliberately narrow, same scoping
+  precedent §6.6 already set: this doesn't reopen "notify on every
+  status change," it's one more specific, named moment worth telling
+  the customer about proactively — the account existing at all is new
+  information they can't infer from the timeline they already had
+  (unlike, say, `MORE_INFO_REQUESTED`, which they only ever reach by
+  the app itself telling them what to do next).
 - **`consent`** (account, versioned) — one logical document per
   account whose content can be updated over time; each update is a new
   *version* of the same document (Mayan's own file-versioning), not a
