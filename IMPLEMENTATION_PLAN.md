@@ -753,20 +753,38 @@ column, widened `status` `CHECK`) — hand-apply the `ALTER TABLE` before
 ever rebuilding the live `worker-workflow`/`worker-activity` images
 with this phase's code, same gap Phase 18 already hit once.
 
-**Next: start at P21-6** (the `krakend/` config fronting the
-Risk-Engine boundary) — **load the `risk-assessment-nats` skill first**
-(`.claude/skills/risk-assessment-nats/`); `CLAUDE.md`'s own NATS section
-is now a condensed pointer to it, not the full design. The live
-`nats`/`temporal`/`db`/`risk-adapter` containers from this session's own
-verification were left running (`docker compose ps`) — reuse them
-rather than restarting from scratch. A real end-to-end signal
-(`risk-adapter` → `signal_risk_decision` against a real running
-workflow) is now technically possible to check manually (`/decisions`
-can be POSTed directly to simulate a decision arriving, without
-KrakenD/the mock Risk Engine existing yet) — not done this session, left
-as an optional sanity check for whoever picks up P21-6/P21-7, since the
-full chain can't be exercised end-to-end until both exist anyway (and
-the live DB migration note above would need doing first).
+**P21-6 and P21-7 are now also done** — `krakend/krakend.json` (two
+plain HTTP↔HTTP routes) and `mock_risk_engine/` (the standalone mock
+Risk Engine, HTTP-only). Two real gaps found and fixed while wiring
+these up: a genuine `depends_on` cycle across P21-4/P21-6/P21-7's own
+task wording (Docker Compose rejects this outright — resolved by
+dropping the two cycle-forming edges, harmless since every
+cross-service call here is lazy), and KrakenD rejecting a `202`
+response by default (fixed with `"output_encoding"`/`"encoding":
+"no-op"` on both routes). **The full chain is now live-verified end to
+end for real** — three real workflows, driven through a real `POST` to
+`risk-adapter`'s `/assessments`, each landed the *correct* tier
+(`LOW`→`APPROVED`, `MEDIUM`→`PENDING_UNDERWRITING`, `HIGH`→`REJECTED`)
+through the complete real round trip. This hit the project's own
+already-documented local-worker/stale-Docker-worker race for real (the
+first attempt gave a nonsensical result because of it) — resolved by
+briefly stopping `worker-workflow`/`worker-activity`, then restoring
+them unchanged afterward. `pytest tests/unit risk_adapter/tests
+mock_risk_engine/tests`: 321/321 passed. `lint-imports`: 10/10.
+
+**Next: start at P21-9** (full unit suite + `lint-imports` green sweep,
+Decisions Needed cleanup) — **load the `risk-assessment-nats` skill
+first** (`.claude/skills/risk-assessment-nats/`). The live
+`nats`/`temporal`/`db`/`risk-adapter`/`krakend`/`mock-risk-engine`
+containers from this session were left running (`docker compose ps`) —
+reuse them. `worker-workflow`/`worker-activity` are back on their
+original pre-Phase-21 images, unchanged, per the live-DB-migration gap
+already noted under P21-5. **P21-10 (live E2E through the real UI) is
+the one remaining task that requires hand-applying the live
+`loan_onboarding` database's `ALTER TABLE` first** — do that before
+rebuilding `worker-workflow`/`worker-activity` with this phase's code,
+or every real Approve/Reject will fail the same way Phase 18's own
+un-migrated-table incident did.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -4820,7 +4838,7 @@ tasks are implemented yet.** Start at P21-1.
       rebuilding the live `worker-workflow`/`worker-activity` images
       with this phase's code, or every real Approve/Reject will fail the
       same way Phase 18's own un-migrated-table incident did.
-- [ ] **P21-6** — `krakend/` config (a `krakend.json` or equivalent,
+- [x] **P21-6** — `krakend/` config (a `krakend.json` or equivalent,
       committed to the repo) fronting the Risk-Engine boundary: a route
       for the Adapter's outbound `POST /assess` call to reach
       `mock-risk-engine`, and a route for the Risk Engine's inbound
@@ -4833,7 +4851,52 @@ tasks are implemented yet.** Start at P21-1.
       DoD: `docker compose up -d krakend` starts cleanly; a manual
       `curl` through KrakenD in each direction (throwaway, not
       committed) reaches the intended backend.
-- [ ] **P21-7** — Mock Risk Engine: a standalone service living outside
+      DONE: `krakend/krakend.json` added — two `POST` endpoints
+      (`/assess` → `http://mock-risk-engine:8000`, `/decisions` →
+      `http://risk-adapter:8000`), both with `"output_encoding": "no-op"`
+      / `"encoding": "no-op"` (see below for why). Official Docker
+      Official Image `krakend:2.13` used directly, config bind-mounted
+      read-only — same "official image, bind-mounted config" treatment
+      Mayan/Keycloak already get, not a custom Dockerfile. Published on
+      host `8090` (KrakenD's internal `8080` was free, no collision).
+
+      **Deviation from the task's literal `depends_on` wording, found
+      necessary while wiring this up, not a style choice**: `krakend`
+      here `depends_on: [risk-adapter]` only, **not**
+      `[mock-risk-engine, risk-adapter]` as written. Taken together with
+      P21-4's own `risk-adapter → krakend` and P21-7's own
+      `mock-risk-engine → krakend`, the task breakdown's three
+      `depends_on` directives form a genuine cycle
+      (`risk-adapter`↔`krakend` and `krakend`↔`mock-risk-engine`) that
+      `docker compose config` rejects outright — confirmed live, this
+      isn't a hypothetical. Resolved by dropping both cycle-forming
+      edges (`risk-adapter` never lists `krakend`; `krakend` never lists
+      `mock-risk-engine`) — harmless functionally, since every
+      cross-service call in this design fires lazily, well after
+      startup, never during any service's own lifespan/startup.
+
+      **A second real gap found live, more load-bearing**: KrakenD's
+      default backend-response handling rejects a `202 Accepted`
+      outright (`KRAKEND ERROR: invalid status code 202`) — both
+      `risk-adapter` and `mock-risk-engine` return exactly that on every
+      endpoint (this codebase's own "accepted, not yet processed"
+      convention). Fixed with `"output_encoding": "no-op"` (endpoint) +
+      `"encoding": "no-op"` (backend) on both routes — proxies the
+      backend's response completely untouched, bypassing KrakenD's
+      default validation. Confirmed live: before the fix, `curl` through
+      either route returned `500`/`X-Krakend-Completed: false`; after,
+      both correctly return `202`.
+
+      Live-verified: `docker compose up -d --build krakend
+      mock-risk-engine` started cleanly against the already-running
+      `risk-adapter`/`nats`/`temporal`/`db`; direct `curl -X POST` to
+      both `http://localhost:8090/assess` and `.../decisions` returned
+      `202`, with `mock-risk-engine`'s own logs confirming the `/assess`
+      call actually reached it through KrakenD. Full P21-6+P21-7
+      combined live-verification sweep (real amount-bucketed decisions
+      landing on real workflows) is described under P21-7's own DONE
+      note below, not repeated here.
+- [x] **P21-7** — Mock Risk Engine: a standalone service living outside
       the `loan_onboarding` package (`mock_risk_engine/`, own
       Dockerfile), **HTTP-only, no NATS client at all** — a `POST
       /assess` endpoint that applies the Decisions-Needed amount-
@@ -4846,6 +4909,62 @@ tasks are implemented yet.** Start at P21-1.
       (throwaway script, not committed) produces the expected decision
       arriving back at `risk-adapter`'s `/decisions` for a `LOW`, a
       `MEDIUM`, and a `HIGH` amount.
+      DONE: `mock_risk_engine/main.py` — one `POST /assess` endpoint,
+      blocking (not a background task): sleeps `SIMULATED_DELAY_SECONDS`
+      (default 1s), applies `decide_risk_tier` (the Decisions-Needed
+      assumed default: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
+      `≥ $50,000 → HIGH` — still not confirmed by a human, left
+      provisional in Decisions Needed), then `POST`s
+      `{application_id, risk_tier}` to `KRAKEND_URL/decisions`, logging
+      (never raising) on a non-2xx response — same "nothing upstream to
+      retry this" reasoning `risk_adapter/main.py`'s own submitted-
+      subscriber already uses. Own `Dockerfile`/`requirements.txt`
+      (`fastapi`, `uvicorn`, `httpx` — no NATS client, confirmed by
+      omission). Unit tests (`mock_risk_engine/tests/test_main.py`, 9
+      tests): the bucketing thresholds parametrized at each boundary,
+      the webhook call mocked via `respx`, and an endpoint-level test
+      via `TestClient`. `pytest mock_risk_engine/tests`: 9/9 passed.
+
+      **Full P21-6+P21-7 combined live end-to-end verification, going
+      beyond either task's own isolated DoD**: three real
+      `LoanApplicationWorkflow` executions started against the real
+      local Temporal server (a throwaway script, not committed — small
+      fake activities, no Postgres touched), then driven through a real
+      `POST` to `risk-adapter`'s actual `/assessments` endpoint (via
+      `docker exec`, since `risk-adapter` has no published host port) —
+      confirmed the *correct* tier landed on each, not just *some*
+      signal: `amount=1000` → `APPROVED`, `amount=25000` →
+      `PENDING_UNDERWRITING`, `amount=75000` → `REJECTED`, exactly as
+      designed, through the complete real chain (`risk-adapter` →
+      `nats` → its submitted-subscriber → `krakend` →
+      `mock-risk-engine`'s real bucketing → `krakend` → `risk-adapter`'s
+      `/decisions` webhook → `nats` → its decided-subscriber → a real
+      `signal_risk_decision` call).
+
+      **Hit the exact local-worker/stale-Docker-worker race
+      `CLAUDE.md`'s Known Gaps already documents, confirming it's still
+      a live hazard, not a Phase 21 bug**: the *first* attempt at this
+      verification produced a nonsensical result — all three workflows
+      stuck at `PENDING_UNDERWRITING` with no errors logged anywhere,
+      even though `risk-adapter`'s own logs showed every step of the
+      chain succeeding, signal included. Root cause: the
+      `worker-workflow`/`worker-activity` containers had been running
+      for 24 hours on pre-Phase-21 code (no `signal_risk_decision`
+      handler at all) and were silently racing the verification
+      script's own local worker for the same task queue — whichever
+      worker Temporal happened to hand a given workflow's first task to
+      determined whether it ran under old or new code, and the `signal`
+      calls that landed on old-code executions were silently accepted
+      by the server but never processed by a worker that had no
+      matching signal handler for that name. Stopping both containers
+      for the duration of the check (`docker compose stop
+      worker-workflow worker-activity`), re-running, then restarting
+      them unchanged afterward fixed it immediately. **Live stack left
+      exactly as found**: `worker-workflow`/`worker-activity` back on
+      their original pre-Phase-21 images (not rebuilt — the live
+      `loan_onboarding` database still isn't migrated for this phase,
+      see P21-5's own DONE note); `nats`/`risk-adapter`/`krakend`/
+      `mock-risk-engine` left running for whoever picks up P21-9/P21-10.
 - [x] **P21-8** — `applications.risk_tier` gets written by
       `persist_decision` whenever a decision resolves via the risk path
       (both auto-approve and auto-reject) — never for a human decision,
@@ -4901,7 +5020,7 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- **2026-09-07 (Phase 21 build started — P21-1 through P21-5 and P21-8 done)** —
+- **2026-09-07 (Phase 21 build started — P21-1 through P21-8 done)** —
   Picked up at the documented resume point (P21-1) and implemented the
   first three tasks for real, per this session's own convention (small,
   verified steps, not a big-bang implementation of the whole phase).
@@ -5053,6 +5172,51 @@ is.)*
   `POST /decisions` (bypassing KrakenD/the mock Risk Engine, neither of
   which exist yet) — not attempted this session, left as an optional
   sanity check for whoever picks up P21-6/P21-7.
+
+  **P21-6 and P21-7 done in the same session, immediately after P21-5/
+  P21-8.** `krakend/krakend.json` (two plain `POST` routes) and
+  `mock_risk_engine/main.py` (the standalone mock Risk Engine — one
+  `POST /assess` endpoint, blocking amount-bucketing + webhook call, no
+  NATS client). **Two real gaps found and fixed while wiring these up,
+  neither a hypothetical**: (1) the task breakdown's own three
+  `depends_on` directives (P21-4, P21-6, P21-7 combined) form a genuine
+  cycle `docker compose config` rejects outright — resolved by dropping
+  the two cycle-forming edges, harmless since every cross-service call
+  in this design is lazy, never made during a service's own startup;
+  (2) KrakenD rejects a `202 Accepted` response by default
+  (`invalid status code 202`), which both `risk-adapter` and
+  `mock-risk-engine` return on every endpoint — fixed with
+  `"output_encoding"`/`"encoding": "no-op"` on both routes, confirmed
+  live (`curl` through either route went from `500` to the correct
+  `202`).
+
+  **Then went beyond either task's own isolated DoD**: a throwaway
+  script started three real `LoanApplicationWorkflow` executions against
+  the real local Temporal server and drove each through a real `POST` to
+  `risk-adapter`'s actual `/assessments` — confirming the *correct* tier
+  landed on each (`amount=1000`→`APPROVED`, `amount=25000`→
+  `PENDING_UNDERWRITING`, `amount=75000`→`REJECTED`) through the complete
+  real chain, not just that some signal arrived. **The first attempt at
+  this produced a nonsensical result (all three stuck, no errors
+  anywhere) — root-caused to the exact local-worker/stale-Docker-worker
+  race this file's own Known Gaps section already documents**: the
+  `worker-workflow`/`worker-activity` containers had been running for 24
+  hours on pre-Phase-21 code (no `signal_risk_decision` handler) and
+  were silently racing the script's own local worker for the same task
+  queue. Stopping both containers for the check, then restarting them
+  unchanged afterward, fixed it immediately — confirms this operating
+  hazard is still real, not a Phase 21 regression. `pytest tests/unit
+  risk_adapter/tests mock_risk_engine/tests`: 321/321 passed (up from
+  312). `lint-imports`: 10/10 contracts kept (unchanged — neither new
+  service imports `loan_onboarding`).
+
+  **What the next session should know**: `nats`/`temporal`/`db`/
+  `risk-adapter`/`krakend`/`mock-risk-engine` were all left running;
+  `worker-workflow`/`worker-activity` are back on their original
+  pre-Phase-21 images, untouched. **P21-9 (full suite sweep) is next,
+  then P21-10 (live E2E) — which needs the live `loan_onboarding`
+  database's `ALTER TABLE` applied by hand first**, same gap noted twice
+  already in this entry.
 
 - **2026-09-07 (Phase 21 redesigned — NATS Adapter + KrakenD decided)**
   — User made a real architectural decision, following up on the

@@ -151,18 +151,72 @@ so it never needs NATS awareness even in principle.
   gets a risk decision (Risk Engine down, message lost, KrakenD
   misrouted) sits at `PENDING_RISK_ASSESSMENT` forever, same shape as
   the existing gap, not a new category of problem.
-- **New Docker Compose services**: `nats` (official `nats:latest`
-  image — core pub/sub only, JetStream not needed for this phase since
-  neither leg needs replay/durability beyond what Temporal's own
-  activity retry already gives the publishing side; **built, P21-2** —
-  published on host port `4223`, not the default `4222`, after a real
-  live-hit collision with a natively host-installed NATS server on this
-  dev machine), `mock-risk-engine` (HTTP-only, as above; not yet
-  built, P21-7), `risk-adapter` (the NATS Adapter — holds the NATS
-  connection, the two HTTP endpoints, and its own Temporal client;
-  **built, P21-4**, `depends_on: [nats, temporal]` for now — add
-  `krakend` once P21-6 builds it), `krakend` (fronting `mock-risk-engine`
-  ↔ `risk-adapter` traffic both directions; not yet built, P21-6).
+- **New Docker Compose services — all four now built (P21-2, P21-4,
+  P21-6, P21-7)**: `nats` (official `nats:latest` image — core pub/sub
+  only, JetStream not needed for this phase; published on host port
+  `4223`, not the default `4222`, after a real live-hit collision with a
+  natively host-installed NATS server on this dev machine), `risk-adapter`
+  (the NATS Adapter — holds the NATS connection, the two HTTP endpoints,
+  and its own Temporal client; `depends_on: [nats, temporal]`,
+  deliberately **not** `krakend` — see the dependency-cycle gotcha
+  below), `krakend` (official `krakend:2.13` Docker Official Image,
+  config bind-mounted from `krakend/krakend.json`, fronting
+  `mock-risk-engine` ↔ `risk-adapter` traffic both directions;
+  `depends_on: [risk-adapter]` only, same cycle reasoning), `mock-risk-engine`
+  (HTTP-only, `depends_on: [krakend]`, own `Dockerfile`/`requirements.txt`
+  under `mock_risk_engine/`, same "genuinely external service" treatment
+  `risk_adapter/` already gets).
+- **A real `depends_on` dependency cycle found while wiring the compose
+  services together, not caught by design review**: the task breakdown's
+  own wording had `risk-adapter` → `krakend` (P21-4), `krakend` →
+  `[mock-risk-engine, risk-adapter]` (P21-6), and `mock-risk-engine` →
+  `krakend` (P21-7) — taken together, `risk-adapter`/`krakend` cycle
+  back on each other, and so do `krakend`/`mock-risk-engine`. Docker
+  Compose rejects a circular `depends_on` outright. Resolved by dropping
+  the two cycle-forming edges (`risk-adapter` never lists `krakend`;
+  `krakend` never lists `mock-risk-engine`) — neither omission costs
+  anything functionally, since every cross-service call in this design
+  is made lazily, well after startup (from inside a NATS subscriber
+  callback or an endpoint handler), never during a service's own
+  startup/lifespan, so there was never a real ordering requirement
+  underneath the literal task wording to begin with.
+- **A real KrakenD gotcha found live, not documented anywhere obvious**:
+  KrakenD's default backend-response handling rejects a `202 Accepted`
+  outright — `KRAKEND ERROR: invalid status code 202` — even though
+  both `risk-adapter` and `mock-risk-engine` (following this project's
+  own "accepted, not yet processed" convention every other outbound
+  call here already uses) return exactly that. Fixed by setting both
+  `"output_encoding": "no-op"` (endpoint level) and `"encoding": "no-op"`
+  (backend level) on both routes in `krakend/krakend.json` — this tells
+  KrakenD to proxy the backend's response (status code and body)
+  through completely untouched, bypassing its default success/response
+  validation entirely. Confirmed live: before the fix, a direct `curl`
+  through KrakenD to either route returned `500` with
+  `X-Krakend-Completed: false`; after, both correctly return the
+  backend's real `202`.
+- **The full real chain live-verified end to end (P21-6/P21-7's own
+  combined verification, not just each task's isolated DoD)**: three
+  real `LoanApplicationWorkflow` executions against the real local
+  Temporal server, each driven through a real `POST` to `risk-adapter`'s
+  actual `/assessments` endpoint — confirmed the complete round trip
+  (`risk-adapter` → `nats` → the submitted-subscriber → `krakend` →
+  `mock-risk-engine`'s real amount-bucketing → `krakend` →
+  `risk-adapter`'s `/decisions` webhook → `nats` → the
+  decided-subscriber → a real `signal_risk_decision` call) lands the
+  *correct* tier, not just *some* signal: `LOW` → `APPROVED`, `MEDIUM` →
+  `PENDING_UNDERWRITING`, `HIGH` → `REJECTED`, all three exactly as
+  designed. **Hit the exact local-worker/stale-Docker-worker race
+  `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill already
+  documents, confirming it's still live**: a first verification attempt
+  produced a nonsensical result (all three stuck at
+  `PENDING_UNDERWRITING`, no errors logged) because the 24-hours-running
+  `worker-workflow`/`worker-activity` containers — still on
+  pre-Phase-21 code, no `signal_risk_decision` handler at all — were
+  silently racing the throwaway verification script's own local worker
+  for the same task queue. Stopping those two containers for the
+  duration of the check (then restarting them afterward, unchanged)
+  fixed it immediately — no code bug, a re-confirmation of an
+  already-known operating hazard, not a new one.
 - **Subject-naming decision (resolved, P21-4)**: one shared subject per
   leg (`risk.assessment.submitted`/`risk.assessment.decided`) with
   `application_id` carried in the message body — not a per-application

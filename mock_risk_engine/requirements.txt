@@ -1,0 +1,7 @@
+# The mock Risk Engine's own dependency set -- deliberately separate
+# from the root pyproject.toml, since this service is not part of the
+# loan_onboarding package (a "genuinely external system" mock, same
+# treatment as risk_adapter/'s own requirements.txt).
+fastapi
+uvicorn[standard]
+httpx

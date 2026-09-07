@@ -210,12 +210,17 @@ services:
   # CLAUDE.md's "Automated risk assessment via NATS"). Sole owner of
   # NATS connectivity anywhere in this system.
   #
-  # depends_on deliberately omits `krakend` for now -- P21-6 (not yet
-  # built) adds that service; add it to this list once it exists. Until
-  # then RISK_ENGINE_URL below points at a host that doesn't resolve,
-  # which only matters once a real message reaches the
-  # risk.assessment.submitted subscriber (P21-7 also not yet built) --
-  # harmless for this task's own "starts cleanly" DoD.
+  # depends_on deliberately does NOT include `krakend` (P21-6, below) --
+  # not an oversight left over from before that service existed. Adding
+  # it would create a real dependency cycle (krakend depends_on
+  # risk-adapter, for the inbound /decisions route) that docker compose
+  # itself rejects outright. It's also not functionally needed: this
+  # service's own call to RISK_ENGINE_URL (krakend) happens lazily, from
+  # inside its NATS subscriber loop, well after startup -- not during
+  # this service's own lifespan/startup -- and a DNS/connection failure
+  # there is already caught and logged (see P21-4's own live-verified
+  # fix), not fatal, so there's nothing here that actually needs krakend
+  # to be up first.
   risk-adapter:
     build:
       context: .
@@ -231,6 +236,49 @@ services:
       TEMPORAL_HOST: temporal:7233
       TEMPORAL_NAMESPACE: default
     restart: on-failure
+
+  # --- P21-6: KrakenD, fronting the Risk-Engine boundary only (both
+  # directions) -- plain HTTP<->HTTP reverse-proxying, never touching
+  # KrakenD's own NATS pub/sub backend feature (CLAUDE.md's "Automated
+  # risk assessment via NATS" / docs/research-krakend.md). Official
+  # Docker Official Image (`krakend`, promoted end of March 2025) --
+  # same "use the official image directly, config as a bind-mounted
+  # repo file" treatment this file already gives Mayan/Keycloak, not a
+  # custom Dockerfile.
+  #
+  # depends_on deliberately omits `mock-risk-engine`, unlike the task's
+  # own original wording -- `mock-risk-engine` (below) itself
+  # depends_on `krakend`, so declaring both directions is a real
+  # dependency cycle docker compose rejects outright (confirmed live
+  # while wiring this up), the same class of design-only-session gap
+  # P21-4's own depends_on comment already found and resolved for
+  # risk-adapter<->krakend. Neither direction is functionally required
+  # anyway (every cross-service call here is lazy, made well after
+  # startup, not during it) -- `risk-adapter` is kept since it's this
+  # service's other real backend target.
+  krakend:
+    image: krakend:2.13
+    volumes:
+      - ./krakend/krakend.json:/etc/krakend/krakend.json:ro
+    ports:
+      - "8090:8080"
+    depends_on:
+      - risk-adapter
+
+  # --- P21-7: the mock Risk Engine -- a standalone service, NOT part of
+  # the loan_onboarding package, HTTP-only, no NATS client at all (see
+  # mock_risk_engine/main.py's own docstring). depends_on: [krakend] is
+  # ordering convenience only (this service's own outbound webhook call
+  # to KRAKEND_URL happens lazily too, inside /assess's own handler, not
+  # at startup).
+  mock-risk-engine:
+    build:
+      context: .
+      dockerfile: mock_risk_engine/Dockerfile
+    depends_on:
+      - krakend
+    environment:
+      KRAKEND_URL: http://krakend:8080
 
   # --- P7-2: worker processes (worker_main.py), same WORKER_MODE-split
   # pattern as review-approval-temporal's own worker-workflow/

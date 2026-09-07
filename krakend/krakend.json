@@ -1,0 +1,35 @@
+{
+  "$schema": "https://www.krakend.io/schema/v2.13/krakend.json",
+  "version": 3,
+  "name": "risk-engine-gateway",
+  "port": 8080,
+  "timeout": "10s",
+  "endpoints": [
+    {
+      "endpoint": "/assess",
+      "method": "POST",
+      "output_encoding": "no-op",
+      "backend": [
+        {
+          "url_pattern": "/assess",
+          "method": "POST",
+          "encoding": "no-op",
+          "host": ["http://mock-risk-engine:8000"]
+        }
+      ]
+    },
+    {
+      "endpoint": "/decisions",
+      "method": "POST",
+      "output_encoding": "no-op",
+      "backend": [
+        {
+          "url_pattern": "/decisions",
+          "method": "POST",
+          "encoding": "no-op",
+          "host": ["http://risk-adapter:8000"]
+        }
+      ]
+    }
+  ]
+}
