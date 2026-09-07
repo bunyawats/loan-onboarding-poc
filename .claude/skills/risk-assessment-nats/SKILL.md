@@ -151,14 +151,43 @@ so it never needs NATS awareness even in principle.
   gets a risk decision (Risk Engine down, message lost, KrakenD
   misrouted) sits at `PENDING_RISK_ASSESSMENT` forever, same shape as
   the existing gap, not a new category of problem.
-- **New Docker Compose services (planned)**: `nats` (official
-  `nats:latest` image — core pub/sub only, JetStream not needed for
-  this phase since neither leg needs replay/durability beyond what
-  Temporal's own activity retry already gives the publishing side),
-  `mock-risk-engine` (HTTP-only, as above), `risk-adapter` (the NATS
-  Adapter — holds the NATS connection, the two HTTP endpoints, and its
-  own Temporal client), `krakend` (fronting `mock-risk-engine` ↔
-  `risk-adapter` traffic both directions).
+- **New Docker Compose services**: `nats` (official `nats:latest`
+  image — core pub/sub only, JetStream not needed for this phase since
+  neither leg needs replay/durability beyond what Temporal's own
+  activity retry already gives the publishing side; **built, P21-2** —
+  published on host port `4223`, not the default `4222`, after a real
+  live-hit collision with a natively host-installed NATS server on this
+  dev machine), `mock-risk-engine` (HTTP-only, as above; not yet
+  built, P21-7), `risk-adapter` (the NATS Adapter — holds the NATS
+  connection, the two HTTP endpoints, and its own Temporal client;
+  **built, P21-4**, `depends_on: [nats, temporal]` for now — add
+  `krakend` once P21-6 builds it), `krakend` (fronting `mock-risk-engine`
+  ↔ `risk-adapter` traffic both directions; not yet built, P21-6).
+- **Subject-naming decision (resolved, P21-4)**: one shared subject per
+  leg (`risk.assessment.submitted`/`risk.assessment.decided`) with
+  `application_id` carried in the message body — not a per-application
+  subject. Simpler, and NATS core pub/sub has no per-subject setup cost
+  that would make a shared subject a bottleneck at this POC's scale.
+- **`risk_assessment_id` decision (resolved, P21-4)**: no separate id
+  is minted. `application_id` alone is sufficient correlation for both
+  legs — there is exactly one outstanding risk assessment per
+  application at a time (a new application always starts a fresh
+  `PENDING_RISK_ASSESSMENT` wait), so no ambiguity a second id would
+  resolve.
+- **A real gap found and fixed live during P21-4's own verification,
+  not caught by any unit test**: `risk_adapter/main.py`'s
+  `risk.assessment.submitted` subscriber originally only checked the
+  Risk Engine call's response status code, with no `try`/`except`
+  around the `httpx` call itself. Against the real stack (before
+  KrakenD/the mock Risk Engine existed), the resulting
+  `httpx.ConnectError` propagated out of the NATS subscriber callback
+  entirely and was instead caught by `nats-py`'s own generic
+  subscription error handler — not a crash (`nats-py`'s message loop
+  survives a callback exception and keeps polling), but inconsistent
+  logging, and untested. Fixed by wrapping the call in
+  `try`/`except httpx.HTTPError`, matching the decided-subscriber's own
+  existing broad `try`/`except` shape; re-verified live and covered by
+  a new unit test.
 
 
 ### `risk/` -- Risk assessment module (planned -- Phase 21, not yet built)

@@ -1,0 +1,10 @@
+# The NATS Adapter's own dependency set -- deliberately separate from
+# the root pyproject.toml, since this service is not part of the
+# loan_onboarding package (CLAUDE.md's "Automated risk assessment via
+# NATS" / repo layout note: "genuinely external system this codebase
+# doesn't own", same treatment Mayan and Keycloak already get).
+fastapi
+uvicorn[standard]
+httpx
+nats-py
+temporalio

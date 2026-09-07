@@ -204,6 +204,34 @@ services:
       # port chosen here -- only a host-side smoke test needs 4223.
       - "4223:4222"
 
+  # --- P21-4: the NATS Adapter -- a standalone service, NOT part of
+  # the loan_onboarding Python package (its own Dockerfile/requirements,
+  # own dependency set -- see risk_adapter/main.py's own docstring and
+  # CLAUDE.md's "Automated risk assessment via NATS"). Sole owner of
+  # NATS connectivity anywhere in this system.
+  #
+  # depends_on deliberately omits `krakend` for now -- P21-6 (not yet
+  # built) adds that service; add it to this list once it exists. Until
+  # then RISK_ENGINE_URL below points at a host that doesn't resolve,
+  # which only matters once a real message reaches the
+  # risk.assessment.submitted subscriber (P21-7 also not yet built) --
+  # harmless for this task's own "starts cleanly" DoD.
+  risk-adapter:
+    build:
+      context: .
+      dockerfile: risk_adapter/Dockerfile
+    depends_on:
+      nats:
+        condition: service_started
+      temporal:
+        condition: service_started
+    environment:
+      NATS_URL: nats://nats:4222
+      RISK_ENGINE_URL: ${RISK_ENGINE_URL:-http://krakend:8080}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+    restart: on-failure
+
   # --- P7-2: worker processes (worker_main.py), same WORKER_MODE-split
   # pattern as review-approval-temporal's own worker-workflow/
   # worker-activity services.

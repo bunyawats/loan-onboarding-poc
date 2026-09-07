@@ -716,12 +716,33 @@ see P21-2's own DONE note and `CLAUDE.md`'s Known Gaps), and the new
 `risk/` leaf module (`service.py`'s `submit_risk_assessment`, unit
 tests via `respx`, a new `.importlinter` contract). Full unit suite
 still passing (`pytest tests/unit/risk`: 3/3) and `lint-imports`: 10/10
-contracts kept. **Next: start at P21-4** (the standalone `risk-adapter`
-service) — **load the `risk-assessment-nats` skill first**
-(`.claude/skills/risk-assessment-nats/`); `CLAUDE.md`'s own NATS
-section is now a condensed pointer to it, not the full design. The live
-`nats` container from P21-2's verification was left running
-(`docker compose up -d nats`) — reuse it rather than restarting.
+contracts kept.
+
+**P21-4 is now also done** — the standalone `risk-adapter` service
+(`risk_adapter/`, its own directory/Dockerfile/dependencies, no import
+edge with `loan_onboarding` either direction), live-verified against
+the real stack (real NATS, real Temporal), not just unit-tested. Both
+Decisions Needed this task was scoped to resolve are settled (see
+P21-4's own DONE note and `CLAUDE.md`'s `risk-assessment-nats` skill):
+one shared subject per leg, no separate `risk_assessment_id`. One real
+gap found and fixed live: a transport-level `httpx` error in the
+submitted-message subscriber wasn't caught, so it leaked into
+`nats-py`'s own generic error handler instead of this service's
+structured logging — fixed and covered by a new unit test.
+`pytest risk_adapter/tests`: 10/10 passed.
+
+**Next: start at P21-5** (the `PENDING_RISK_ASSESSMENT` workflow state
++ the `submit_risk_assessment` activity) — **load the
+`risk-assessment-nats` skill first** (`.claude/skills/risk-assessment-nats/`);
+`CLAUDE.md`'s own NATS section is now a condensed pointer to it, not
+the full design. The live `nats`/`temporal`/`db`/`risk-adapter`
+containers from this session's own verification were left running
+(`docker compose ps`) — reuse them rather than restarting from scratch.
+Once P21-5 lands, a real end-to-end signal (`risk-adapter` →
+`signal_risk_decision`) becomes testable against a real workflow for
+the first time — worth a quick manual check even before P21-6/P21-7
+(KrakenD, the mock Risk Engine) exist, since `/decisions` can be POSTed
+to directly to simulate a decision arriving.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -4513,7 +4534,7 @@ tasks are implemented yet.** Start at P21-1.
       -v`: 3/3 passed. `lint-imports`: 10/10 contracts kept (up from
       9 — the new `risk/` contract, plus the existing 9 all still
       green).
-- [ ] **P21-4** — New standalone service `risk-adapter/`, living outside
+- [x] **P21-4** — New standalone service `risk-adapter/`, living outside
       the `loan_onboarding` package entirely (own Dockerfile, own
       dependencies — a small async HTTP server, an `httpx` client, a
       NATS client, and a `temporalio.client.Client`). Resolve the
@@ -4545,6 +4566,90 @@ tasks are implemented yet.** Start at P21-1.
       asserting the right outbound `httpx` call / the right Temporal
       signal call); `docker compose up -d risk-adapter` starts cleanly
       against the real stack.
+      DONE: `risk_adapter/` added as a fully separate top-level
+      directory (own `main.py`, `requirements.txt`, `Dockerfile`) — not
+      part of `loan_onboarding`, no import edge either direction, same
+      "genuinely external service" treatment Mayan/Keycloak already
+      get. One FastAPI app; `POST /assessments`/`POST /decisions` each
+      just parse the body and publish; the two NATS subscriber loops
+      (`handle_submitted_message`/`handle_decided_message`) and the two
+      publish helpers are plain functions taking their collaborators
+      (NATS connection, `httpx` client, Temporal client) as explicit
+      arguments rather than closures, specifically so unit tests never
+      need a real NATS/Temporal connection. `workflow_id_for_application`
+      duplicates `workflow/service.py`'s own `_workflow_id_for_application`
+      scheme verbatim (this service can't import that module) — flagged
+      in both places as a real, accepted coupling if that scheme ever
+      changes.
+
+      **Both open Decisions Needed resolved here, as instructed**:
+      subject-naming is one shared subject per leg
+      (`risk.assessment.submitted`/`risk.assessment.decided`) with
+      `application_id` in the message body, not a per-application
+      subject — simpler, and NATS core pub/sub has no per-subject setup
+      cost that would make sharing one a bottleneck at this POC's scale.
+      No `risk_assessment_id` is minted — `application_id` alone is
+      sufficient correlation, since exactly one risk assessment is ever
+      outstanding per application at a time.
+
+      **`depends_on` deliberately omits `krakend`** (not yet built,
+      P21-6) — added `nats`/`temporal` only for now; add `krakend` to
+      this list once P21-6 lands, noted inline in `docker-compose.yml`.
+      `RISK_ENGINE_URL` defaults to `http://krakend:8080`, a
+      not-yet-resolvable hostname until then — harmless for this task's
+      own DoD, see the live-verification finding below for why.
+
+      Tests: `risk_adapter/tests/test_main.py`, 10 tests (`respx` for
+      the outbound Risk Engine call, small hand-written fakes for the
+      NATS connection and the Temporal workflow handle, `TestClient`
+      with `nats.connect`/`TemporalClient.connect` patched for the two
+      endpoint tests so the app's lifespan never touches a real
+      network). `pytest risk_adapter/tests`: 10/10 passed.
+
+      **Live-verified against the real stack, not just unit tests** —
+      `docker compose up -d --build risk-adapter` against the existing
+      `db`/`temporal` containers plus P21-2's `nats`: started cleanly
+      (`Application startup complete`, confirming it actually connected
+      to both NATS and Temporal, not just that the process launched).
+      Drove both endpoints via `docker exec ... python3 -c
+      "urllib.request..."` (both returned `202`) and confirmed, from
+      the container's own logs, the full real chain each endpoint
+      triggers: `/assessments` → NATS publish → the submitted-subscriber
+      → an attempted real `httpx` call to `RISK_ENGINE_URL`; `/decisions`
+      → NATS publish → the decided-subscriber → a real
+      `temporalio.client.Client.get_workflow_handle(...).signal(...)`
+      call against the actual local Temporal server, which correctly
+      returned `workflow not found for ID: loan-application-app-test`
+      (expected — no such workflow exists yet, P21-5 not built) and was
+      caught and logged, not raised, matching the design.
+
+      **One real bug found and fixed during this same live-verification
+      pass, not caught by any unit test**: `handle_submitted_message`'s
+      first draft only checked `response.status_code`, with no
+      `try`/`except` around the `httpx.AsyncClient.post(...)` call
+      itself. Against the real stack (`krakend` not yet existing, so
+      `RISK_ENGINE_URL` doesn't resolve), the resulting `httpx.ConnectError`
+      propagated out of the NATS subscriber callback entirely, past this
+      module's own logging, and was instead caught and printed by
+      `nats-py`'s own generic subscription error handler (`"nats:
+      encountered error"`) — not a crash (confirmed live: the container
+      stayed up and kept accepting requests afterward, since `nats-py`'s
+      message loop survives a callback exception), but inconsistent
+      with this function's own documented "logged, not raised" design
+      and with the structured, `application_id`-bearing logging every
+      other error path in this file already uses. Fixed by wrapping the
+      `post(...)` call itself in `try`/`except httpx.HTTPError`,
+      matching `handle_decided_message`'s own existing broad
+      `try`/`except` shape. Re-verified live after the fix: the same
+      failure now logs `"Risk Engine /assess unreachable for
+      application_id=..."` via this module's own logger, with the
+      container still healthy afterward. Added
+      `test_handle_submitted_message_logs_but_does_not_raise_on_transport_error`
+      (a `respx` `side_effect=httpx.ConnectError(...)`) to
+      `risk_adapter/tests/test_main.py` so this stays caught by the
+      unit suite going forward, not only by live verification.
+      `pytest risk_adapter/tests`: 10/10 passed (up from 9) after the
+      fix.
 - [ ] **P21-5** — `workflow/workflows.py`: add the `PENDING_RISK_ASSESSMENT`
       state (entered immediately after `persist_application`, before
       today's `PENDING_UNDERWRITING`) and a new `signal_risk_decision(risk_tier)`
@@ -4632,7 +4737,7 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- **2026-09-07 (Phase 21 build started — P21-1 through P21-3 done)** —
+- **2026-09-07 (Phase 21 build started — P21-1 through P21-4 done)** —
   Picked up at the documented resume point (P21-1) and implemented the
   first three tasks for real, per this session's own convention (small,
   verified steps, not a big-bang implementation of the whole phase).
@@ -4659,17 +4764,56 @@ is.)*
   import). `pytest tests/unit/risk`: 3/3 passed via `respx`-mocked
   `httpx`. `lint-imports`: 10/10 contracts kept.
 
-  **What the next session should know**: the `nats` container from
-  P21-2's verification was left running (`docker compose up -d nats`,
-  publishing `4223` on the host) — reuse it for P21-4's own
-  `risk-adapter` work rather than restarting it. `nats-py` is the
-  correct PyPI package name for a Python NATS client (imported as
-  `import nats`) — don't confuse it with the unrelated `nats.py`
-  package name the original task wording used. P21-4 (the standalone
-  `risk-adapter` service) is next — it needs to `Decimal(...)`-parse
-  the `amount` field back out of `risk/service.py`'s JSON body, since
-  `Decimal` isn't natively JSON-serializable and P21-3 sends it as a
-  plain string.
+  `nats-py` is the correct PyPI package name for a Python NATS client
+  (imported as `import nats`) — don't confuse it with the unrelated
+  `nats.py` package name the original task wording used.
+
+  **P21-4 done in the same session**: the standalone `risk-adapter`
+  service (`risk_adapter/main.py`, its own `Dockerfile`/`requirements.txt`,
+  no import edge with `loan_onboarding` either direction). Resolved
+  both Decisions Needed this task was scoped to settle: one shared
+  subject per leg (`risk.assessment.submitted`/`risk.assessment.decided`,
+  `application_id` in the message body, not a per-application subject)
+  and no separate `risk_assessment_id` (`application_id` alone is
+  sufficient correlation) — both documented in the `risk-assessment-nats`
+  skill, not left implicit in code. **Live-verified against the real
+  stack, not just unit tests**: built and started `risk-adapter`
+  against the already-running `db`/`temporal` plus P21-2's `nats`;
+  drove both `/assessments` and `/decisions` via a `docker exec`
+  one-liner and confirmed, from the container's own logs, the real
+  chain each triggers end to end — including a genuine
+  `temporalio.client.Client` signal call against the real local
+  Temporal server (correctly returning "workflow not found," since
+  P21-5's workflow changes don't exist yet, and correctly caught rather
+  than crashing the process). **One real bug found and fixed during
+  this live pass, not caught by unit tests first**: the
+  submitted-message subscriber only checked the Risk Engine call's
+  response status code, with no `try`/`except` around the `httpx` call
+  itself — against the real stack (`krakend` not built yet, so
+  `RISK_ENGINE_URL` doesn't resolve), the resulting `httpx.ConnectError`
+  leaked past this module's own structured logging into `nats-py`'s
+  generic subscription error handler instead (not a crash — confirmed
+  the container stayed healthy and kept serving requests — but
+  inconsistent logging, and untested). Fixed by wrapping the call in
+  `try`/`except httpx.HTTPError`, matching the decided-subscriber's own
+  existing shape; re-verified live after the fix, then added a
+  regression test. `pytest risk_adapter/tests`: 10/10 passed (up from
+  9, post-fix). **Correction to this same entry's earlier note above**:
+  `risk_adapter` does *not* need to parse `amount` back into a
+  `Decimal` — it never inspects the field at all, just forwards the
+  same JSON body to the Risk Engine's `/assess`. The mock Risk Engine
+  itself (P21-7, not yet built) is what will need to parse `amount` for
+  its amount-bucketing rule.
+
+  **What the next session should know**: the `nats`/`temporal`/`db`/
+  `risk-adapter` containers were all left running (`docker compose ps`)
+  — reuse them for P21-5 rather than restarting. `risk-adapter`'s
+  `depends_on` deliberately omits `krakend` for now (not yet built,
+  P21-6) — add it once that service exists. P21-5 (the
+  `PENDING_RISK_ASSESSMENT` workflow state + `submit_risk_assessment`
+  activity) is next; once it lands, `POST /decisions` can be used to
+  manually simulate a risk decision against a real running workflow,
+  ahead of P21-6/P21-7 existing.
 
 - **2026-09-07 (Phase 21 redesigned — NATS Adapter + KrakenD decided)**
   — User made a real architectural decision, following up on the
