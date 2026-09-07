@@ -4431,6 +4431,37 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-07 (docs consolidation, round 6, new section)** — User
+  asked to "continue trimming a different section," per the previous
+  entry's own suggestion (the "Modules, in detail" sweeps had hit their
+  floor). Ran the same narrative-scaffolding sweep ("Corrected from an
+  earlier draft of this file, which...") against "Document hierarchy",
+  "Document metadata assignment lifecycle", "Identity", and "Data
+  storage" — none of these four had been through either the round-3/4
+  narrative sweep or the round-5 duplicate-reasoning scan before.
+  Found and fixed instances in all four:
+  - "Document hierarchy"'s opening two paragraphs (single-index → three
+    indexes, then multi-placement → exclusive-placement) merged into
+    one direct description instead of narrating two successive
+    corrections.
+  - "Document metadata assignment lifecycle" rule 4's opening clause
+    tightened; a whole paragraph ("A follow-up session redesigned the
+    three index templates...") that mostly re-described what rule 4
+    and "Document hierarchy" already say was cut down to its one
+    actually-new fact (the `reconcile.py` `scan()` bug fix) — this was
+    the largest single cut this round, a duplicate-reasoning case more
+    than a narrative-scaffolding one, same category round 5 found in
+    `document/`'s `service.upload` bullet.
+  - "Identity"'s customer-side intro tightened, keeping the one-line
+    pointer to Known Gaps (this was flagged as the POC's standout risk)
+    since that's a genuine "why this exists" fact, not narrative about
+    a prior draft.
+  - "Data storage"'s primary-key paragraph tightened the same way.
+  `CLAUDE.md`: 2,821 → 2,804 lines. Checked "Document/database
+  reconciliation" and "Enforcing the boundaries" too — both already
+  tight (already through the 2026-09-04 pass and/or short to begin
+  with), nothing found. Not committed yet this session.
+
 - **2026-09-07 (docs consolidation, round 3)** — User asked again to
   "continue trimming the module detail sections" (a follow-up to round
   2, below, in an unrelated later part of the same overall session —

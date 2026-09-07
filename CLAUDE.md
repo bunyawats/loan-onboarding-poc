@@ -1781,22 +1781,17 @@ Mayan.
 
 ## Document hierarchy
 
-**Corrected from an earlier draft of this file, which built one single
-"Loan Onboarding Archive" index rooted at `applicant_identifier`.**
-Replaced (not merely renamed) with **three separate index templates**,
-each rooted at a different one of the three entity ids a document can
-carry — three different entry points into the same document set,
-confirmed with the user rather than assumed, since neither a single
-index nor `applicant_identifier`-as-root turned out to be what staff
-actually wanted to browse by:
-
-**Corrected again, to a strict "exclusive placement" model** — a
-document lives at exactly *one* leaf per index: the deepest entity it's
-actually tied to, matching the real customer → account → application
-hierarchy. Requested directly by the user after the multi-placement
-design (branches 1/2/3, all shown at once) turned out to be confusing
-to browse in practice — no more "the same document shows up in three
-different places at once."
+**Three separate index templates**, each rooted at a different one of
+the three entity ids a document can carry — three different entry
+points into the same document set, confirmed with the user directly
+rather than assumed (neither a single index nor
+`applicant_identifier`-as-root was what staff actually wanted to browse
+by). A document lives at exactly *one* leaf per index — the deepest
+entity it's actually tied to, matching the real customer → account →
+application hierarchy — a **strict "exclusive placement" model**,
+requested directly by the user after an earlier multi-placement design
+(the same document shown at every branch whose condition matched) read
+as confusing to browse in practice:
 
 ```
 Customer Index (customer_id)
@@ -1998,8 +1993,8 @@ attached to make that shape happen.
    file already documents for the other two.
 4. **`promote_government_id_to_customer_photo` creates a genuine second
    Mayan document — a customer-level copy — rather than re-tagging the
-   original, corrected from an earlier draft of this file.** The
-   original design attached `customer_id` directly to the just-approved
+   original.** An earlier design attached `customer_id` directly to the
+   just-approved
    application's own Government ID document, making one Mayan document
    satisfy two index leaves at once (CLAUDE.md's old "multi-leaf
    placement"). Changed after a direct design request: the application's
@@ -2057,27 +2052,19 @@ Session Log, 2026-09-04 docs-consolidation entry**:
    `tag_application_documents`' own multi-category attach loop, where
    the original conflict-on-retry concern is still real.
 
-**A follow-up session redesigned the three index templates from
-multi-placement to exclusive placement** (a document lives at exactly
-one leaf — the deepest entity it's actually tied to — never nested
-under more than one branch at once) and, along with it, changed
-`promote_government_id_to_customer_photo` from a re-tag-in-place
-operation into a genuine file copy — see "Document hierarchy" above for
-the resulting tree shape and rule 4 above for the copy mechanism
-itself. A real correctness bug in `reconcile.py` was also found and
-fixed while building this: `scan()` used to treat *every* stale
-`customer_id` as a strippable secondary tag — true when `customer_id`
-only ever rode alongside `application_id`, no longer true now that the
-customer-level copy carries `customer_id` as its *only* metadata.
-`scan()` now checks whether a document has `application_id`/
-`account_id` at all before deciding orphaned-vs-stale (see rule 5 above
-and `scan()`'s own docstring) — without this fix, a customer-level copy
-whose owning customer row was deleted would have had its one
-identifying tag stripped instead of the whole document being trashed,
-leaving a permanently untethered, un-taggable document invisible to
-every future reconciliation run. Both redesign passes were
-live-verified end-to-end (244 tests + `lint-imports` green after the
-second) — full sweep in the Session Log entry referenced above.
+**The exclusive-placement redesign (see "Document hierarchy" above and
+rule 4 above) also exposed a real correctness bug in `reconcile.py`,
+fixed alongside it**: `scan()` used to treat *every* stale `customer_id`
+as a strippable secondary tag — true when `customer_id` only ever rode
+alongside `application_id`, no longer true now that the customer-level
+copy carries `customer_id` as its *only* metadata. `scan()` now checks
+whether a document has `application_id`/`account_id` at all before
+deciding orphaned-vs-stale (see rule 5 above and `scan()`'s own
+docstring) — without this fix, a customer-level copy whose owning
+customer row was deleted would have had its one identifying tag
+stripped instead of the whole document being trashed, leaving a
+permanently untethered, un-taggable document invisible to every future
+reconciliation run.
 
 **Deliberately out of scope**: no backfill of documents belonging to
 applications approved *before* this lifecycle existed — same "forward-
@@ -2094,14 +2081,12 @@ framing.
 
 ### Customer side (`bff_customer/`) — email-verified, still no password
 
-**Corrected from an earlier draft of this file**, which described this
-surface as having no verification at all -- closed after being flagged
-as this POC's standout risk (see Known Gaps below for the full
-mechanism and the fix). Signed session cookie holding
-`applicant_identifier`, no password, no Redis -- but the cookie is now
-only ever set after the applicant proves ownership of that identifier
-via a 6-digit one-time code, not on the strength of just typing it in.
-See `bff_customer/identity.py`'s module docstring for the full design
+Signed session cookie holding `applicant_identifier`, no password, no
+Redis — but the cookie is only ever set after the applicant proves
+ownership of that identifier via a 6-digit one-time code, not on the
+strength of just typing it in (this POC's standout risk before the fix
+— see Known Gaps below). See `bff_customer/identity.py`'s module
+docstring for the full design
 (a second, short-lived signed cookie holding the code's *hash*, not
 the code itself, still no Redis -- the same "no server-side state"
 philosophy this module already had, just applied to a second cookie)
@@ -2199,11 +2184,9 @@ is a within-table constraint, not a cross-module join, so it doesn't
 raise the same concern a real FK would.)
 
 **Primary keys are short, human-readable, application-assigned
-strings — not database-generated `UUID`s.** Corrected from an earlier
-draft of this file, which had every table's primary key as
-`UUID PRIMARY KEY DEFAULT gen_random_uuid()`. Each of the three entity
+strings — not database-generated `UUID`s.** Each of the three entity
 types gets its own prefix plus a random 9-digit number, generated by a
-new shared leaf module, `idgen/` (see "Module dependency graph"):
+shared leaf module, `idgen/` (see "Module dependency graph"):
 
 | Entity | Prefix | Example |
 |---|---|---|
