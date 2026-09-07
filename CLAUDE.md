@@ -998,10 +998,9 @@ the domain modules' `service.py` functions.
   `document.service.upload(applicant_identifier, application_id, ...)` /
   `list_documents(...)`,
   `workflow.service.signal_decision(..., decision="CANCELLED")`.
-  **`account.service` is now also called, read-only** (corrected — an
-  earlier draft of this bullet said this BFF makes no `account.service`
-  call at all; true until the consent-upload feature below needed
-  `account_id` to hand to `document.service.upload_consent(...)`):
+  **`account.service` is also called, read-only** — needed once the
+  consent-upload feature below needed `account_id` to hand to
+  `document.service.upload_consent(...)`:
   `account.service.get_by_application_id(application_id)`, resolving the
   account behind an `APPROVED` application. Still no *write* call —
   account creation happens only inside `application/activities.py` on
@@ -1220,9 +1219,9 @@ avoided here), `application_id` (same treatment — opaque, not a real FK
 `accounts` table exclusively. **An account is the outcome of an
 approved loan, not something a customer has going into one** — see
 "Applying without being a customer yet" above. One customer can hold
-**many** accounts (one per approved application, over time), so unlike
-the original draft there's no one-account-per-customer uniqueness
-constraint — **but a customer's `ACTIVE` accounts may never repeat a
+**many** accounts (one per approved application, over time) — there's
+no one-account-per-customer uniqueness constraint, **but a customer's
+`ACTIVE` accounts may never repeat a
 `product_type`** (a customer can have a `CLOSED` and a new `ACTIVE`
 `personal_loan` account, just never two `ACTIVE` ones), enforced by
 `db/schema.sql`'s partial unique index on `(customer_id, product_type)
@@ -1673,16 +1672,14 @@ domain knowledge."
   strings the workflow forwards to the `persist_application` activity
   by name, exactly like `amount`, `product_type`, and `payload` —
   `workflow/` never inspects any of them, it just carries them from
-  `start_workflow`'s caller through to the activity call. **Corrected
-  from an earlier draft of this file**, which omitted
-  `applicant_name`/`applicant_email`/`applicant_phone` from this
-  signature entirely — an oversight caught while implementing Phase 4
-  (P4-2's `persist_application` activity input needs these three
-  denormalized fields to write into the row, same as
-  `applicant_identifier`/`customer_id` already did; there was no other
-  path for them to reach `persist_application` once `payload` stays
+  `start_workflow`'s caller through to the activity call.
+  `applicant_name`/`applicant_email`/`applicant_phone` are in this
+  signature because `persist_application`'s activity input needs these
+  three denormalized fields to write into the row, same as
+  `applicant_identifier`/`customer_id` — there's no other path for them
+  to reach `persist_application` once `payload` stays
   product-specific-fields-only per `application/`'s own module section
-  below).
+  below.
 - `service.signal_decision(workflow_id, actor_role, decision,
   actor_name, comment)` — called directly by `bff_backoffice`
   (Approve/Reject/RequestMoreInfo) and `bff_customer` (Cancel).

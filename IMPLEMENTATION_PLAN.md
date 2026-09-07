@@ -4456,9 +4456,30 @@ is.)*
   bullet in the file, 78 lines) dropped to 55 by this alone.
   `CLAUDE.md`: 2,867 → 2,826 lines (~1.4%, smaller than the two
   duplication-removal rounds, as expected once actual duplication was
-  gone — this round was pure compression). Not committed yet this
-  session — the user hadn't asked to commit at the point this entry was
-  written.
+  gone — this round was pure compression). Committed and pushed
+  (`8ed60a7`).
+
+  **Follow-up, same session, user asked to continue a fourth time**:
+  swept the remaining "used to"/"the original draft"/"an earlier
+  draft of this bullet" instances the round-3 grep pass had missed —
+  `bff_customer`'s `account.service` read-only bullet, `account/`'s
+  intro paragraph ("unlike the original draft there's no
+  one-account-per-customer constraint"), and `workflow/`'s
+  `start_workflow` bullet (`applicant_name`/`applicant_email`/
+  `applicant_phone` — why they're in the signature, not that an
+  earlier draft omitted them). Re-checked `create_application` and
+  `activities.py`'s bullets (the two largest) for further cuts and
+  found none worth making — every remaining sentence is a distinct
+  fact about an 8-parameter function's contract, not narrative;
+  cutting further would make the reference incomplete rather than
+  concise. `CLAUDE.md`: 2,826 → 2,823 lines — a small change, since
+  this pass was closing out round 3's technique on its last few
+  instances rather than finding a new category of bloat. **This
+  appears to be the practical floor for prose-tightening in "Modules,
+  in detail"** — a fifth "continue trimming" request should probably
+  look at a different section of the file, or a different technique,
+  rather than re-sweeping this one again. Not committed yet this
+  session.
 
 - **2026-09-07 (docs consolidation, round 2)** — User asked to offload
   `CLAUDE.md` context to a more dedicated document again — the same
