@@ -2618,6 +2618,42 @@ entry, unless a more specific pointer is given.)*
   `check_decision_allowed_bulk` and `application/activities.py`'s
   `persist_decision`, plus each one's test coverage in
   `tests/unit/application/`.
+- **The active-account-per-product-type rule doesn't count
+  `CLOSURE_REQUESTED` as active, and the resulting reject-path collision
+  is a real, unhandled crash — found while reviewing the ER diagram
+  against `db/schema.sql` for Phase 18, not caught at build time.** Both
+  `db/schema.sql`'s partial unique index
+  (`ux_accounts_customer_active_product_type`, `WHERE status =
+  'ACTIVE'`) and `account/db.py`'s `has_active_account_of_type` SQL
+  (`... AND status = 'ACTIVE'`) treat an account as no longer "active"
+  the moment its status moves to `CLOSURE_REQUESTED` — before the
+  closure is actually decided. A customer with a pending closure request
+  on their `personal_loan` account can therefore apply for, and be
+  approved for, a *second* `personal_loan` account while the first
+  request is still pending; nothing in
+  `application.service.check_decision_allowed`/
+  `get_available_product_types` blocks it, since both just call this
+  same `has_active_account_of_type` read.
+  **This is not a harmless double-up — it sets up a real, unhandled
+  failure**: if the first closure request is later **rejected** (reverting
+  that account's status back to `ACTIVE`) *after* the second account has
+  already been approved and is `ACTIVE`, `account/activities.py`'s
+  `persist_closure_decision` has no `try`/`except` around its
+  `UPDATE accounts SET status = 'ACTIVE' ...` write —
+  unlike `application/activities.py`'s `persist_decision`, which
+  deliberately catches this exact constraint violation and converts the
+  loser into a clean `REJECTED` (see the race-window bullet above),
+  `persist_closure_decision` has no equivalent handling. The `UPDATE`
+  hits the same partial unique index and raises an uncaught
+  `UniqueViolationError`, failing the Temporal activity — the same
+  "stuck forever with no error surfaced" shape this file already
+  documents for other unhandled Temporal-activity failures, just via a
+  different trigger (a reject, not an approve). Not fixed here — left as
+  an open question for a future session (either give `persist_closure_decision`
+  the same conflict-to-clean-outcome handling `persist_decision` has, or
+  have `has_active_account_of_type` treat `CLOSURE_REQUESTED` as active
+  in the first place, closing the double-up at its source instead of
+  its consequence) rather than guessed at or half-fixed here.
 - **Resolved, found live in Phase 13's P13-7 sweep.**
   `check_decision_allowed`'s short-circuit used to trust a `NULL`
   `applications.customer_id` as "no customer exists," which is wrong

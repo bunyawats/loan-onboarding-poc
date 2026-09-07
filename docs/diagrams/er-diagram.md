@@ -22,7 +22,7 @@ erDiagram
     APPLICATIONS ||..o| ACCOUNTS : "ACCOUNTS.application_id (account.service.create_account, exactly once, at terminal APPROVED)"
 
     CUSTOMERS {
-        string customer_id PK "cus- + random 9-digit number, app-assigned via idgen"
+        string customer_id PK "CUS- + random 9-digit number, app-assigned via idgen"
         text applicant_identifier UK "unique; find-or-create key"
         text name
         text email
@@ -31,16 +31,21 @@ erDiagram
     }
 
     ACCOUNTS {
-        string account_id PK "acc- + random 9-digit number, app-assigned via idgen"
+        string account_id PK "ACC- + random 9-digit number, app-assigned via idgen"
         string customer_id "opaque, NOT a FK -- not unique, one customer can hold many accounts"
-        string application_id UK "opaque, NOT a FK -- NOT NULL, unique; points at the owning application (corrected from an earlier draft, which had the pointer the other way)"
+        string application_id UK "opaque, NOT a FK -- NOT NULL, unique; points at the owning application"
         text product_type "personal_loan | auto_loan | mortgage"
         timestamptz opened_at
-        text status "ACTIVE | CLOSED"
+        text status "ACTIVE | CLOSURE_REQUESTED | CLOSED"
+        text closure_workflow_id "nullable -- set once a closure is requested (Phase 18)"
+        timestamptz closure_requested_at "nullable"
+        text closure_decision_comment "nullable -- staff attestation text, e.g. balance confirmed zero"
+        text closure_decided_by "nullable -- authenticated Keycloak preferred_username"
+        timestamptz closure_decided_at "nullable"
     }
 
     APPLICATIONS {
-        string application_id PK "app- + random 9-digit number, app-assigned via idgen"
+        string application_id PK "APP- + random 9-digit number, app-assigned via idgen"
         text applicant_identifier "NOT NULL -- durable key, always known at submission"
         string customer_id "opaque, NOT a FK -- nullable"
         text workflow_id "nullable -- Temporal's id, never cleared afterward (see CLAUDE.md's Known gaps)"
@@ -106,4 +111,21 @@ erDiagram
   this diagram (it constrains rows within one table, not a relationship
   between two), but load-bearing: it's the actual backstop behind
   `application.service.check_decision_allowed`'s pre-approval gate (PRD
-  §9.2, `CLAUDE.md`'s "Applying without being a customer yet").
+  §9.2, `CLAUDE.md`'s "Applying without being a customer yet"). **Verified
+  against the real `account/db.py`**: both this index's `WHERE status =
+  'ACTIVE'` clause and `has_active_account_of_type`'s own SQL
+  (`... AND status = 'ACTIVE'`) treat `CLOSURE_REQUESTED` as *not*
+  active — a customer with a pending closure request on their
+  `personal_loan` account is therefore free to apply for, and be
+  approved for, a *second* `personal_loan` account while the first
+  request is still pending. Not flagged anywhere as a gap; noted here
+  only because reviewing this diagram against Phase 18's schema change
+  is what surfaced it.
+- **`ACCOUNTS`'s five `closure_*` columns (built, Phase 18) track at
+  most one *current* closure request** — all nullable, all unset until
+  a customer first requests closure; a second request after a rejection
+  (which reverts `status` back to `ACTIVE`) overwrites these rather than
+  preserving history, same POC-scale simplification this project accepts
+  elsewhere for `applications`' own decision columns. See `CLAUDE.md`'s
+  "Account closure" for the full `ACTIVE` → `CLOSURE_REQUESTED` →
+  `CLOSED`-or-back-to-`ACTIVE` state machine these columns support.
