@@ -12,7 +12,15 @@ prior session should read to know exactly where to resume.
 
 1. Read `PRD.md` and `CLAUDE.md` in full — don't skip this even if it
    feels redundant with a prior session; you have no memory of that
-   session.
+   session. `CLAUDE.md` used to carry every phase's full design
+   narrative inline; several bounded feature areas now live instead as
+   project-local skills under `.claude/skills/` (`id-provisioning`,
+   `account-closure`, `gmail-smtp-delivery`, `risk-assessment-nats`,
+   `document-hierarchy`, `document-reconciliation`,
+   `known-gaps-and-gotchas`) — `CLAUDE.md`'s own sections point to the
+   right one, and each relevant phase below also names its skill
+   directly. Load the matching skill before starting a task in one of
+   those phases, not just `CLAUDE.md`'s condensed summary.
 2. Read **Current Status** (below) and the **three most recent Session
    Log entries** at the bottom of this file.
 3. Find the first unchecked task, in phase order. If a phase has any
@@ -700,7 +708,18 @@ subject-naming scheme, whether a `risk_assessment_id` is needed) —
 pick the stated assumed defaults and keep moving, don't block on
 them. **This was a documentation-only session, per explicit user
 instruction — none of Phase 21's tasks (P21-1 through P21-9) are
-implemented yet.** Start at P21-1.
+implemented yet.** Start at P21-1 — **load the `risk-assessment-nats`
+skill first** (`.claude/skills/risk-assessment-nats/`); `CLAUDE.md`'s
+own NATS section is now a condensed pointer to it, not the full design.
+
+**A later session split `CLAUDE.md`'s deep, phase-specific design
+narratives out into project-local skills under `.claude/skills/`**
+(`id-provisioning`, `account-closure`, `gmail-smtp-delivery`,
+`risk-assessment-nats`, `document-hierarchy`, `document-reconciliation`,
+`known-gaps-and-gotchas`) — `CLAUDE.md` itself now only carries
+condensed summaries plus pointers to the right skill. Each relevant
+phase section below names its skill directly; load it before starting
+work in that phase, don't rely on `CLAUDE.md`'s summary alone.
 
 *(A session should overwrite this paragraph, not append to it — it
 always reflects only the current resume point.)*
@@ -2752,6 +2771,10 @@ gaps in this file are deliberately left unaddressed.
 
 ## Phase 14 — Returning-customer profile refresh & ID reuse
 
+> Load the `id-provisioning` skill (`.claude/skills/id-provisioning/`)
+> for the full design — `CLAUDE.md`'s own section on this is now a
+> condensed pointer to it.
+
 **Depends on:** everything above (all 13 prior phases). **Not part of
 the original build-out** — a product enhancement brainstormed and
 confirmed with the user after Phase 13 closed. `CLAUDE.md` and `PRD.md`
@@ -3010,6 +3033,10 @@ instead. See `CLAUDE.md`'s design section for the full reasoning.
 
 ## Phase 15 — Document/database reconciliation
 
+> Load the `document-reconciliation` skill
+> (`.claude/skills/document-reconciliation/`) for the full design —
+> `CLAUDE.md`'s own section on this is now a condensed pointer to it.
+
 **Depends on:** everything above (needs `customer/`, `account/`,
 `application/`, `document/` all in their current, post-Phase-14 shape).
 **Not part of the original build-out** — found live this session: the
@@ -3146,6 +3173,11 @@ its own open product question).
 
 ## Phase 16 — Document metadata assignment lifecycle
 
+> Load the `document-hierarchy` skill (`.claude/skills/document-hierarchy/`)
+> for the full design (this phase, and the later exclusive-placement
+> index redesign) — `CLAUDE.md`'s own sections on this are now condensed
+> pointers to it.
+
 **Depends on:** Phase 14 (needs `bff_customer`'s wizard-draft
 `customer_id` resolution and `document/`'s Phase 14 metadata primitives)
 and Phase 15 (reconciliation already handles multi-id documents
@@ -3271,6 +3303,10 @@ exact call sequence each task below implements.
 
 ## Phase 17 — Proactive active-account product-type elimination
 
+> Load the `id-provisioning` skill (`.claude/skills/id-provisioning/`)
+> for the full design of the active-account-per-product-type rule this
+> phase makes proactive.
+
 **Depends on:** Phase 13 (`account.service.has_active_account_of_type`,
 `application.service.check_decision_allowed`) and Phase 14
 (`customer.service.find_by_identifier`'s role in resolving a returning
@@ -3317,6 +3353,10 @@ kept as the unconditional, unchanged authoritative backstop.
 ---
 
 ## Phase 18 — Account closure workflow
+
+> Load the `account-closure` skill (`.claude/skills/account-closure/`)
+> for the full design — `CLAUDE.md`'s own section on this is now a
+> condensed pointer to it.
 
 **Depends on:** Phase 17 (this phase is exactly the "path back" `PRD.md`
 §11 flagged as missing once Phase 17's hard elimination shipped) and
@@ -3888,6 +3928,10 @@ concluded — a later session started building it, at P18-1.**
 
 ## Phase 19 — Welcome Letter email notification
 
+> Load the `id-provisioning` skill (`.claude/skills/id-provisioning/`)
+> for the provisioning block this phase's Welcome Letter email call
+> sits inside.
+
 This section describes the target design for this phase, written first
 per this project's own convention — **nothing in this section is
 implemented yet.** Raised directly by the user, in the same spirit as
@@ -4082,6 +4126,10 @@ block).
 ---
 
 ## Phase 20 — Real email delivery via Gmail SMTP
+
+> Load the `gmail-smtp-delivery` skill (`.claude/skills/gmail-smtp-delivery/`)
+> for the full design — `CLAUDE.md`'s own section on this is now a
+> condensed pointer to it.
 
 This section describes the target design for this phase, written first
 per this project's own convention — **nothing in this section is
@@ -4299,6 +4347,10 @@ logged rather than raised).
 ---
 
 ## Phase 21 — Automated risk assessment via NATS
+
+> Load the `risk-assessment-nats` skill (`.claude/skills/risk-assessment-nats/`)
+> before starting any task in this phase — `CLAUDE.md`'s own section on
+> this is now a condensed pointer to it.
 
 **Depends on:** Phase 6 (`application/activities.py`'s existing
 activity/write patterns this phase's new activity follows), Phase 7
