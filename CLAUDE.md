@@ -227,13 +227,15 @@ them:
   now covering three entrypoints instead of one (see next section for
   why `app.py`/`worker_main.py` need this, and "Document/database
   reconciliation" for why `reconcile.py` does too — it's a
-  Phase-15 addition, not part of the original two). **Planned (Phase
-  21)**: a fourth composition root, `risk_listener_main.py` — imports
-  `risk/` and `workflow/` only (not every module, unlike the other
-  three), since its one job is turning an inbound NATS decision message
-  into a `workflow.service.signal_risk_decision(...)` call, the same
-  role `bff_backoffice`'s decision routes already play for a human
-  decision, just triggered by a message instead of an HTTP POST.
+  Phase-15 addition, not part of the original two). **No fourth
+  composition root planned for Phase 21, corrected from an earlier
+  design pass** — that pass had a `risk_listener_main.py` process inside
+  this package subscribing to NATS and calling
+  `workflow.service.signal_risk_decision(...)`; once NATS connectivity
+  moved entirely to the standalone NATS Adapter service (see "Automated
+  risk assessment via NATS"), there's no in-package NATS subscription
+  left for a fourth composition root to own — the Adapter signals
+  Temporal directly, from outside this package entirely.
 
 ### Breaking the application ↔ workflow cycle
 
@@ -860,22 +862,40 @@ system — a Risk Engine — consulted over a message broker (NATS) rather
 than a synchronous HTTP call, and let it auto-decide the easy cases
 (very low or very high risk) without a human ever touching them.
 
-- **Where it sits in the state machine**: a new state,
-  `PENDING_RISK_ASSESSMENT`, entered immediately after
-  `persist_application` commits — *before* today's
+**Revised after a second design pass, once `docs/research-krakend.md`
+existed to inform it**: the first draft of this section had the mock
+Risk Engine speak NATS directly and left the real-engine/HTTP-gateway
+question fully open ("no gateway product has been chosen"). Confirmed
+directly with the user: KrakenD is now the chosen gateway, and — more
+consequentially — **NATS connectivity moves out of the mock Risk Engine
+and out of this codebase's own process entirely, into one new
+standalone service, the NATS Adapter, which becomes the *only* thing
+anywhere that depends on the NATS protocol.** This is a bigger, cleaner
+revision than just picking a gateway product: the mock Risk Engine (and
+any real one that later replaces it) now only ever speaks plain HTTP,
+never NATS — the same "genuinely external system this codebase doesn't
+own" framing already applied to Mayan and Keycloak, now taken further
+so it never needs NATS awareness even in principle.
+
+- **Where it sits in the state machine**: unchanged from the first
+  draft. A new state, `PENDING_RISK_ASSESSMENT`, entered immediately
+  after `persist_application` commits — *before* today's
   `PENDING_UNDERWRITING`. A new activity, `submit_risk_assessment`
   (owned by `application/activities.py`, called by the workflow's own
   `execute_activity(...)`-by-name, same mechanism `persist_application`/
-  `persist_decision` already use — see "Breaking the cycle"), publishes
-  the application's risk criteria (amount, product type, payload) over
-  NATS. A new signal, `signal_risk_decision(risk_tier)`, is what moves
-  the workflow out of this state — sent not by a BFF route handler (the
-  source of every other signal today) but by a new standalone process,
-  `risk_listener_main.py`, subscribed to the Risk Engine's decision
-  subject.
-- **Decision routing**: `LOW` risk auto-transitions straight to
-  `APPROVED` — reusing the *exact same* `persist_decision` activity and
-  provisioning block a human Underwriter's Approve already triggers
+  `persist_decision` already use — see "Breaking the cycle"), calls
+  `risk.service.submit_risk_assessment(...)` with the application's
+  risk criteria (amount, product type, payload). A new signal,
+  `signal_risk_decision(risk_tier)`, is what moves the workflow out of
+  this state — sent not by a BFF route handler (the source of every
+  other signal today) but by the NATS Adapter (below), which computes
+  the deterministic `loan-application-<application_id>` workflow id
+  itself (the same scheme `workflow/service.py`'s own
+  `_workflow_id_for_application` already uses) and signals Temporal
+  directly.
+- **Decision routing**: unchanged. `LOW` risk auto-transitions straight
+  to `APPROVED` — reusing the *exact same* `persist_decision` activity
+  and provisioning block a human Underwriter's Approve already triggers
   (customer/account creation, Welcome Letter email, document tagging —
   see "Applying without being a customer yet"), just with
   `underwriter_name` set to a fixed marker value
@@ -893,54 +913,98 @@ than a synchronous HTTP call, and let it auto-decide the easy cases
   column or badge is surfaced anywhere in `bff_backoffice`'s UI for this
   phase — a `MEDIUM` application looks identical to any other row in
   the underwriting queue.
-- **Transport: pure NATS both directions, for this phase.** The
-  submission leg (`application/activities.py` → Risk Engine) is a NATS
-  publish; the decision leg (Risk Engine → `risk_listener_main.py`) is
-  also a NATS publish the listener subscribes to — no HTTP in either
-  direction between this codebase and the Risk Engine. **A separate,
-  later enhancement, not scoped or designed yet**: an open-source
-  gateway component sitting between `risk/nats_client.py` and a *real*
-  (non-mock) Risk Engine, translating NATS ↔ HTTP so a genuine
-  third-party system speaking REST/webhooks could sit behind the same
-  `risk/service.py` contract without this codebase's own NATS-facing
-  code ever changing. Listed here only so a future session knows where
-  it's meant to plug in — no gateway product has been chosen, and
-  nothing about its shape is decided.
-- **The Mock Risk Engine is a genuinely separate simulated external
-  service, not an in-process module.** Its own container, its own
-  process, its own NATS subscription — confirmed with the user directly
-  over building it as Python code inside `loan_onboarding`, matching
-  how Mayan and Keycloak are already treated as real external systems
-  this codebase doesn't own (see "Data storage"'s framing for Mayan's
-  own separate Postgres/Redis). Its decision rule for this phase is a
-  deliberately simple, deterministic bucketing on `amount` — **assumed
+- **The NATS Adapter — one new standalone service, sole owner of NATS
+  connectivity in this whole system.** Not part of the `loan_onboarding`
+  Python package (no import edge from anywhere in this codebase into
+  it) — its own container, its own process, same "genuinely external,
+  not app code" treatment `mock-risk-engine` already gets. It exposes
+  two small HTTP endpoints of its own and runs two background NATS
+  subscriber loops in the same process:
+  1. `POST /assessments` — called by `risk.service.submit_risk_assessment(...)`
+     (a plain `httpx` call, not a NATS publish — see `risk/`'s own
+     module section below for why this changes `risk/`'s dependency
+     footprint). Publishes the request body onto the
+     `risk.assessment.submitted` NATS subject and returns `202` once
+     Temporal-style "accepted, not yet processed" — the same
+     "only confirms accepted, not applied" caveat
+     `workflow.service.start_workflow` already carries for its own
+     callers.
+  2. A subscriber loop on `risk.assessment.submitted`: for each
+     message, calls the Risk Engine's own `POST /assess` — **through
+     KrakenD**, not directly (see below).
+  3. `POST /decisions` — the webhook the Risk Engine calls, **through
+     KrakenD**, once it has a tier. Publishes the request body onto the
+     `risk.assessment.decided` NATS subject and returns `202`.
+  4. A subscriber loop on `risk.assessment.decided`: for each message,
+     computes `workflow_id = f"loan-application-{application_id}"` and
+     sends the `signal_risk_decision` signal directly, via its own
+     `temporalio.client.Client` connection — **not** by importing
+     `workflow.service` (it can't; it's not part of this package) and
+     **not** by calling back into the `app`/`worker-*` processes over
+     HTTP either — a direct Temporal signal is the same kind of
+     standard, client-authorized action `bff_backoffice`'s decision
+     routes already perform, just issued from a different process. This
+     does mean the Adapter independently duplicates a small amount of
+     Temporal-connection-bootstrap logic `workflow/service.py` already
+     has — accepted as the cost of keeping the Adapter a self-contained
+     service rather than adding a new internal-only HTTP surface (and
+     its own auth question) to the main web process.
+- **KrakenD sits specifically at the Risk-Engine boundary, both
+  directions — not between this codebase and the NATS Adapter.**
+  Confirmed directly with the user. The Adapter's own call to the Risk
+  Engine's `POST /assess` goes through KrakenD; the Risk Engine's own
+  call to the Adapter's `POST /decisions` webhook goes through KrakenD
+  too. `application/activities.py` → the Adapter's `POST /assessments`
+  is a plain, direct internal HTTP call — no gateway hop, since that
+  traffic never crosses out to a system this codebase doesn't own.
+  **KrakenD's job here is deliberately the plain, well-supported one**:
+  a conventional HTTP↔HTTP reverse-proxy/API-gateway (routing, and
+  wherever needed, auth/rate-limiting/circuit-breaking) in front of the
+  Risk Engine, not KrakenD's own NATS pub/sub backend feature — using
+  that feature would have given KrakenD its own NATS dependency,
+  contradicting "the NATS Adapter is the only thing that depends on
+  NATS." This is also *simpler* than the shape `docs/research-krakend.md`'s
+  own speculative sketch explored before this decision was made: that
+  sketch worried about whether KrakenD could itself bridge a NATS
+  subject to an outbound HTTP call (it can't, on its own) — moot now,
+  since the NATS Adapter does that bridging itself and KrakenD never
+  needs to touch NATS at all.
+- **The Mock Risk Engine only ever speaks HTTP — `POST /assess` in,
+  `POST /decisions` (via KrakenD) out — never NATS, not even as a
+  mock.** Its own container, its own process — confirmed with the user
+  directly over building it as Python code inside `loan_onboarding`,
+  matching how Mayan and Keycloak are already treated as real external
+  systems this codebase doesn't own. Its decision rule for this phase is
+  a deliberately simple, deterministic bucketing on `amount` — **assumed
   default, not yet confirmed, see `IMPLEMENTATION_PLAN.md`'s Decisions
   Needed**: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
   `≥ $50,000 → HIGH`. Picked so the mock is trivially testable (a
   known amount always produces a known tier) rather than trying to
   simulate a real scoring model.
-- **At-least-once delivery means the signal handler needs a duplicate
-  guard.** NATS core pub/sub (no JetStream needed for this phase — see
-  below) doesn't promise exactly-once delivery, and neither does a
-  listener process that might retry a failed
-  `workflow.service.signal_risk_decision(...)` call. The workflow's
-  handler for this new signal needs the same "ignore a signal once a
-  decision is already claimed" guard `_claim_final()`-style logic
-  already gives the human-decision path — a duplicate/redelivered risk
-  decision must not be able to double-apply.
+- **At-least-once delivery means the Adapter's own signal-sending needs
+  a duplicate guard, and so does the workflow's signal handler.** NATS
+  core pub/sub (no JetStream needed for this phase) doesn't promise
+  exactly-once delivery, and neither does the Adapter's own subscriber
+  loop retrying a failed Temporal signal call. The workflow's handler
+  for this new signal needs the same "ignore a signal once a decision is
+  already claimed" guard `_claim_final()`-style logic already gives the
+  human-decision path — a duplicate/redelivered risk decision must not
+  be able to double-apply.
 - **No timeout on the risk-engine callback — a known gap carried
   forward on purpose, not solved differently here.** Same accepted gap
   this file's Known Gaps section already documents for "no timeout on
   wait for Underwriter/Manager decision" — an application that never
-  gets a risk decision (Risk Engine down, message lost) sits at
-  `PENDING_RISK_ASSESSMENT` forever, same shape as the existing gap,
-  not a new category of problem.
+  gets a risk decision (Risk Engine down, message lost, KrakenD
+  misrouted) sits at `PENDING_RISK_ASSESSMENT` forever, same shape as
+  the existing gap, not a new category of problem.
 - **New Docker Compose services (planned)**: `nats` (official
   `nats:latest` image — core pub/sub only, JetStream not needed for
   this phase since neither leg needs replay/durability beyond what
   Temporal's own activity retry already gives the publishing side),
-  `mock-risk-engine` (the standalone simulated external system above),
-  `risk-listener` (`risk_listener_main.py`).
+  `mock-risk-engine` (HTTP-only, as above), `risk-adapter` (the NATS
+  Adapter — holds the NATS connection, the two HTTP endpoints, and its
+  own Temporal client), `krakend` (fronting `mock-risk-engine` ↔
+  `risk-adapter` traffic both directions).
 
 ## Modules, in detail
 
@@ -1738,34 +1802,39 @@ domain knowledge."
 this module implements — this section covers only its own code shape,
 same split every other module section follows.)*
 
-The connector to the (mocked, for now) external Risk Engine, following
-the same "thin async client + a `service.py` that owns the calling
-convention" shape `document/mayan_client.py` already establishes for
-Mayan.
+**Revised alongside "Automated risk assessment via NATS" above once
+KrakenD + the standalone NATS Adapter were decided**: this module no
+longer touches NATS at all, or the network in general beyond one plain
+HTTP call — all NATS connectivity moved to the new, separately-deployed
+NATS Adapter service (not part of this Python package). `risk/` is now
+the thinnest module in the codebase, thinner even than `document/mayan_client.py`'s
+"thin async client" shape, since there's no protocol-specific client to
+wrap anymore — just one HTTP `POST`.
 
-- **`nats_client.py`** — a thin async wrapper around a NATS client
-  (connect, publish, subscribe), configured via a `NATS_URL` env var
-  (Docker-internal service name, `nats://nats:4222`, same "every env
-  var pointing at another container uses its Docker-internal service
-  name" discipline this file already documents for `KEYCLOAK_ISSUER`).
-  The only code in this module that actually touches the network.
+- **No `nats_client.py`.** This file was in the original draft of this
+  section; removed once NATS connectivity moved to the standalone NATS
+  Adapter service. `risk/` has no NATS dependency of any kind, not even
+  a wrapped one.
 - `service.submit_risk_assessment(application_id, applicant_identifier,
-  product_type, amount, payload) -> None` — publishes the application's
-  risk criteria to a NATS subject. Exact subject-naming scheme (one
-  shared subject with `application_id` in the message body, vs. a
-  per-application subject) not yet decided — see
-  `IMPLEMENTATION_PLAN.md`'s Decisions Needed. Called only from
+  product_type, amount, payload) -> None` — a plain `httpx.post(...)`
+  to the NATS Adapter's `POST /assessments` endpoint
+  (`RISK_ADAPTER_URL` env var, Docker-internal service name, same
+  discipline this file already documents for `KEYCLOAK_ISSUER`), body
+  mirroring the function's own arguments. Returns once the Adapter
+  confirms it accepted the submission for NATS publish — same "accepted,
+  not yet processed" caveat every other `service.py`-owned outbound call
+  in this codebase already carries. Called only from
   `application/activities.py`'s new `submit_risk_assessment` activity,
   same "activities.py is where outbound calls to leaf integration
   modules happen" pattern `document/`/`workflow/`/`notifications/` are
   already called from there.
-- **No subscribe-side code for the *decision* leg lives here.** Turning
-  an inbound NATS decision message into a
-  `workflow.service.signal_risk_decision(...)` call needs `workflow/`,
-  and `risk/` must never import it — same leaf discipline `document/`
-  already keeps. That subscription lives in `risk_listener_main.py` (a
-  composition root, not part of this module — see "Module dependency
-  graph").
+- **No subscribe-side code for the *decision* leg lives here, and never
+  will** — that's now the NATS Adapter's own job end-to-end (subscribe
+  to the decision subject, signal Temporal directly), not something any
+  code inside the `loan_onboarding` package does. `risk_listener_main.py`,
+  the fourth composition root the original draft of this section
+  planned, is no longer needed — there's no in-package NATS
+  subscription left for it to own.
 - **Never imports `application/`, `workflow/`, `customer/`,
   `account/`, or `document/`.** A leaf, same shape as `document/` and
   `workflow/` themselves — `idgen/` is the one exception every other
@@ -2417,19 +2486,22 @@ loan-onboarding-poc/
     ├── notifications/           # built, P18-2 -- promoted out of
     │   └── service.py           # bff_customer/notifications.py, see
     │                             # "Account closure"
-    ├── risk/                     # planned, Phase 21, not yet built --
-    │   ├── nats_client.py        # see "risk/ -- Risk assessment module"
-    │   └── service.py
-    └── risk_listener_main.py     # planned, Phase 21 -- composition root,
-                                   # NATS decision subscriber, see
-                                   # "Automated risk assessment via NATS"
+    └── risk/                     # planned, Phase 21, not yet built --
+        └── service.py            # one httpx POST, no NATS client here --
+                                   # see "risk/ -- Risk assessment module"
 ```
 
 **Also planned, Phase 21, sitting outside the `loan_onboarding` Python
-package entirely**: `mock_risk_engine/`, the standalone simulated
-external Risk Engine — deliberately not part of this package, same
-"a real external system this codebase doesn't own" treatment Mayan and
-Keycloak already get (see "Automated risk assessment via NATS").
+package entirely**: `mock_risk_engine/` (the standalone simulated
+external Risk Engine, HTTP-only) and `risk_adapter/` (the NATS Adapter
+— the sole owner of NATS connectivity in this whole system, plus its
+own small Temporal client) — both deliberately not part of this
+package, same "a real external system this codebase doesn't own"
+treatment Mayan and Keycloak already get (see "Automated risk
+assessment via NATS"). No `risk_listener_main.py` — the earlier draft
+of this section planned one, but there's no in-package NATS
+subscription left for a composition root to own once the Adapter took
+over that job entirely.
 
 Every module imports every other module it's allowed to by its full
 package path (`from loan_onboarding.workflow import service as
@@ -2485,10 +2557,12 @@ image instead of seven:
   if the split above is used), `depends_on: [db, temporal, keycloak,
   backoffice-redis, mayan]`.
 - **Planned, Phase 21, not yet built**: `nats` (core pub/sub, no
-  JetStream — see "Automated risk assessment via NATS"),
-  `mock-risk-engine` (the standalone simulated external system,
-  `depends_on: [nats]`), `risk-listener`
-  (`risk_listener_main.py`, `depends_on: [nats, temporal]`).
+  JetStream — see "Automated risk assessment via NATS"), `krakend`
+  (fronting the Risk-Engine boundary, `depends_on: [mock-risk-engine,
+  risk-adapter]`), `mock-risk-engine` (HTTP-only, no NATS —
+  `depends_on: [krakend]`, since it calls the Adapter's webhook
+  *through* KrakenD), `risk-adapter` (the NATS Adapter — sole owner of
+  NATS connectivity, `depends_on: [nats, temporal, krakend]`).
 
 Every env var pointing at another container uses its Docker-internal
 service name — same discipline the reference project already documents

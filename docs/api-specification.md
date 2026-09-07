@@ -893,11 +893,17 @@ escalation; *not* the intermediate `PENDING_MANAGER_APPROVAL` step),
 ## `risk/service.py` (planned — Phase 21, not yet built)
 
 **Nothing in this section exists in the codebase today** — no
-`loan_onboarding/risk/` package, no `risk_listener_main.py`. Included
-here, clearly marked, because it's the target contract this pass was
-asked to review alongside SMTP/NATS/KrakenD — see `CLAUDE.md`'s
-"Automated risk assessment via NATS" and `PRD.md` §6.7 for the full
-design this describes the shape of.
+`loan_onboarding/risk/` package. Included here, clearly marked, because
+it's the target contract for this design. See `CLAUDE.md`'s "Automated
+risk assessment via NATS" and `PRD.md` §6.7 for the full design.
+
+**Revised after a follow-up decision**: this module has **no NATS
+dependency at all** — all NATS connectivity moved to a new, separately
+deployed service, the NATS Adapter (`risk-adapter`, outside the
+`loan_onboarding` package entirely, so it has no `service.py` contract
+of its own to document here — see its four responsibilities in
+`CLAUDE.md`). `risk/service.py` is now the thinnest module in the
+codebase: one function, one plain HTTP call.
 
 ```python
 async def submit_risk_assessment(
@@ -907,30 +913,37 @@ async def submit_risk_assessment(
     amount: Decimal,
     payload: dict[str, Any],
 ) -> None: ...
-    # publishes the application's risk criteria over NATS. Called only
-    # from a new application/activities.py activity, submit_risk_assessment,
-    # by the workflow's own execute_activity(...)-by-name call --
-    # same "activities.py is where outbound calls to leaf integration
+    # a plain httpx.post(...) to RISK_ADAPTER_URL's POST /assessments --
+    # not a NATS publish. Called only from a new
+    # application/activities.py activity, submit_risk_assessment, by
+    # the workflow's own execute_activity(...)-by-name call -- same
+    # "activities.py is where outbound calls to leaf integration
     # modules happen" pattern document/workflow/notifications already
     # follow.
 ```
 
 Also planned: a new `workflow.service.signal_risk_decision(client,
-workflow_id, risk_tier)` (exact signature not yet pinned down against
-real code — `risk/` doesn't exist to write against yet), sent not by a
-BFF route handler but by a new standalone process, `risk_listener_main.py`,
-subscribed to the Risk Engine's decision subject. `risk/nats_client.py`
-would be the only file in this module that actually touches the
-network — a thin async wrapper around a NATS client, same "thin client
-+ a `service.py` that owns the calling convention" shape
-`document/mayan_client.py` already establishes for Mayan.
+workflow_id, risk_tier)` signal (exact signature not yet pinned down
+against real code — `risk/`/`workflow/` don't exist to write against
+yet) — but note it's **not** the NATS Adapter calling this function
+directly (the Adapter isn't part of this package and can't import
+`workflow.service`). The Adapter instead computes the deterministic
+`loan-application-<application_id>` workflow id itself and sends the
+signal via its own independent `temporalio.client.Client` connection —
+the same standard, client-authorized action `bff_backoffice`'s decision
+routes already perform, just from a different process. This function's
+real callers, once built, are anything already inside the `loan_onboarding`
+process that needs to send this signal (none currently planned) — its
+signature exists here mainly as the documented "shape" the Adapter's
+own direct-Temporal-client call mirrors, not because the Adapter calls
+it.
 
-**Not part of this contract, and not decided**: whether a real,
-non-mock Risk Engine ever sits behind a NATS↔HTTP gateway (KrakenD is
-one evaluated candidate — see `docs/research-krakend.md`) doesn't
-change this module's own signature at all; the gateway question is
-entirely about what's on the *other* side of the NATS subjects
-`risk/nats_client.py` publishes/subscribes to.
+**KrakenD is decided, not a candidate** — it fronts the NATS Adapter ↔
+Risk Engine boundary, both directions (see `CLAUDE.md`, and
+`docs/research-krakend.md` for the full reasoning). This doesn't change
+`risk/service.py`'s own signature at all; the gateway sits entirely
+between the Adapter and the Risk Engine, two steps removed from
+anything in this package.
 
 ---
 

@@ -4302,22 +4302,43 @@ logged rather than raised).
 
 **Depends on:** Phase 6 (`application/activities.py`'s existing
 activity/write patterns this phase's new activity follows), Phase 7
-(the worker composition-root pattern `risk_listener_main.py` mirrors).
-**Not part of the original build-out** — a future enhancement discussed
-and confirmed with the user, separate from Phases 18-20's account-
-closure/notification work. `CLAUDE.md`'s new "Automated risk assessment
-via NATS" and `risk/` module sections, and `PRD.md`'s new §6.7 (plus
-updates to §1.1, §9.3, §11), describe the target design, written first
-per this project's own convention. **Scoping decisions already
-confirmed with the user, not open questions for whoever picks this up**:
-the mock Risk Engine is a genuinely separate simulated external service
-(its own container), not in-process code; transport is pure NATS in
-both directions for this phase; a `MEDIUM` risk tier changes nothing
-about today's underwriting queue. **Several other decisions are still
-open, logged in this file's own Decisions Needed section** (exact risk
-thresholds, auto-approve provisioning depth, NATS subject-naming
-scheme, whether a `risk_assessment_id` is needed) — pick the stated
-assumed defaults and keep moving.
+(the worker composition-root pattern this phase's task breakdown no
+longer needs a fourth copy of — see below). **Not part of the original
+build-out** — a future enhancement discussed and confirmed with the
+user, separate from Phases 18-20's account-closure/notification work.
+`CLAUDE.md`'s "Automated risk assessment via NATS" and `risk/` module
+sections, and `PRD.md`'s §6.7 (plus updates to §1.1, §9.3, §11),
+describe the target design, written first per this project's own
+convention. **Scoping decisions already confirmed with the user, not
+open questions for whoever picks this up**: the mock Risk Engine is a
+genuinely separate simulated external service (its own container), HTTP-
+only, never speaking NATS itself; **KrakenD is the chosen gateway,
+fronting the Risk-Engine boundary only** (both directions — the
+Adapter's outbound call to the Risk Engine, and the Risk Engine's
+inbound decision webhook); **a new standalone service, the NATS
+Adapter, is the sole owner of NATS connectivity anywhere in this
+system** — this revision (below) replaced the original draft's
+NATS-native mock engine and its `risk_listener_main.py` composition
+root; a `MEDIUM` risk tier changes nothing about today's underwriting
+queue. **Several other decisions are still open, logged in this file's
+own Decisions Needed section** (exact risk thresholds, auto-approve
+provisioning depth, NATS subject-naming scheme, whether a
+`risk_assessment_id` is needed) — pick the stated assumed defaults and
+keep moving.
+
+**Revised in a follow-up design session, after `docs/research-krakend.md`
+existed to inform it — see this section's `CLAUDE.md` counterpart for
+the full reasoning.** In short: instead of the mock Risk Engine
+subscribing to NATS directly and a `risk_listener_main.py` process
+inside this package subscribing to the decision subject, **one new
+standalone service (the NATS Adapter, `risk-adapter`) now owns NATS
+connectivity end to end** — two HTTP endpoints of its own, two NATS
+subscriber loops, and its own Temporal client to signal the workflow
+directly. The Risk Engine and this codebase's own `risk/` module now
+never touch NATS at all. Task numbering below reflects this revision,
+not the original draft — there is no P21-5/P21-6 matching an earlier
+version of this file if one was ever cached; treat this task list as
+authoritative.
 
 **This is a design-only session's task breakdown — none of Phase 21's
 tasks are implemented yet.** Start at P21-1.
@@ -4334,29 +4355,63 @@ tasks are implemented yet.** Start at P21-1.
 - [ ] **P21-2** — `docker-compose.yml`: add the `nats` service (official
       `nats:latest` image, core pub/sub only — no JetStream config for
       this phase). Add `NATS_URL` to `.env.example` (Docker-internal
-      default, `nats://nats:4222`).
+      default, `nats://nats:4222`) — used only by `risk-adapter` (P21-4
+      below), not by anything inside the `loan_onboarding` package.
       DoD: `docker compose up -d nats` starts cleanly; a trivial
       `nats.py`-based publish/subscribe smoke test (throwaway, not
       committed) round-trips a message against the running container.
-- [ ] **P21-3** — New leaf module `risk/`: `nats_client.py` (thin async
-      connect/publish/subscribe wrapper) and `service.py`
+- [ ] **P21-3** — New leaf module `risk/`: just `service.py`
       (`submit_risk_assessment(application_id, applicant_identifier,
-      product_type, amount, payload) -> None`, publishing to a NATS
-      subject). Resolve the subject-naming Decision Needed above as
-      part of this task and document the choice in `CLAUDE.md`'s `risk/`
-      module section. Add a `risk/` never imports anything else in this
-      codebase except `idgen/` contract to `.importlinter`/
-      `pyproject.toml`.
-      DoD: unit tests for `submit_risk_assessment` (mock the NATS
-      client at the function-call boundary, same convention every other
+      product_type, amount, payload) -> None`, a plain `httpx.post(...)`
+      to `RISK_ADAPTER_URL`'s `POST /assessments`). No `nats_client.py`
+      — this module has no NATS dependency at all. Add `RISK_ADAPTER_URL`
+      to `.env.example` (Docker-internal default,
+      `http://risk-adapter:8000`). Add a `risk/` never imports anything
+      else in this codebase except `idgen/` contract to
+      `.importlinter`/`pyproject.toml`.
+      DoD: unit tests for `submit_risk_assessment` (mock the `httpx`
+      call at the function-call boundary, same convention every other
       leaf module's tests use); `lint-imports` green with the new
       contract.
-- [ ] **P21-4** — `workflow/workflows.py`: add the `PENDING_RISK_ASSESSMENT`
+- [ ] **P21-4** — New standalone service `risk-adapter/`, living outside
+      the `loan_onboarding` package entirely (own Dockerfile, own
+      dependencies — a small async HTTP server, an `httpx` client, a
+      NATS client, and a `temporalio.client.Client`). Resolve the
+      subject-naming Decision Needed above as part of this task and
+      document the choice in `CLAUDE.md`'s "Automated risk assessment
+      via NATS" section. Implements, in one process:
+      1. `POST /assessments` — receives `application/`'s risk-criteria
+         payload (from `risk.service.submit_risk_assessment`, P21-3),
+         publishes it onto `risk.assessment.submitted`, returns `202`.
+      2. A subscriber loop on `risk.assessment.submitted` — for each
+         message, calls the Risk Engine's `POST /assess` **through
+         KrakenD** (`RISK_ENGINE_URL` pointed at KrakenD, not the
+         engine directly — see P21-6).
+      3. `POST /decisions` — the webhook the Risk Engine calls (through
+         KrakenD), publishes the decision onto `risk.assessment.decided`,
+         returns `202`.
+      4. A subscriber loop on `risk.assessment.decided` — for each
+         message, computes `workflow_id =
+         f"loan-application-{application_id}"` (same deterministic
+         scheme `workflow/service.py`'s own
+         `_workflow_id_for_application` already uses) and sends the
+         `signal_risk_decision` signal directly via its own Temporal
+         client — no import of `workflow.service`, since this service
+         isn't part of the `loan_onboarding` package.
+      Add a `risk-adapter` Docker Compose service (`depends_on: [nats,
+      temporal, krakend]`).
+      DoD: unit tests for both HTTP endpoints (mocking the NATS
+      publish) and both subscriber loops (mocking the NATS message and
+      asserting the right outbound `httpx` call / the right Temporal
+      signal call); `docker compose up -d risk-adapter` starts cleanly
+      against the real stack.
+- [ ] **P21-5** — `workflow/workflows.py`: add the `PENDING_RISK_ASSESSMENT`
       state (entered immediately after `persist_application`, before
       today's `PENDING_UNDERWRITING`) and a new `signal_risk_decision(risk_tier)`
       signal, with the same `_claim_final()`-style duplicate-signal
       guard the existing decision signal already has (NATS is
-      at-least-once — see `CLAUDE.md`). Wire the three-way routing:
+      at-least-once, and so is the Adapter's own retry of a failed
+      signal call — see `CLAUDE.md`). Wire the three-way routing:
       `LOW` → the existing `APPROVED` transition/`persist_decision` path
       (with `underwriter_name` set to a fixed system marker, not a
       Keycloak username — the documented exception), `HIGH` → the
@@ -4371,54 +4426,60 @@ tasks are implemented yet.** Start at P21-1.
       the existing workflow tests) covering all three risk-tier
       outcomes, including a duplicate `signal_risk_decision` call being
       safely ignored once a decision is already claimed.
-- [ ] **P21-5** — New composition root `risk_listener_main.py`: a NATS
-      subscriber process (imports `risk/` and `workflow/` only, not
-      every module) that turns an inbound decision message into a
-      `workflow.service.signal_risk_decision(workflow_id, risk_tier)`
-      call. Add a `risk-listener` Docker Compose service
-      (`depends_on: [nats, temporal]`).
-      DoD: unit tests mocking the NATS subscription and asserting the
-      correct `signal_risk_decision` call; `docker compose up -d
-      risk-listener` starts cleanly against the real stack.
-- [ ] **P21-6** — Mock Risk Engine: a standalone service living outside
+- [ ] **P21-6** — `krakend/` config (a `krakend.json` or equivalent,
+      committed to the repo) fronting the Risk-Engine boundary: a route
+      for the Adapter's outbound `POST /assess` call to reach
+      `mock-risk-engine`, and a route for the Risk Engine's inbound
+      `POST /decisions` webhook call to reach `risk-adapter`. Plain
+      HTTP↔HTTP reverse-proxying only — **not** KrakenD's own NATS
+      pub/sub backend feature, which would give KrakenD its own NATS
+      dependency and contradict "the Adapter is the only thing that
+      depends on NATS" (see `CLAUDE.md`). Add a `krakend` Docker Compose
+      service (`depends_on: [mock-risk-engine, risk-adapter]`).
+      DoD: `docker compose up -d krakend` starts cleanly; a manual
+      `curl` through KrakenD in each direction (throwaway, not
+      committed) reaches the intended backend.
+- [ ] **P21-7** — Mock Risk Engine: a standalone service living outside
       the `loan_onboarding` package (`mock_risk_engine/`, own
-      Dockerfile), subscribing to the submission subject, applying the
-      Decisions-Needed amount-bucketing rule after a short simulated
-      delay, and publishing the decision back. Add a `mock-risk-engine`
-      Docker Compose service (`depends_on: [nats]`).
-      DoD: with `nats`/`mock-risk-engine` running, a manual publish to
-      the submission subject (throwaway script, not committed) produces
-      the expected decision message back for a `LOW`, a `MEDIUM`, and a
-      `HIGH` amount.
-- [ ] **P21-7** — `applications.risk_tier` gets written by
+      Dockerfile), **HTTP-only, no NATS client at all** — a `POST
+      /assess` endpoint that applies the Decisions-Needed amount-
+      bucketing rule after a short simulated delay, then calls
+      `risk-adapter`'s `POST /decisions` webhook **through KrakenD**
+      with the result. Add a `mock-risk-engine` Docker Compose service
+      (`depends_on: [krakend]`).
+      DoD: with `nats`/`risk-adapter`/`krakend`/`mock-risk-engine` all
+      running, a manual `POST` to `risk-adapter`'s `/assessments`
+      (throwaway script, not committed) produces the expected decision
+      arriving back at `risk-adapter`'s `/decisions` for a `LOW`, a
+      `MEDIUM`, and a `HIGH` amount.
+- [ ] **P21-8** — `applications.risk_tier` gets written by
       `persist_decision` whenever a decision resolves via the risk path
       (both auto-approve and auto-reject) — never for a human decision,
       which leaves it `NULL`.
       DoD: unit test confirming `risk_tier` is set correctly for a
       risk-driven decision and stays `NULL` for a human one.
-- [ ] **P21-8** — Full unit suite + `lint-imports` green with every new
-      contract from P21-3/P21-7. Update `IMPLEMENTATION_PLAN.md`'s
+- [ ] **P21-9** — Full unit suite + `lint-imports` green with every new
+      contract from P21-3/P21-8. Update `IMPLEMENTATION_PLAN.md`'s
       Decisions Needed section: remove any entry a human has since
       confirmed, leave the rest provisional.
       DoD: `pytest tests/unit` and `lint-imports` both pass; Decisions
       Needed reflects actual current confirmation state, not stale
       entries.
-- [ ] **P21-9** — Live E2E verification against the real stack: submit
+- [ ] **P21-10** — Live E2E verification against the real stack: submit
       three real applications (one per amount bucket) through the
       actual customer UI, confirm the `LOW` one reaches `APPROVED`
       automatically (with account/Welcome Letter/document tagging all
       firing, same as a human approval), the `HIGH` one reaches
       `REJECTED` automatically, and the `MEDIUM` one lands in the
       Underwriter queue completely unchanged from today's behavior —
-      not just via unit tests.
+      not just via unit tests. Confirm the full real chain end to end:
+      `risk/` → `risk-adapter` → `nats` → `risk-adapter`'s own
+      subscriber → KrakenD → `mock-risk-engine` → KrakenD →
+      `risk-adapter`'s webhook → `nats` → `risk-adapter`'s decision
+      subscriber → a real Temporal signal.
       DoD: all three outcomes confirmed against the real stack (real
-      NATS, real mock Risk Engine container, real Temporal), not just
-      `WorkflowEnvironment`-simulated.
-
-**Explicitly out of scope for this phase, deferred as a separate,
-undesigned future enhancement**: the open-source NATS↔HTTP gateway
-component sitting between `risk/nats_client.py` and a real (non-mock)
-Risk Engine — see `CLAUDE.md`'s "Automated risk assessment via NATS."
+      NATS, real KrakenD, real mock Risk Engine container, real
+      Temporal), not just `WorkflowEnvironment`-simulated.
 
 ---
 
@@ -4430,6 +4491,76 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-07 (Phase 21 redesigned — NATS Adapter + KrakenD decided)**
+  — User made a real architectural decision, following up on the
+  KrakenD research from earlier in the session: "I want to use KrakenD
+  as a gateway for risk engine and NATS messaging queue. Implement NATS
+  Adaptor that wrap around NATS messaging queue," followed by five
+  bullets describing the exact flow, then a mid-turn correction
+  ("Krakend sit betwee Risk Engine and Nats Adaptor") pinning down where
+  KrakenD sits. Confirmed via `AskUserQuestion` (both answers: the
+  recommended option) before writing anything: (1) the topology reading
+  — a new standalone NATS Adapter service is the sole owner of NATS
+  connectivity anywhere in the system; the main app calls it via plain
+  HTTP with no gateway hop; KrakenD fronts only the
+  Adapter↔Risk-Engine boundary, both directions; `risk_listener_main.py`
+  is removed, its job absorbed into the Adapter — and (2) scope for this
+  turn is docs only, matching every prior phase's own design-first
+  convention, not writing code yet.
+
+  This is a bigger revision than just picking a gateway product: it
+  moves NATS connectivity **out of** the mock Risk Engine (which the
+  original Phase 21 draft had subscribing to NATS directly) and **out
+  of** this codebase's own process (the original draft's
+  `risk_listener_main.py`, a fourth composition root inside
+  `loan_onboarding`) into one new external service. The Risk Engine
+  (mock, and any real one later) and this codebase's `risk/` module now
+  never touch NATS at all — only the new `risk-adapter` service does,
+  via two HTTP endpoints (`POST /assessments` in from `risk/service.py`,
+  `POST /decisions` webhook in from the Risk Engine through KrakenD) and
+  two NATS subscriber loops (outbound → calls the Risk Engine through
+  KrakenD; inbound decision → signals Temporal directly via its own
+  `temporalio.client.Client`, computing the deterministic
+  `loan-application-<application_id>` workflow id itself rather than
+  importing `workflow.service`, since it isn't part of the package).
+
+  This also resolves the open question `docs/research-krakend.md`'s own
+  speculative topology sketch had flagged (whether KrakenD could bridge
+  a NATS subject to an outbound HTTP call on its own — it can't) by
+  making it moot: KrakenD never needs to touch NATS in this design at
+  all, only plain HTTP↔HTTP proxying at the Risk-Engine boundary, which
+  is its best-supported, simplest use case.
+
+  Updated all three design docs plus both diagrams, per this project's
+  own rule that a real architectural decision gets written down before
+  a session ends: `CLAUDE.md`'s "Automated risk assessment via NATS"
+  section (substantially rewritten), its `risk/` module section (drops
+  `nats_client.py` entirely, `service.py` becomes an `httpx` call), the
+  module-dependency-graph's composition-root bullet (no more
+  `risk_listener_main.py`), Repo layout, and Docker Compose topology.
+  `PRD.md` §6.7's gateway bullet changed from "not scoped or designed
+  yet" to "decided" (kept minimal — this is implementation topology, not
+  product-visible behavior, so no other product-facing text changed).
+  This file's own Phase 21 task breakdown was rewritten task-by-task
+  (P21-1 through P21-10, all still unchecked — nothing implemented) to
+  match: `risk/` (P21-3) drops its NATS client; a new P21-4 builds the
+  standalone `risk-adapter` service; a new P21-6 adds KrakenD's own
+  config (plain HTTP routing, deliberately not KrakenD's NATS pub/sub
+  backend feature, which would have given KrakenD its own NATS
+  dependency and broken "only the Adapter depends on NATS"); P21-7 (Mock
+  Risk Engine) is now HTTP-only. Also updated, same pass, so the
+  diagrams don't go stale the way the ER diagram was found to be
+  earlier this session: `docs/diagrams/system-architecture.md`'s Phase
+  21 subgraph (now shows `risk-adapter`/`krakend` as one decided
+  subgraph instead of a dashed-planned/dotted-not-chosen split),
+  `docs/diagrams/application-modules.md` (drops the `risk_listener_main.py`
+  node and its edges, notes `risk/` is an HTTP client not a NATS one),
+  and `docs/research-krakend.md` (its own speculative topology sketch
+  replaced with the decided shape, old reasoning kept as context for
+  *why* KrakenD alone couldn't do both legs). No code changed this
+  session — design and planning only, per the confirmed scope. Not
+  committed yet.
 
 - **2026-09-07 (docs consolidation, round 7 — file-wide sweep,
   smallest yield yet)** — User asked once more to "continue trimming a

@@ -6,15 +6,15 @@ one Docker image, multiple running processes, several third-party
 containers. For the *code-module* view (which Python package imports
 which), see [`application-modules.md`](application-modules.md).
 
-**Three build statuses appear in this diagram, styled distinctly**:
-solid boxes/arrows are **built and live-verified**; the dashed
-`riskPlanned` subgraph (Phase 21) is **planned, not yet built** —
-`nats`/`mock-risk-engine`/`risk-listener` don't exist as running
-containers today; the dotted `krakend` node is **evaluated, not
-chosen** — a candidate for a later, unscoped enhancement (a real,
-non-mock Risk Engine speaking REST/webhooks instead of NATS), not part
-of any committed topology. See `docs/research-krakend.md` for why it's
-drawn this way rather than wired into the Phase 21 subgraph.
+**Two build statuses appear in this diagram**: solid boxes/arrows are
+**built and live-verified**; the dashed `riskPlanned` subgraph (Phase
+21) is **planned, not yet built** — `nats`/`mock-risk-engine`/
+`risk-adapter`/`krakend` don't exist as running containers today.
+Everything inside that subgraph, including KrakenD, is a **decided**
+part of the target design (confirmed with the user), not a candidate —
+see `CLAUDE.md`'s "Automated risk assessment via NATS" for the full
+reasoning, and `docs/research-krakend.md` for the general KrakenD
+research that led here.
 
 ```mermaid
 graph TB
@@ -71,22 +71,25 @@ graph TB
     mayan --> mayanDb
     mayan --> mayanRedis
 
-    subgraph riskPlanned["Planned -- Phase 21, not yet built"]
+    subgraph riskPlanned["Planned -- Phase 21, not yet built (all decided, none running today)"]
         nats[("nats<br/>(core pub/sub)")]
-        mockRisk["mock-risk-engine<br/>(standalone simulated<br/>external service)"]
-        riskListener["risk-listener<br/>(risk_listener_main.py)"]
+        riskAdapter["risk-adapter<br/>(the NATS Adapter --<br/>sole owner of NATS in<br/>this whole system)"]
+        krakend{{"krakend<br/>(fronts the Risk-Engine<br/>boundary, both directions --<br/>plain HTTP proxy only,<br/>no NATS backend)"}}
+        mockRisk["mock-risk-engine<br/>(HTTP-only -- POST /assess in,<br/>POST /decisions webhook out --<br/>never touches NATS)"]
     end
 
-    workerActivity -.->|"submit_risk_assessment<br/>(publish: risk.assessment.submitted)"| nats
-    mockRisk -.->|"subscribe / publish"| nats
-    nats -.->|"subscribe: risk.assessment.decided"| riskListener
-    riskListener -.->|signal_risk_decision| temporalServer
-
-    krakend{{"KrakenD (or equivalent)<br/>evaluated, NOT chosen --<br/>see docs/research-krakend.md"}}
-    mockRisk -.->|"if ever swapped for a real,<br/>REST/webhook-only Risk Engine"| krakend
+    workerActivity -.->|"risk.service.submit_risk_assessment<br/>(plain httpx POST /assessments)"| riskAdapter
+    riskAdapter -.->|"publish: risk.assessment.submitted"| nats
+    nats -.->|"subscribe (Adapter's own loop)"| riskAdapter
+    riskAdapter -.->|"POST /assess"| krakend
+    krakend -.-> mockRisk
+    mockRisk -.->|"POST /decisions (webhook)"| krakend
+    krakend -.-> riskAdapter
+    riskAdapter -.->|"publish: risk.assessment.decided"| nats
+    nats -.->|"subscribe (Adapter's own loop)"| riskAdapter
+    riskAdapter -.->|"signal_risk_decision<br/>(direct Temporal client,<br/>deterministic workflow_id)"| temporalServer
 
     style riskPlanned stroke-dasharray: 5 5
-    style krakend stroke-dasharray: 2 2,fill:#eee,stroke:#999
 ```
 
 ## Reading this diagram
@@ -120,23 +123,30 @@ graph TB
   through to its original fake `print()` path and no network call to
   Gmail happens at all. `send_verification_code` (the OTP flow) is
   deliberately never wired to Gmail — no edge for it in this diagram.
-- **The Phase 21 subgraph is dashed because none of it is running
-  today** — `nats`, `mock-risk-engine`, and `risk-listener` are planned
-  Docker Compose services (`CLAUDE.md`'s "Automated risk assessment via
-  NATS"), not yet added to `docker-compose.yml`. `risk-listener` signals
-  Temporal directly (`workflow.service.signal_risk_decision(...)`), the
-  same way `bff_backoffice`'s decision routes signal a human decision —
-  it does not go through `app`.
-- **KrakenD is drawn separately from the Phase 21 subgraph on purpose**
-  — it's research material (`docs/research-krakend.md`), not a
-  committed part of the Phase 21 design. If Phase 21 is ever extended
-  to swap the mock engine for a real, REST/webhook-only one, KrakenD (or
-  an equivalent) is one candidate for the NATS↔HTTP translation layer
-  that would sit in `mock-risk-engine`'s position — nothing about this
-  has been decided, and the research note itself flags that only the
-  decision-callback leg (webhook in → NATS publish) fits KrakenD's own
-  request/response model cleanly; the submission leg needs either a
-  polling-capable real engine or a small dedicated bridge process.
+- **`worker-activity` never touches NATS, and neither does the Risk
+  Engine** — the only edge `worker-activity` gains for Phase 21 is a
+  plain internal HTTP call to `risk-adapter`. Every NATS-protocol detail
+  (connect, publish, subscribe) lives entirely inside `risk-adapter`,
+  the one new component that owns it end to end.
+- **KrakenD sits specifically at the Risk-Engine boundary, both
+  directions** — `risk-adapter`'s own outbound call to
+  `mock-risk-engine`'s `POST /assess`, and `mock-risk-engine`'s own
+  inbound call to `risk-adapter`'s `POST /decisions` webhook, both go
+  *through* KrakenD. It's a plain HTTP↔HTTP reverse-proxy here, not
+  KrakenD's own NATS pub/sub backend feature — using that feature would
+  have given KrakenD its own NATS dependency, contradicting "the Adapter
+  is the only thing that depends on NATS." This is simpler than
+  `docs/research-krakend.md`'s own earlier speculative sketch explored
+  (which worried about KrakenD bridging a NATS subject to an outbound
+  HTTP call on its own — moot now, since `risk-adapter` does that
+  bridging itself).
+- **`risk-adapter` signals Temporal directly, not through `app`** — it
+  computes the deterministic `loan-application-<application_id>`
+  workflow id itself (same scheme `workflow/service.py`'s own
+  `_workflow_id_for_application` already uses) and sends the signal via
+  its own `temporalio.client.Client` connection, the same kind of
+  standard, client-authorized action `bff_backoffice`'s decision routes
+  already perform, just issued from a different process.
 - **Keycloak's `backoffice-redis` and Mayan's `mayan-redis` are
   separate Redis instances** — named distinctly, no shared state
   between the two, matching `CLAUDE.md`'s explicit "not

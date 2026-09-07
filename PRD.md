@@ -380,13 +380,16 @@ shape of.
   a simple, deterministic bucketing on requested amount — **proposed
   default, not yet confirmed** (see §11): under $15,000 is `LOW`,
   $15,000 to $50,000 is `MEDIUM`, $50,000 and above is `HIGH`.
-- **A later, separate enhancement — not scoped or designed yet**: an
-  open-source gateway component sitting between this codebase's message-
-  broker client and a *real* (non-mock) Risk Engine, so a genuine
-  third-party system speaking ordinary REST/webhooks could stand in for
-  the mock without this codebase's own integration code changing. Noted
-  here only as a stated future direction, not a commitment to any
-  specific product.
+- **Decided: KrakenD is the gateway, and NATS connectivity moves out of
+  this codebase's own process entirely** — a real architectural
+  decision, not just a product picked off a shortlist. A new standalone
+  service (the NATS Adapter) becomes the only thing anywhere that
+  depends on the message broker's protocol; the Risk Engine (mock, and
+  any real one that later replaces it) only ever speaks plain HTTP,
+  fronted by KrakenD at that boundary. Nothing about this is visible to
+  a customer or staff member — same outcomes, same UI, same states as
+  described above — see `CLAUDE.md`'s "Automated risk assessment via
+  NATS" for the full technical design.
 - **No proactive notification changes because of this feature** — §4's
   non-goal stays exactly as scoped; an auto-approve/auto-reject
   produces the same customer-visible status change (and, for

@@ -14,7 +14,6 @@ graph TD
     appPy["app.py<br/>(composition root)"]
     workerMain["worker_main.py<br/>(composition root)"]
     reconcile["reconcile.py<br/>(composition root)"]
-    riskListenerMain["risk_listener_main.py<br/>(composition root — planned, Phase 21)"]
 
     bffCustomer["bff_customer/"]
     bffBackoffice["bff_backoffice/"]
@@ -27,7 +26,7 @@ graph TD
     workflow["workflow/"]
     idgen["idgen/"]
     notifications["notifications/"]
-    risk["risk/ (planned, Phase 21)"]
+    risk["risk/ (planned, Phase 21 --<br/>an httpx call, no NATS here)"]
 
     appPy --> bffCustomer
     appPy --> bffBackoffice
@@ -39,9 +38,6 @@ graph TD
     reconcile --> account
     reconcile --> application
     reconcile --> document
-
-    riskListenerMain -.->|"planned"| risk
-    riskListenerMain -.->|"planned: signal_risk_decision"| workflow
 
     bffCustomer --> application
     bffCustomer --> document
@@ -73,7 +69,6 @@ graph TD
     account --> idgen
 
     style risk stroke-dasharray: 5 5
-    style riskListenerMain stroke-dasharray: 5 5
 ```
 
 ## Reading this diagram
@@ -86,9 +81,13 @@ graph TD
   18, P18-2) is the same "zero dependency on anything else in this
   codebase" shape as `idgen/`, promoted out of `bff_customer/` so a
   Temporal *activity* (not just a BFF route handler) can send an email.
-- **`risk/` (planned, Phase 21, dotted border) is designed as the same
-  kind of leaf** — no outgoing arrows either, just a NATS connection
-  and a subject-naming convention. Not built yet; included here so the
+- **`risk/` (planned, Phase 21, dotted border) is a leaf, but not a NATS
+  client** — no outgoing arrows, and (revised after a follow-up design
+  decision) no NATS dependency either: `service.submit_risk_assessment`
+  is a plain `httpx` call to a new, separately-deployed NATS Adapter
+  service (`risk-adapter` — not part of this diagram, since it's
+  outside the `loan_onboarding` package entirely, same treatment
+  `mock_risk_engine/` already gets). Not built yet; included here so the
   target shape is visible alongside what's actually running today.
 - **`customer/` and `account/` both have an edge to `idgen/`, for
   primary-key generation — but `account/` is no longer a pure leaf**
@@ -115,13 +114,10 @@ graph TD
      `notifications/` (built, Phase 19 — only for the Welcome Letter
      email) and `account/` → `notifications/` (built, Phase 18). Same
      shape, same reasoning, two separate call sites.
-  3. **Planned, not yet built (Phase 21)**: `application/` →
-     `risk/` (`submit_risk_assessment`), and `risk_listener_main.py` →
-     `risk/`/`workflow/`. These render dashed purely because they don't
-     exist in the codebase yet, not because they're a narrow exception
-     the way (1) and (2) are — once built, `application/activities.py`
-     → `risk/` becomes the same shape as `application/activities.py` →
-     `notifications/` today.
+  3. **Planned, not yet built (Phase 21)**: `application/` → `risk/`
+     (`submit_risk_assessment`). Renders dashed purely because it
+     doesn't exist in the codebase yet, not because it's a narrow
+     exception the way (1) and (2) are.
 - **`bff_customer/` and `bff_backoffice/` never import each other** —
   no arrow between them, and neither is a source for the other. Both
   feed into `app.py` (the web process's composition root), not into
@@ -132,19 +128,17 @@ graph TD
   concern no single module's own leaf-purity should absorb
   (`CLAUDE.md`'s "Document/database reconciliation"). Not a running
   process like the other two — an on-demand script.
-- **`risk_listener_main.py` (planned, Phase 21) would be a fourth
-  composition root, but a narrower one** — it imports only `risk/` and
-  `workflow/`, not every module like the other three. Its one job is
-  turning an inbound NATS decision message into a
-  `workflow.service.signal_risk_decision(...)` call, the same role
-  `bff_backoffice`'s decision routes already play for a human decision,
-  just triggered by a message instead of an HTTP POST.
-- **`app.py`, `worker_main.py`, `reconcile.py`, and (planned)
-  `risk_listener_main.py` are the only nodes with no incoming
-  arrows** — nothing imports a composition root; they're where the DAG
-  terminates, "the one file allowed to know about everything"
-  (`CLAUDE.md`) — or, for `risk_listener_main.py`, the two files it's
-  allowed to know about.
+- **No fourth composition root planned for Phase 21** — an earlier
+  design pass had a `risk_listener_main.py` process here, subscribing
+  to NATS and signaling the workflow. Once NATS connectivity moved
+  entirely to the standalone `risk-adapter` service (outside this
+  package, so not drawn on this diagram at all — see
+  `docs/diagrams/system-architecture.md`), there was no in-package NATS
+  subscription left for a fourth composition root to own.
+- **`app.py`, `worker_main.py`, and `reconcile.py` are the only nodes
+  with no incoming arrows** — nothing imports a composition root;
+  they're where the DAG terminates, "the one file allowed to know about
+  everything" (`CLAUDE.md`).
 - **No cycle anywhere** — this is what "Breaking the application ↔
   workflow cycle" (`CLAUDE.md`) was solving for: `application/` needs
   to *start* a workflow and `workflow/`'s activities need to *write*
