@@ -50,6 +50,13 @@ either an undifferentiated app or seven separately-deployed services:
 | Document | the Mayan EDMS integration |
 | Workflow | the Temporal integration |
 
+**Planned, not yet built (§6.7, `IMPLEMENTATION_PLAN.md` Phase 21)**: an
+eighth module, Risk, connecting to a simulated external Risk Engine
+over NATS for automated approve/reject decisions on the easy cases.
+Left out of the table above since that table describes today's actual
+architecture, not the target state — see `CLAUDE.md`'s "Automated risk
+assessment via NATS" for the full design.
+
 An earlier draft of this project built these seven as genuine
 microservices (separate processes, network calls, one Postgres database
 per module); that was more operational weight than this POC needs for
@@ -332,6 +339,59 @@ real-world loan is paid off.
   active-account rule no longer counts it, so §8.1's product picker
   automatically re-offers that product type again on the customer's
   next visit — no change needed to the picker itself.
+
+### 6.7 Automated risk assessment via a mock external Risk Engine (planned — `IMPLEMENTATION_PLAN.md` Phase 21, not yet built)
+
+Raised directly by the user as a future enhancement, separate from
+§6.6's account-closure work: simulate a genuinely **external,
+asynchronous** system — a Risk Engine, consulted over a message broker
+(NATS) rather than a synchronous API call — and let it auto-decide the
+easy cases without a human underwriter ever touching them. Nothing in
+this section is built yet; see `CLAUDE.md`'s "Automated risk assessment
+via NATS" for the full technical design this describes the product
+shape of.
+
+- **Starts right after submission**, before today's `PENDING_UNDERWRITING`
+  (§6.2). The workflow sends the application's risk criteria (amount,
+  product type, payload) to the Risk Engine and waits for a decision
+  message back — the same "durable async wait" shape the workflow
+  already uses for a human Underwriter's decision, just with a
+  different, automated sender.
+- **Three outcomes, one new tier concept (`LOW` / `MEDIUM` / `HIGH`)**:
+  - **`LOW` risk auto-approves** — the application reaches `APPROVED`
+    exactly as if an Underwriter had clicked Approve, including account
+    creation, the Welcome Letter (§6.5), and every other consequence of
+    a real approval. The decision is attributed to a fixed system
+    marker, not an authenticated staff member — a deliberate,
+    documented exception to "decisions are always made by an
+    authenticated Keycloak user," since an automated decision has no
+    login behind it by definition.
+  - **`HIGH` risk auto-rejects** — reaches `REJECTED`, same as an
+    Underwriter's Reject.
+  - **`MEDIUM` risk changes nothing** — the application proceeds into
+    today's existing Underwriter queue exactly as it does now.
+    Confirmed with the user: no risk tier is shown anywhere in the
+    staff UI for this phase: a `MEDIUM` application in the queue is
+    indistinguishable from any other row.
+- **The Risk Engine is a separate simulated external system, not code
+  inside this app** — confirmed with the user directly, matching how
+  Mayan and Keycloak are already treated as real systems this project
+  integrates with but doesn't own. Its decision rule for this phase is
+  a simple, deterministic bucketing on requested amount — **proposed
+  default, not yet confirmed** (see §11): under $15,000 is `LOW`,
+  $15,000 to $50,000 is `MEDIUM`, $50,000 and above is `HIGH`.
+- **A later, separate enhancement — not scoped or designed yet**: an
+  open-source gateway component sitting between this codebase's message-
+  broker client and a *real* (non-mock) Risk Engine, so a genuine
+  third-party system speaking ordinary REST/webhooks could stand in for
+  the mock without this codebase's own integration code changing. Noted
+  here only as a stated future direction, not a commitment to any
+  specific product.
+- **No proactive notification changes because of this feature** — §4's
+  non-goal stays exactly as scoped; an auto-approve/auto-reject
+  produces the same customer-visible status change (and, for
+  auto-approve, the same Welcome Letter email per §6.5) a human decision
+  already would, nothing new to the customer.
 
 ## 7. Identity: customer side unauthenticated, back office real Keycloak
 
@@ -639,8 +699,9 @@ balance check) and §11 for the confirmed scoping decisions behind it.
 | `payload` | JSONB, product-specific fields |
 | `applicant_name`, `applicant_email`, `applicant_phone`, `amount` | captured **as submitted** — a deliberate snapshot, not a live read of the customer's current profile (see `CLAUDE.md`'s "Denormalized applicant fields" note) |
 | `status` | `PENDING_UNDERWRITING` \| `MORE_INFO_REQUESTED` \| `PENDING_MANAGER_APPROVAL` \| `APPROVED` \| `REJECTED` \| `CANCELLED` |
-| `underwriter_name`, `underwriter_comment`, `underwriter_decided_at` | set once the Underwriter acts — `underwriter_name` is the authenticated Keycloak username, not free text |
+| `underwriter_name`, `underwriter_comment`, `underwriter_decided_at` | set once the Underwriter acts — `underwriter_name` is the authenticated Keycloak username, not free text. **Planned exception (§6.7, Phase 21, not yet built)**: an automated `LOW`/`HIGH` risk auto-decision will set this to a fixed system marker instead of a Keycloak username — the one deliberate, documented break of "not free text." |
 | `manager_name`, `manager_comment`, `manager_decided_at` | set only for escalated applications |
+| `risk_tier` | **planned (§6.7, Phase 21, not yet built)**, nullable — `LOW` \| `MEDIUM` \| `HIGH`, set once a risk-engine decision arrives. Not surfaced anywhere in the staff UI for this phase (confirmed with the user) — persisted purely as the queryable audit record §9's own framing already commits to, same principle as every other column here. |
 | `created_at`, `updated_at` | |
 
 `application_id` (plus `applicant_identifier` and `category`) is
@@ -769,3 +830,21 @@ gets attached.
   this ask was scoped to the back-office *application*, not the
   Temporal operational tooling; worth revisiting if Temporal Web UI ends
   up exposed beyond the local dev machine.
+- **§6.7's exact risk-tier amount thresholds — proposed, not yet
+  confirmed.** Current proposal: `< $15,000 → LOW`,
+  `$15,000–$50,000 → MEDIUM`, `≥ $50,000 → HIGH`, chosen only so the
+  mock Risk Engine is trivially, deterministically testable. Also
+  logged in `IMPLEMENTATION_PLAN.md`'s Decisions Needed.
+- **§6.7's auto-approve depth — assumed, not yet confirmed.** Current
+  assumption: a `LOW`-risk auto-approve reuses the *entire* existing
+  approval-provisioning path (real account/customer creation, Welcome
+  Letter email, document tagging — everything §6.2/§9.2 already
+  describe for a human Approve), not a lighter-weight or partial
+  outcome. Chosen because a partial "approved but not really" state
+  would be more confusing than useful, but this hasn't been explicitly
+  confirmed. Also logged in `IMPLEMENTATION_PLAN.md`'s Decisions Needed.
+- Should §6.7's risk-engine callback have a timeout, unlike today's
+  unbounded wait for a human Underwriter/Manager decision? Current
+  assumption: no — same accepted "no timeout" gap this project already
+  carries for the human-decision wait, not solved differently for this
+  new async leg. See `CLAUDE.md`'s Known Gaps once built.

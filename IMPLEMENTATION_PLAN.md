@@ -672,15 +672,72 @@ balance verification as a staff attestation rather than a real ledger
 explicit user instruction — none of Phase 18's eight tasks
 (P18-1 through P18-8) are implemented yet.** Start at P18-1.
 
+**Phases 18, 19, and 20 are now all complete, built, and live-verified
+against the real stack** — see each phase's own section and the Session
+Log entries below for the full build/verification narrative (Phase 18:
+account closure, P18-1 through P18-8; Phase 19: Welcome Letter email,
+P19-1 through P19-3; Phase 20: real Gmail SMTP delivery, P20-1 through
+P20-3, including the Docker-stdout-buffering and native-`confirm()`-
+dialog fixes found along the way).
+
+**Phase 21 (Automated risk assessment via NATS) added after Phase 20
+closed** — a future enhancement discussed and confirmed with the user,
+separate from the account-closure/notification work in Phases 18-20.
+`CLAUDE.md`'s new "Automated risk assessment via NATS" and `risk/`
+module sections, and `PRD.md`'s new §6.7 (plus updates to §1.1, §9.3,
+§11), describe the target design, written first per this project's own
+convention. **Several scoping decisions already confirmed with the
+user, not open questions for whoever picks this up**: the mock Risk
+Engine is a genuinely separate simulated external service (its own
+container), not in-process code; transport is pure NATS in both
+directions for this phase, with an HTTP gateway bridge to a real Risk
+Engine explicitly deferred as a separate, undesigned future
+enhancement; a `MEDIUM` risk tier changes nothing about today's
+underwriting queue, no tagging or badge. **Several other decisions are
+still open, logged in this file's own Decisions Needed section above**
+(exact risk thresholds, auto-approve provisioning depth, NATS
+subject-naming scheme, whether a `risk_assessment_id` is needed) —
+pick the stated assumed defaults and keep moving, don't block on
+them. **This was a documentation-only session, per explicit user
+instruction — none of Phase 21's tasks (P21-1 through P21-9) are
+implemented yet.** Start at P21-1.
+
 *(A session should overwrite this paragraph, not append to it — it
 always reflects only the current resume point.)*
 
 ## Decisions Needed
 
-*(Empty. Add an entry here — `question`, `assumed default`, `date`,
-`raised in task` — whenever a session hits a product ambiguity `PRD.md`
-doesn't answer. Remove an entry once a human has actually confirmed the
+*(Add an entry here — `question`, `assumed default`, `date`, `raised in
+task` — whenever a session hits a product ambiguity `PRD.md` doesn't
+answer. Remove an entry once a human has actually confirmed the
 assumption; until then treat it as provisional, not settled.)*
+
+- **Question**: What are the exact risk-tier amount thresholds for the
+  mock Risk Engine's decision rule (`PRD.md` §6.7)?
+  **Assumed default**: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
+  `≥ $50,000 → HIGH`. **Date**: 2026-09-07. **Raised in**: Phase 21
+  planning (pre-P21-1).
+- **Question**: Does a `LOW`-risk auto-approve reuse the entire existing
+  human-approval provisioning path (real account/customer creation,
+  Welcome Letter email, document tagging) or a lighter/partial outcome?
+  **Assumed default**: the entire existing path, unchanged, just with
+  `underwriter_name` set to a fixed system marker instead of a Keycloak
+  username. **Date**: 2026-09-07. **Raised in**: Phase 21 planning
+  (pre-P21-1).
+- **Question**: What NATS subject-naming scheme should
+  `risk/service.py`'s submission and decision legs use — one shared
+  subject with `application_id` in the message body, or a
+  per-application subject? **Assumed default**: not yet decided either
+  way; whichever P21-3 picks should be documented in `CLAUDE.md`'s
+  `risk/` module section at that point, not left implicit in code.
+  **Date**: 2026-09-07. **Raised in**: Phase 21 planning (pre-P21-1).
+- **Question**: Should `risk/` mint its own `risk_assessment_id` (via
+  `idgen/`) to correlate a submission with its eventual decision
+  message, or is `application_id` alone sufficient correlation?
+  **Assumed default**: not yet decided; start without one (use
+  `application_id` alone) and add it only if P21-3/P21-4 find a real
+  correlation ambiguity. **Date**: 2026-09-07. **Raised in**: Phase 21
+  planning (pre-P21-1).
 
 ---
 
@@ -4241,6 +4298,130 @@ logged rather than raised).
 
 ---
 
+## Phase 21 — Automated risk assessment via NATS
+
+**Depends on:** Phase 6 (`application/activities.py`'s existing
+activity/write patterns this phase's new activity follows), Phase 7
+(the worker composition-root pattern `risk_listener_main.py` mirrors).
+**Not part of the original build-out** — a future enhancement discussed
+and confirmed with the user, separate from Phases 18-20's account-
+closure/notification work. `CLAUDE.md`'s new "Automated risk assessment
+via NATS" and `risk/` module sections, and `PRD.md`'s new §6.7 (plus
+updates to §1.1, §9.3, §11), describe the target design, written first
+per this project's own convention. **Scoping decisions already
+confirmed with the user, not open questions for whoever picks this up**:
+the mock Risk Engine is a genuinely separate simulated external service
+(its own container), not in-process code; transport is pure NATS in
+both directions for this phase; a `MEDIUM` risk tier changes nothing
+about today's underwriting queue. **Several other decisions are still
+open, logged in this file's own Decisions Needed section** (exact risk
+thresholds, auto-approve provisioning depth, NATS subject-naming
+scheme, whether a `risk_assessment_id` is needed) — pick the stated
+assumed defaults and keep moving.
+
+**This is a design-only session's task breakdown — none of Phase 21's
+tasks are implemented yet.** Start at P21-1.
+
+- [ ] **P21-1** — `db/schema.sql`: add a nullable `risk_tier` column to
+      `applications` (`CHECK` constraint restricting to `'LOW'`,
+      `'MEDIUM'`, `'HIGH'`, or `NULL`). Follow the same "no migration
+      tooling in this project" discipline every prior schema change
+      here has hit — see `CLAUDE.md`'s Known Gaps — verify against a
+      scratch database, not the live stack, and note the live-stack
+      `ALTER TABLE` as a separate, later step.
+      DoD: schema applies cleanly to a fresh database; every existing
+      row is unaffected (new column `NULL`).
+- [ ] **P21-2** — `docker-compose.yml`: add the `nats` service (official
+      `nats:latest` image, core pub/sub only — no JetStream config for
+      this phase). Add `NATS_URL` to `.env.example` (Docker-internal
+      default, `nats://nats:4222`).
+      DoD: `docker compose up -d nats` starts cleanly; a trivial
+      `nats.py`-based publish/subscribe smoke test (throwaway, not
+      committed) round-trips a message against the running container.
+- [ ] **P21-3** — New leaf module `risk/`: `nats_client.py` (thin async
+      connect/publish/subscribe wrapper) and `service.py`
+      (`submit_risk_assessment(application_id, applicant_identifier,
+      product_type, amount, payload) -> None`, publishing to a NATS
+      subject). Resolve the subject-naming Decision Needed above as
+      part of this task and document the choice in `CLAUDE.md`'s `risk/`
+      module section. Add a `risk/` never imports anything else in this
+      codebase except `idgen/` contract to `.importlinter`/
+      `pyproject.toml`.
+      DoD: unit tests for `submit_risk_assessment` (mock the NATS
+      client at the function-call boundary, same convention every other
+      leaf module's tests use); `lint-imports` green with the new
+      contract.
+- [ ] **P21-4** — `workflow/workflows.py`: add the `PENDING_RISK_ASSESSMENT`
+      state (entered immediately after `persist_application`, before
+      today's `PENDING_UNDERWRITING`) and a new `signal_risk_decision(risk_tier)`
+      signal, with the same `_claim_final()`-style duplicate-signal
+      guard the existing decision signal already has (NATS is
+      at-least-once — see `CLAUDE.md`). Wire the three-way routing:
+      `LOW` → the existing `APPROVED` transition/`persist_decision` path
+      (with `underwriter_name` set to a fixed system marker, not a
+      Keycloak username — the documented exception), `HIGH` → the
+      existing `REJECTED` transition/`persist_decision` path, `MEDIUM` →
+      fall through into today's unchanged `PENDING_UNDERWRITING` wait.
+      Add the new `submit_risk_assessment` activity to
+      `application/activities.py` (called by the workflow via
+      `execute_activity(...)`-by-name, same mechanism
+      `persist_application`/`persist_decision` already use), which
+      calls `risk.service.submit_risk_assessment(...)`.
+      DoD: `WorkflowEnvironment`-based unit tests (same convention as
+      the existing workflow tests) covering all three risk-tier
+      outcomes, including a duplicate `signal_risk_decision` call being
+      safely ignored once a decision is already claimed.
+- [ ] **P21-5** — New composition root `risk_listener_main.py`: a NATS
+      subscriber process (imports `risk/` and `workflow/` only, not
+      every module) that turns an inbound decision message into a
+      `workflow.service.signal_risk_decision(workflow_id, risk_tier)`
+      call. Add a `risk-listener` Docker Compose service
+      (`depends_on: [nats, temporal]`).
+      DoD: unit tests mocking the NATS subscription and asserting the
+      correct `signal_risk_decision` call; `docker compose up -d
+      risk-listener` starts cleanly against the real stack.
+- [ ] **P21-6** — Mock Risk Engine: a standalone service living outside
+      the `loan_onboarding` package (`mock_risk_engine/`, own
+      Dockerfile), subscribing to the submission subject, applying the
+      Decisions-Needed amount-bucketing rule after a short simulated
+      delay, and publishing the decision back. Add a `mock-risk-engine`
+      Docker Compose service (`depends_on: [nats]`).
+      DoD: with `nats`/`mock-risk-engine` running, a manual publish to
+      the submission subject (throwaway script, not committed) produces
+      the expected decision message back for a `LOW`, a `MEDIUM`, and a
+      `HIGH` amount.
+- [ ] **P21-7** — `applications.risk_tier` gets written by
+      `persist_decision` whenever a decision resolves via the risk path
+      (both auto-approve and auto-reject) — never for a human decision,
+      which leaves it `NULL`.
+      DoD: unit test confirming `risk_tier` is set correctly for a
+      risk-driven decision and stays `NULL` for a human one.
+- [ ] **P21-8** — Full unit suite + `lint-imports` green with every new
+      contract from P21-3/P21-7. Update `IMPLEMENTATION_PLAN.md`'s
+      Decisions Needed section: remove any entry a human has since
+      confirmed, leave the rest provisional.
+      DoD: `pytest tests/unit` and `lint-imports` both pass; Decisions
+      Needed reflects actual current confirmation state, not stale
+      entries.
+- [ ] **P21-9** — Live E2E verification against the real stack: submit
+      three real applications (one per amount bucket) through the
+      actual customer UI, confirm the `LOW` one reaches `APPROVED`
+      automatically (with account/Welcome Letter/document tagging all
+      firing, same as a human approval), the `HIGH` one reaches
+      `REJECTED` automatically, and the `MEDIUM` one lands in the
+      Underwriter queue completely unchanged from today's behavior —
+      not just via unit tests.
+      DoD: all three outcomes confirmed against the real stack (real
+      NATS, real mock Risk Engine container, real Temporal), not just
+      `WorkflowEnvironment`-simulated.
+
+**Explicitly out of scope for this phase, deferred as a separate,
+undesigned future enhancement**: the open-source NATS↔HTTP gateway
+component sitting between `risk/nats_client.py` and a real (non-mock)
+Risk Engine — see `CLAUDE.md`'s "Automated risk assessment via NATS."
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -4249,6 +4430,61 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-07 (Phase 21 planned)** — User described a future
+  enhancement (separate from Phases 18-20's account-closure/notification
+  work, done in an earlier session that day): simulate a genuinely
+  external, asynchronous Risk Engine, consulted via NATS as messaging
+  middleware, that the LOS submits risk criteria to right after a
+  customer submits an application and that calls back with a decision
+  once ready — `LOW` risk auto-approves, `HIGH` risk auto-rejects,
+  `MEDIUM` risk falls into today's existing Underwriter queue unchanged.
+  A further, explicitly later enhancement was also named: an open-source
+  gateway component between the NATS client and the Risk Engine, not
+  scoped or designed in this session.
+
+  Discussed the design before writing anything down, per this project's
+  own convention. Three genuine architectural forks were resolved via
+  `AskUserQuestion`, all going with the recommended option: the mock
+  Risk Engine is a separate simulated external service (its own
+  container), not in-process code; transport is pure NATS in both
+  directions for this phase (the HTTP gateway is a later, separate
+  bridge); a `MEDIUM` risk tier changes nothing about the existing
+  underwriting queue UI. Confirmed the design reuses an existing
+  mechanism rather than inventing a new one: the workflow's existing
+  async-signal pattern (today, a human's Approve/Reject sent via
+  `bff_backoffice`) is exactly what a NATS-driven auto-decision needs —
+  same signal shape, different sender.
+
+  Four smaller points were proposed with defaults rather than turned
+  into more questions, and logged in this file's own Decisions Needed
+  section above (not yet confirmed by the user): the exact risk-tier
+  amount thresholds, whether an auto-approve reuses the full human-
+  approval provisioning path or something lighter, the NATS
+  subject-naming scheme, and whether a `risk_assessment_id` is needed.
+  One more real design fork was raised but not yet answered when this
+  session moved to writing the docs down (the auto-approve-provisioning-
+  depth question above) — the user's "let's update PRD and
+  Implementation Plan" instruction was treated as "write the design
+  with the proposed default, logged as an open Decision Needed," not as
+  an implicit confirmation of that default.
+
+  Updated all three docs, per this project's own rule that a real
+  architectural decision gets written into `CLAUDE.md` before a session
+  ends, not left only in chat: `CLAUDE.md` gained "Automated risk
+  assessment via NATS" (a new subsection near "Real email delivery via
+  Gmail SMTP") and a new "### 8. `risk/`" module section, plus updates
+  to the module-dependency-graph rules, Repo layout, and Docker Compose
+  topology sections. `PRD.md` gained a new §6.7, plus updates to §1.1,
+  §9.3 (a new `risk_tier` column), and four new §11 open-question
+  entries. This file gained the new Phase 21 task breakdown above
+  (P21-1 through P21-9, all unchecked) and the four Decisions Needed
+  entries above. **This was a documentation-only session, per explicit
+  user instruction — none of Phase 21's tasks are implemented yet.**
+  Not committed yet this session (no code changed, only docs — matches
+  Phase 18's own planning-session precedent of leaving the commit to
+  whoever picks up P21-1, though unlike that session this one hasn't
+  been explicitly asked to commit at all).
 
 - **2026-09-06 (Phase 20 complete — P20-3 live verification)** — Ran
   P20-3, the final task, live against the real stack using the user's

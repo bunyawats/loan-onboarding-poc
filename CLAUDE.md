@@ -172,17 +172,30 @@ them:
   no idea what "application" data looks like — see "Breaking the cycle"
   below for how its activities still end up writing application data
   without `workflow/` importing `application/` to do it.
-- **`application/` imports `document/` and `workflow/`, never the
-  reverse.** It calls `document.service.check_completeness(...)`
-  directly (an in-process function call — no HTTP, no serialization
-  boundary beyond normal Python objects) and
+- **`risk/` (planned — Phase 21, not yet built) never imports anything
+  else in this codebase except `idgen/`, if it ends up needing one.** A
+  leaf module, same shape as `document/`: it knows nothing about loan
+  applications, just a NATS connection and a subject-naming convention.
+  See "Automated risk assessment via NATS" below for the full design.
+- **`application/` imports `document/`, `workflow/`, and (planned,
+  Phase 21) `risk/`, never the reverse.** It calls
+  `document.service.check_completeness(...)` directly (an in-process
+  function call — no HTTP, no serialization boundary beyond normal
+  Python objects) and
   `workflow.service.start_workflow(...)`/`signal_decision(...)`/
   `signal_resubmit(...)`. **Built (Phase 19)**: `application/activities.py`
   also gains `notifications/` (the Welcome Letter email) — the same
   justified, single-file-scoped exception `account/activities.py`
   already has from Phase 18, not a general "`application/` may import
   `notifications/`" opening (nothing
-  in `application/service.py` needs it).
+  in `application/service.py` needs it). **Planned (Phase 21)**:
+  `application/activities.py` will also call
+  `risk.service.submit_risk_assessment(...)` from a new
+  `submit_risk_assessment` activity — same "activities.py is where
+  outbound calls to leaf integration modules happen" pattern
+  `document/`/`workflow/`/`notifications/` already follow, triggered by
+  the workflow's own `execute_activity(...)`-by-name call (see
+  "Breaking the cycle"), not by `application/service.py` directly.
 - **`application/service.py` may only call `customer/` and `account/`'s
   read-only functions — never their writes.** Corrected from an earlier
   draft of this file, which claimed `service.py` "never imports
@@ -214,7 +227,13 @@ them:
   now covering three entrypoints instead of one (see next section for
   why `app.py`/`worker_main.py` need this, and "Document/database
   reconciliation" for why `reconcile.py` does too — it's a
-  Phase-15 addition, not part of the original two).
+  Phase-15 addition, not part of the original two). **Planned (Phase
+  21)**: a fourth composition root, `risk_listener_main.py` — imports
+  `risk/` and `workflow/` only (not every module, unlike the other
+  three), since its one job is turning an inbound NATS decision message
+  into a `workflow.service.signal_risk_decision(...)` call, the same
+  role `bff_backoffice`'s decision routes already play for a human
+  decision, just triggered by a message instead of an HTTP POST.
 
 ### Breaking the application ↔ workflow cycle
 
@@ -951,6 +970,101 @@ previously-unknown gaps were found and fixed along the way:
   every other real secret it has (`KEYCLOAK_CLIENT_SECRET`,
   `MAYAN_SERVICE_ACCOUNT_PASSWORD`, etc. all ship placeholder-only
   defaults in `.env.example`).
+
+### Automated risk assessment via NATS (planned — Phase 21, not yet built)
+
+This section describes the target design for `IMPLEMENTATION_PLAN.md`'s
+Phase 21, written first per this project's own convention, before any
+of it is implemented — nothing below is built yet; every "planned"
+marker in this section and in "`risk/` — Risk assessment module" below
+is literal, not a stale leftover. Raised directly by the user as a
+future enhancement, distinct from Phase 18-20's account-closure/
+notification work: simulate a genuinely **external, asynchronous**
+system — a Risk Engine — consulted over a message broker (NATS) rather
+than a synchronous HTTP call, and let it auto-decide the easy cases
+(very low or very high risk) without a human ever touching them.
+
+- **Where it sits in the state machine**: a new state,
+  `PENDING_RISK_ASSESSMENT`, entered immediately after
+  `persist_application` commits — *before* today's
+  `PENDING_UNDERWRITING`. A new activity, `submit_risk_assessment`
+  (owned by `application/activities.py`, called by the workflow's own
+  `execute_activity(...)`-by-name, same mechanism `persist_application`/
+  `persist_decision` already use — see "Breaking the cycle"), publishes
+  the application's risk criteria (amount, product type, payload) over
+  NATS. A new signal, `signal_risk_decision(risk_tier)`, is what moves
+  the workflow out of this state — sent not by a BFF route handler (the
+  source of every other signal today) but by a new standalone process,
+  `risk_listener_main.py`, subscribed to the Risk Engine's decision
+  subject.
+- **Decision routing**: `LOW` risk auto-transitions straight to
+  `APPROVED` — reusing the *exact same* `persist_decision` activity and
+  provisioning block a human Underwriter's Approve already triggers
+  (customer/account creation, Welcome Letter email, document tagging —
+  see "Applying without being a customer yet"), just with
+  `underwriter_name` set to a fixed marker value
+  (`"risk-engine-auto"`) instead of an authenticated Keycloak username.
+  **This is a deliberate, called-out exception** to the rule stated
+  elsewhere in this file that `underwriter_name`/`manager_name` are
+  "always an authenticated Keycloak username, never client-submitted
+  free text" — an automated decision has no Keycloak session behind it
+  by definition, so the invariant has to bend here on purpose, not by
+  accident. `HIGH` risk auto-transitions straight to `REJECTED`, same
+  `persist_decision` REJECT path. **`MEDIUM` risk gets no new branch at
+  all** — it falls straight through into today's existing
+  `PENDING_UNDERWRITING`, waiting on a human `submit_decision` signal
+  exactly as it does today. Confirmed with the user: no risk-tier
+  column or badge is surfaced anywhere in `bff_backoffice`'s UI for this
+  phase — a `MEDIUM` application looks identical to any other row in
+  the underwriting queue.
+- **Transport: pure NATS both directions, for this phase.** The
+  submission leg (`application/activities.py` → Risk Engine) is a NATS
+  publish; the decision leg (Risk Engine → `risk_listener_main.py`) is
+  also a NATS publish the listener subscribes to — no HTTP in either
+  direction between this codebase and the Risk Engine. **A separate,
+  later enhancement, not scoped or designed yet**: an open-source
+  gateway component sitting between `risk/nats_client.py` and a *real*
+  (non-mock) Risk Engine, translating NATS ↔ HTTP so a genuine
+  third-party system speaking REST/webhooks could sit behind the same
+  `risk/service.py` contract without this codebase's own NATS-facing
+  code ever changing. Listed here only so a future session knows where
+  it's meant to plug in — no gateway product has been chosen, and
+  nothing about its shape is decided.
+- **The Mock Risk Engine is a genuinely separate simulated external
+  service, not an in-process module.** Its own container, its own
+  process, its own NATS subscription — confirmed with the user directly
+  over building it as Python code inside `loan_onboarding`, matching
+  how Mayan and Keycloak are already treated as real external systems
+  this codebase doesn't own (see "Data storage"'s framing for Mayan's
+  own separate Postgres/Redis). Its decision rule for this phase is a
+  deliberately simple, deterministic bucketing on `amount` — **assumed
+  default, not yet confirmed, see `IMPLEMENTATION_PLAN.md`'s Decisions
+  Needed**: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
+  `≥ $50,000 → HIGH`. Picked so the mock is trivially testable (a
+  known amount always produces a known tier) rather than trying to
+  simulate a real scoring model.
+- **At-least-once delivery means the signal handler needs a duplicate
+  guard.** NATS core pub/sub (no JetStream needed for this phase — see
+  below) doesn't promise exactly-once delivery, and neither does a
+  listener process that might retry a failed
+  `workflow.service.signal_risk_decision(...)` call. The workflow's
+  handler for this new signal needs the same "ignore a signal once a
+  decision is already claimed" guard `_claim_final()`-style logic
+  already gives the human-decision path — a duplicate/redelivered risk
+  decision must not be able to double-apply.
+- **No timeout on the risk-engine callback — a known gap carried
+  forward on purpose, not solved differently here.** Same accepted gap
+  this file's Known Gaps section already documents for "no timeout on
+  wait for Underwriter/Manager decision" — an application that never
+  gets a risk decision (Risk Engine down, message lost) sits at
+  `PENDING_RISK_ASSESSMENT` forever, same shape as the existing gap,
+  not a new category of problem.
+- **New Docker Compose services (planned)**: `nats` (official
+  `nats:latest` image — core pub/sub only, JetStream not needed for
+  this phase since neither leg needs replay/durability beyond what
+  Temporal's own activity retry already gives the publishing side),
+  `mock-risk-engine` (the standalone simulated external system above),
+  `risk-listener` (`risk_listener_main.py`).
 
 ## Modules, in detail
 
@@ -1805,6 +1919,52 @@ domain knowledge."
   `temporal` database) is managed by the Temporal server container, not
   by this module's code.
 
+### 8. `risk/` — Risk assessment module (planned — Phase 21, not yet built)
+
+*(See "Automated risk assessment via NATS" above for the full design
+this module implements — this section covers only its own code shape,
+same split every other module section follows.)*
+
+The connector to the (mocked, for now) external Risk Engine, following
+the same "thin async client + a `service.py` that owns the calling
+convention" shape `document/mayan_client.py` already establishes for
+Mayan.
+
+- **`nats_client.py`** — a thin async wrapper around a NATS client
+  (connect, publish, subscribe), configured via a `NATS_URL` env var
+  (Docker-internal service name, `nats://nats:4222`, same "every env
+  var pointing at another container uses its Docker-internal service
+  name" discipline this file already documents for `KEYCLOAK_ISSUER`).
+  The only code in this module that actually touches the network.
+- `service.submit_risk_assessment(application_id, applicant_identifier,
+  product_type, amount, payload) -> None` — publishes the application's
+  risk criteria to a NATS subject. Exact subject-naming scheme (one
+  shared subject with `application_id` in the message body, vs. a
+  per-application subject) not yet decided — see
+  `IMPLEMENTATION_PLAN.md`'s Decisions Needed. Called only from
+  `application/activities.py`'s new `submit_risk_assessment` activity,
+  same "activities.py is where outbound calls to leaf integration
+  modules happen" pattern `document/`/`workflow/`/`notifications/` are
+  already called from there.
+- **No subscribe-side code for the *decision* leg lives here.** Turning
+  an inbound NATS decision message into a
+  `workflow.service.signal_risk_decision(...)` call needs `workflow/`,
+  and `risk/` must never import it — same leaf discipline `document/`
+  already keeps. That subscription lives in `risk_listener_main.py` (a
+  composition root, not part of this module — see "Module dependency
+  graph").
+- **Never imports `application/`, `workflow/`, `customer/`,
+  `account/`, or `document/`.** A leaf, same shape as `document/` and
+  `workflow/` themselves — `idgen/` is the one exception every other
+  leaf already gets, if this module ends up needing to mint its own id
+  (e.g. a `risk_assessment_id` correlating a submission with its
+  eventual decision message) — not yet decided whether one is needed.
+- **No Postgres table of its own for this phase.** The risk tier a
+  decision resolves to gets written onto a new, nullable
+  `applications.risk_tier` column — `application/`'s own table, written
+  by the same `persist_decision` activity that already writes every
+  other decision-outcome column — not by `risk/` itself.
+
 ## Document hierarchy
 
 **Corrected from an earlier draft of this file, which built one single
@@ -2458,10 +2618,22 @@ loan-onboarding-poc/
     │                             # function in this module, zero I/O, zero
     │                             # state; every module that assigns a
     │                             # primary key imports this one
-    └── notifications/           # built, P18-2 -- promoted out of
-        └── service.py           # bff_customer/notifications.py, see
-                                  # "Account closure"
+    ├── notifications/           # built, P18-2 -- promoted out of
+    │   └── service.py           # bff_customer/notifications.py, see
+    │                             # "Account closure"
+    ├── risk/                     # planned, Phase 21, not yet built --
+    │   ├── nats_client.py        # see "risk/ -- Risk assessment module"
+    │   └── service.py
+    └── risk_listener_main.py     # planned, Phase 21 -- composition root,
+                                   # NATS decision subscriber, see
+                                   # "Automated risk assessment via NATS"
 ```
+
+**Also planned, Phase 21, sitting outside the `loan_onboarding` Python
+package entirely**: `mock_risk_engine/`, the standalone simulated
+external Risk Engine — deliberately not part of this package, same
+"a real external system this codebase doesn't own" treatment Mayan and
+Keycloak already get (see "Automated risk assessment via NATS").
 
 Every module imports every other module it's allowed to by its full
 package path (`from loan_onboarding.workflow import service as
@@ -2516,6 +2688,11 @@ image instead of seven:
 - `app` — the single web process (or `app-customer` + `app-backoffice`
   if the split above is used), `depends_on: [db, temporal, keycloak,
   backoffice-redis, mayan]`.
+- **Planned, Phase 21, not yet built**: `nats` (core pub/sub, no
+  JetStream — see "Automated risk assessment via NATS"),
+  `mock-risk-engine` (the standalone simulated external system,
+  `depends_on: [nats]`), `risk-listener`
+  (`risk_listener_main.py`, `depends_on: [nats, temporal]`).
 
 Every env var pointing at another container uses its Docker-internal
 service name — same discipline the reference project already documents
