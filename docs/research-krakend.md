@@ -64,23 +64,82 @@ publishes/subscribes to, with zero change to this codebase's own
 NATS-facing code. Known limitation: NATS subjects don't support
 query-parameter-style config the way some other KrakenD backends do.
 
-## Where this could matter for this project, if ever revisited
+## Sketch: fitting into Phase 21's topology
 
-Purely speculative, not scoped or decided:
+Purely speculative, not scoped or decided — a sketch from a follow-up
+question in the same research session, not a proposal. KrakenD's own
+model (an inbound HTTP request triggers a backend action and a
+response) covers one of Phase 21's two legs cleanly; the other needs a
+caveat, not a clean fit.
 
-- `risk/`'s Phase 21 design already anticipates this exact gap
-  (pure-NATS both directions for the mock Risk Engine, an HTTP gateway
-  as "a separate, later enhancement, not scoped or designed yet") —
-  KrakenD is one concrete option for that gateway, evaluated here only
-  because the user asked, not chosen.
-- If ever built, it would run as its own Docker Compose service
-  (alongside `nats`/`mock-risk-engine`/`risk-listener`), sitting
-  *outside* `risk/` entirely — `risk/nats_client.py` and
-  `risk/service.py` would be unaffected either way, since the whole
-  point of the gateway is translating on the *other* side of the NATS
-  subject, toward a real external system this codebase doesn't own
-  (same "Mayan/Keycloak are real external systems" framing `CLAUDE.md`
-  already uses).
+**Today's Phase 21 design (pure NATS, both directions, mock engine):**
+
+```
+application/activities.py          mock-risk-engine           risk_listener_main.py
+  submit_risk_assessment    ──publish──►  risk.assessment.submitted
+                                          (subscribes, sleeps to
+                                           simulate latency, buckets
+                                           on amount)
+                                    ──publish──►  risk.assessment.decided ──subscribe──► signal_risk_decision(tier)
+```
+
+**With a real, REST/webhook-only Risk Engine behind KrakenD, swapped in
+for `mock-risk-engine`'s position:**
+
+```
+application/activities.py                    KrakenD                      Real Risk Engine
+  submit_risk_assessment ──publish──► risk.assessment.submitted
+                                            │
+                                    (Leg 1 — see caveat below)
+                                            │
+                                            ▼
+                                    outbound call ─────────────►  POST /assess
+                                                                          │
+                                                                    (processes async,
+                                                                     holds a callback URL)
+                                                                          │
+                                     POST /webhooks/decision  ◄──────────┘
+                                            │
+                                    KrakenD publisher backend
+                                    (backend/pubsub/publisher,
+                                     topic_url: risk.assessment.decided)
+                                            │
+                                            ▼
+                                    risk.assessment.decided ──subscribe──► risk_listener_main.py
+                                                                            signal_risk_decision(tier)
+```
+
+**Leg 2 (decision callback) is a clean fit.** The real engine's webhook
+POST is exactly the inbound-HTTP-request KrakenD is built around — a
+`backend/pubsub/publisher` backend on that endpoint publishes the
+decision straight onto `risk.assessment.decided`. `risk_listener_main.py`
+doesn't change at all.
+
+**Leg 1 (submission) doesn't fit KrakenD's own model as neatly.**
+Everything KrakenD does is *inbound-HTTP-request-triggered* — a
+`backend/pubsub/subscriber` backend serves a NATS message back as an
+HTTP response when something calls it, but nothing found in KrakenD's
+docs lets it sit idle, watch a NATS subject on its own, and fire an
+outbound HTTP call when a message arrives. Two honest options for that
+leg, neither of which is "KrakenD alone, transparently":
+1. **If the real engine supports pull/polling** (it periodically calls
+   something like `GET /risk/pending`), KrakenD's subscriber backend
+   fits perfectly — the engine becomes the HTTP client, KrakenD serves
+   it off the subject.
+2. **If the engine expects to be pushed to** (the common shape — a
+   submission POST + a callback URL), a small, separate always-on NATS
+   consumer is needed to bridge `risk.assessment.submitted` → an
+   outbound `POST /assess` call. That's not KrakenD's job; it'd be a
+   tiny dedicated bridge process alongside it, or hand-rolled the same
+   way `risk_listener_main.py` already is.
+
+Either way, `risk/nats_client.py`, `risk/service.py`, and
+`risk_listener_main.py` stay untouched — this whole thing replaces only
+`mock-risk-engine`'s position in the Compose topology, confined behind
+the two NATS subjects already designed (same "Mayan/Keycloak are real
+external systems this codebase doesn't own" framing `CLAUDE.md` already
+uses elsewhere). It would run as its own Docker Compose service if ever
+built, sitting *outside* `risk/` entirely.
 
 ## Links
 
