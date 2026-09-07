@@ -731,18 +731,42 @@ submitted-message subscriber wasn't caught, so it leaked into
 structured logging — fixed and covered by a new unit test.
 `pytest risk_adapter/tests`: 10/10 passed.
 
-**Next: start at P21-5** (the `PENDING_RISK_ASSESSMENT` workflow state
-+ the `submit_risk_assessment` activity) — **load the
-`risk-assessment-nats` skill first** (`.claude/skills/risk-assessment-nats/`);
-`CLAUDE.md`'s own NATS section is now a condensed pointer to it, not
-the full design. The live `nats`/`temporal`/`db`/`risk-adapter`
-containers from this session's own verification were left running
-(`docker compose ps`) — reuse them rather than restarting from scratch.
-Once P21-5 lands, a real end-to-end signal (`risk-adapter` →
-`signal_risk_decision`) becomes testable against a real workflow for
-the first time — worth a quick manual check even before P21-6/P21-7
-(KrakenD, the mock Risk Engine) exist, since `/decisions` can be POSTed
-to directly to simulate a decision arriving.
+**P21-5 and P21-8 are now also done** — built together, in one pass
+(they share the same `persist_decision` code path). Every application
+now starts at the new `PENDING_RISK_ASSESSMENT` state;
+`signal_risk_decision` routes `LOW`/`HIGH` through the existing
+`persist_decision` activity (`underwriter_name="risk-engine-auto"`,
+`risk_tier` written) and `MEDIUM` through a new, minimal
+`persist_risk_assessment_cleared` activity (no `risk_tier` write, per
+P21-8's literal "auto-approve and auto-reject" scoping — a real, minor,
+accepted gap: the tier that triggered human review isn't retained). All
+9 pre-existing `LoanApplicationWorkflow` tests needed updating (every
+one now has to get past risk assessment first) plus 6 new ones; a real
+signal-ordering race was found and fixed in the test helper itself
+(harmless in production — NATS enforces real causal ordering — but
+worth knowing about, see P21-5's own DONE note). Verified against a
+disposable `loan_onboarding_test` Postgres (recreated fresh from the
+current schema) — `pytest tests/unit risk_adapter/tests`: 312/312
+passed; `lint-imports`: 10/10 contracts kept. **The live stack's own
+`loan_onboarding` database has not been migrated for this** (`risk_tier`
+column, widened `status` `CHECK`) — hand-apply the `ALTER TABLE` before
+ever rebuilding the live `worker-workflow`/`worker-activity` images
+with this phase's code, same gap Phase 18 already hit once.
+
+**Next: start at P21-6** (the `krakend/` config fronting the
+Risk-Engine boundary) — **load the `risk-assessment-nats` skill first**
+(`.claude/skills/risk-assessment-nats/`); `CLAUDE.md`'s own NATS section
+is now a condensed pointer to it, not the full design. The live
+`nats`/`temporal`/`db`/`risk-adapter` containers from this session's own
+verification were left running (`docker compose ps`) — reuse them
+rather than restarting from scratch. A real end-to-end signal
+(`risk-adapter` → `signal_risk_decision` against a real running
+workflow) is now technically possible to check manually (`/decisions`
+can be POSTed directly to simulate a decision arriving, without
+KrakenD/the mock Risk Engine existing yet) — not done this session, left
+as an optional sanity check for whoever picks up P21-6/P21-7, since the
+full chain can't be exercised end-to-end until both exist anyway (and
+the live DB migration note above would need doing first).
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -4650,7 +4674,7 @@ tasks are implemented yet.** Start at P21-1.
       unit suite going forward, not only by live verification.
       `pytest risk_adapter/tests`: 10/10 passed (up from 9) after the
       fix.
-- [ ] **P21-5** — `workflow/workflows.py`: add the `PENDING_RISK_ASSESSMENT`
+- [x] **P21-5** — `workflow/workflows.py`: add the `PENDING_RISK_ASSESSMENT`
       state (entered immediately after `persist_application`, before
       today's `PENDING_UNDERWRITING`) and a new `signal_risk_decision(risk_tier)`
       signal, with the same `_claim_final()`-style duplicate-signal
@@ -4671,6 +4695,131 @@ tasks are implemented yet.** Start at P21-1.
       the existing workflow tests) covering all three risk-tier
       outcomes, including a duplicate `signal_risk_decision` call being
       safely ignored once a decision is already claimed.
+      DONE: **P21-8 built in the same pass** (see its own entry below —
+      the two are one code path in practice: `persist_decision` is what
+      both signal_risk_decision's terminal branch calls *and* what
+      writes `risk_tier`). `STATUS_PENDING_RISK_ASSESSMENT` added;
+      `LoanApplicationWorkflow.__init__`'s initial `self._status` moved
+      to it (from `STATUS_PENDING_UNDERWRITING`) — every application now
+      passes through this state first. `_resolve_risk_decision(risk_tier)`
+      mirrors `_resolve_transition`'s `(resulting_status, is_terminal)`
+      shape. `signal_risk_decision`'s guard is
+      `self._finalized or self._status != STATUS_PENDING_RISK_ASSESSMENT`
+      (not just `_claim_transition()`'s busy/finalized check alone) --
+      needed because a MEDIUM resolution is non-terminal, so a duplicate
+      delivery afterward would otherwise successfully re-claim and
+      mis-transition again.
+
+      **A dedicated new activity, not routed through `persist_decision`,
+      for the MEDIUM outcome**: `persist_risk_assessment_cleared` (plus
+      `application/db.py`'s `clear_risk_assessment`) — a plain status
+      flip with no actor/decision/comment, since `PersistDecisionInput`'s
+      column semantics don't have a slot for "no decision was made."
+      Confirmed empirically while building this: `MEDIUM` never writes
+      `risk_tier` at all (P21-8's own wording — "both auto-approve and
+      auto-reject," not "MEDIUM" — is followed literally), so an
+      application that gets a MEDIUM assessment and is later decided by
+      a human still shows `risk_tier = NULL`, same as if no assessment
+      had ever run. Noted as a real, minor, accepted gap (the tier that
+      *triggered* human review isn't retained) rather than silently
+      deviating from the task's literal scope.
+
+      **`PersistApplicationInput` gained `initial_status` (default
+      `STATUS_PENDING_RISK_ASSESSMENT`)** — `application/db.py`'s
+      `insert()` and the `applications` table's own `status` column no
+      longer rely on an implicit database `DEFAULT`
+      (`'PENDING_UNDERWRITING'`, now unreachable in practice — left in
+      the schema rather than dropped, a bigger non-additive change out
+      of scope here) the way every prior phase's code did; `run()`
+      passes `self._status` explicitly so the two can never drift.
+      `db/schema.sql`'s `applications.status` `CHECK` widened to include
+      `'PENDING_RISK_ASSESSMENT'`.
+
+      **A real ordering race found and fixed while writing the tests,
+      not caught by design review**: `signal_risk_decision`'s guard only
+      checks `self._status`, which `__init__` sets synchronously before
+      `run()` does anything — so a test signalling immediately after
+      workflow start (the same pattern every pre-existing `submit_decision`
+      test already safely relied on) could resolve the risk decision
+      *before* `run()`'s own `submit_risk_assessment` activity call had
+      even landed, scrambling the expected `calls` ordering. Harmless in
+      real operation (the NATS round-trip enforces real causal ordering
+      — the Adapter can only signal after a decision arrives, which can
+      only happen after the submission was actually made), but the test
+      helper (`_advance_past_risk_assessment`) now explicitly waits for
+      `submit_risk_assessment` to land first, reproducing that same real
+      ordering instead of racing it.
+
+      **All 9 pre-existing `LoanApplicationWorkflow` tests needed
+      updating, not just new tests added** — exactly the
+      "`asyncio.gather`ing/prepending a new step into an existing flow
+      means every existing test needs updating too" gotcha this file's
+      own Phase 18 (P18-5) Session Log entry already flagged for
+      `worker_main.py`'s tests, now hit again one layer up. Every test
+      that signalled `submit_decision` immediately after starting the
+      workflow now first calls the new `_advance_past_risk_assessment`
+      helper (a MEDIUM resolution) to reach `PENDING_UNDERWRITING`
+      first; positional `_names(calls)` assertions shifted accordingly.
+      One test (`test_native_cancel_lands_on_cancelled_via_fake_persist_decision`)
+      needed its `_wait_for_call_count` bumped from 1 to 2 (persist_application
+      *and* submit_risk_assessment must both land before cancelling, or
+      the cancel can hit the second activity's await instead of
+      `wait_condition()`). One test
+      (`test_cancel_from_each_non_terminal_state`'s direct-cancel case)
+      needed its `calls[-1]` assertion changed to search by activity
+      name instead — cancelling immediately can genuinely race
+      `submit_risk_assessment`'s own still-in-flight call, a real,
+      accepted, harmless ordering nondeterminism (not a bug) documented
+      inline. 6 new tests added: `test_risk_low_auto_approves`,
+      `test_risk_high_auto_rejects`,
+      `test_risk_medium_falls_through_to_unchanged_underwriting`,
+      `test_signal_risk_decision_invalid_tier_is_rejected`,
+      `test_duplicate_signal_risk_decision_after_medium_is_ignored`,
+      `test_two_concurrent_risk_decisions_only_write_once` (the last one
+      replacing an originally-planned "signal after the workflow
+      completed" test that turned out to be untestable this way — Temporal
+      itself rejects an RPC signal to a closed execution at the server
+      level with a real `RPCError: Completed workflow`, confirmed live
+      against the embedded test server; the two-concurrent-signals race
+      is what's actually reachable and worth guarding, same shape
+      `test_two_concurrent_terminal_signals_only_write_once` already
+      proves for `submit_decision`).
+
+      Also touched: `application/activities.py` (new `submit_risk_assessment`/
+      `persist_risk_assessment_cleared` activities, `persist_decision`
+      writes `risk_tier`), `application/db.py` (`insert()`'s new `status`
+      param, `update_decision`'s new `risk_tier` param, new
+      `clear_risk_assessment`), `worker_main.py` (both new activities
+      registered). Every test file with a hardcoded `db.insert(...)`
+      call (or a fixture wrapping one) needed a `status=` argument added
+      — `tests/unit/application/test_db.py`'s `_insert_sample` and
+      `tests/unit/application/test_service.py`'s `_seed_application` and
+      inline fake, all seeded at `"PENDING_UNDERWRITING"` (none of those
+      tests are about risk assessment) — plus 8 new tests across
+      `test_db.py`/`test_activities.py` for the new columns/functions,
+      and `tests/unit/test_worker_main.py`'s activities-list assertion
+      widened to 5 entries.
+
+      **Verified against a real, disposable Postgres (`loan_onboarding_test`
+      on the running `db` container's host port 5433), not just
+      mocks-only** — same test-database convention `CLAUDE.md`'s Testing
+      section already documents; the database's own schema was
+      recreated fresh from the current `db/schema.sql` first (it
+      predated this task's schema change). `pytest tests/unit
+      risk_adapter/tests`: 312/312 passed. `lint-imports`: 10/10
+      contracts kept. **Full real-stack E2E (a live risk-adapter
+      signalling a real running workflow through the whole NATS/KrakenD/
+      mock-Risk-Engine chain) is deliberately deferred to P21-10** — this
+      task's own DoD only calls for `WorkflowEnvironment` coverage, and
+      KrakenD/the mock Risk Engine (P21-6/P21-7) don't exist yet to
+      exercise the full chain anyway. The live stack's own `loan_onboarding`
+      database (as opposed to the disposable `_test` one used here) has
+      *not* been migrated for `risk_tier`/the widened `status` `CHECK` —
+      same "schema change merged ≠ deployed" gap `CLAUDE.md`'s Known
+      Gaps already documents; hand-apply the `ALTER TABLE` before
+      rebuilding the live `worker-workflow`/`worker-activity` images
+      with this phase's code, or every real Approve/Reject will fail the
+      same way Phase 18's own un-migrated-table incident did.
 - [ ] **P21-6** — `krakend/` config (a `krakend.json` or equivalent,
       committed to the repo) fronting the Risk-Engine boundary: a route
       for the Adapter's outbound `POST /assess` call to reach
@@ -4697,12 +4846,27 @@ tasks are implemented yet.** Start at P21-1.
       (throwaway script, not committed) produces the expected decision
       arriving back at `risk-adapter`'s `/decisions` for a `LOW`, a
       `MEDIUM`, and a `HIGH` amount.
-- [ ] **P21-8** — `applications.risk_tier` gets written by
+- [x] **P21-8** — `applications.risk_tier` gets written by
       `persist_decision` whenever a decision resolves via the risk path
       (both auto-approve and auto-reject) — never for a human decision,
       which leaves it `NULL`.
       DoD: unit test confirming `risk_tier` is set correctly for a
       risk-driven decision and stays `NULL` for a human one.
+      DONE: built in the same pass as P21-5 — see that task's own DONE
+      note for the full mechanism (`PersistDecisionInput.risk_tier`,
+      `application_db.update_decision`'s new `risk_tier` param,
+      `COALESCE`-preserved so a human decision's `None` never clobbers
+      an existing value). Unit coverage:
+      `test_persist_decision_risk_driven_approve_writes_risk_tier`,
+      `test_persist_decision_human_decision_leaves_risk_tier_null`
+      (`test_activities.py`, real Postgres), plus
+      `test_update_decision_writes_risk_tier_when_passed`/
+      `test_update_decision_leaves_risk_tier_null_when_not_passed`
+      (`test_db.py`) and the workflow-level
+      `test_risk_low_auto_approves`/`test_risk_high_auto_rejects`/
+      `test_risk_medium_falls_through_to_unchanged_underwriting`
+      (`test_workflows.py`) confirming the field end to end from the
+      signal down to the persisted column.
 - [ ] **P21-9** — Full unit suite + `lint-imports` green with every new
       contract from P21-3/P21-8. Update `IMPLEMENTATION_PLAN.md`'s
       Decisions Needed section: remove any entry a human has since
@@ -4737,7 +4901,7 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- **2026-09-07 (Phase 21 build started — P21-1 through P21-4 done)** —
+- **2026-09-07 (Phase 21 build started — P21-1 through P21-5 and P21-8 done)** —
   Picked up at the documented resume point (P21-1) and implemented the
   first three tasks for real, per this session's own convention (small,
   verified steps, not a big-bang implementation of the whole phase).
@@ -4805,15 +4969,90 @@ is.)*
   itself (P21-7, not yet built) is what will need to parse `amount` for
   its amount-bucketing rule.
 
+  **What the next session should know (superseded below -- P21-5 was
+  also done this same session)**: `risk-adapter`'s `depends_on`
+  deliberately omits `krakend` for now (not yet built, P21-6) — add it
+  once that service exists.
+
+  **P21-5 and P21-8 done in the same session, immediately after P21-4**
+  (built together deliberately — they're one code path in practice:
+  `persist_decision` is both what `signal_risk_decision`'s terminal
+  branch calls *and* what writes `risk_tier`). `workflow/workflows.py`
+  gained `STATUS_PENDING_RISK_ASSESSMENT` (the new initial
+  `self._status`, replacing `STATUS_PENDING_UNDERWRITING`),
+  `_resolve_risk_decision`, and the `signal_risk_decision` signal;
+  `application/activities.py` gained `submit_risk_assessment` and a new,
+  deliberately separate `persist_risk_assessment_cleared` activity for
+  the non-terminal MEDIUM outcome (no `risk_tier` write for MEDIUM,
+  following P21-8's literal wording — a real, minor, accepted gap: the
+  tier that triggered human review isn't retained on the row).
+  `application/db.py`'s `insert()` gained a required `status` param
+  (Phase 21 retires the table's implicit `PENDING_UNDERWRITING`
+  `DEFAULT` in practice, same "no implicit database default" discipline
+  primary keys already follow) and `update_decision()` gained
+  `risk_tier`; `db/schema.sql`'s `status` `CHECK` widened.
+
+  **A real ordering race found and fixed while writing the workflow
+  tests, not caught by design review**: `signal_risk_decision`'s guard
+  only checks `self._status` (set synchronously in `__init__`, before
+  `run()` does anything), so a test signalling immediately after
+  workflow start — the exact pattern every pre-existing `submit_decision`
+  test already safely relied on — could resolve the risk decision
+  *before* `run()`'s own `submit_risk_assessment` activity call had
+  landed, scrambling the expected activity-call ordering. Harmless in
+  real operation (NATS enforces the real causal order: the Adapter can
+  only signal after a decision arrives, which can only happen after the
+  submission was actually made) but worth knowing about; fixed by
+  making the test helper wait for `submit_risk_assessment` to land
+  first, reproducing that real ordering instead of racing it.
+
+  **All 9 pre-existing `LoanApplicationWorkflow` tests needed updating**
+  — the exact "prepending a new step into an existing flow breaks every
+  existing test of that flow" gotcha this file's own Phase 18 (P18-5)
+  entry already flagged for `worker_main.py`, hit again one layer up.
+  Full details (which tests, what changed, the 6 new tests added,
+  including one originally-planned test that turned out untestable —
+  Temporal itself rejects an RPC signal to a *closed* execution with a
+  real `RPCError: Completed workflow`, confirmed live against the
+  embedded test server, so "signal after completion" was replaced with
+  a genuine concurrent-signals race test instead) are in P21-5's own
+  DONE note above, not repeated here.
+
+  Verified against a disposable `loan_onboarding_test` Postgres on the
+  running `db` container (host port 5433) — its schema predated this
+  task's change and was dropped and recreated fresh from the current
+  `db/schema.sql` first. Every test file with a hardcoded `db.insert(...)`
+  call needed a `status=` argument added (`test_db.py`'s `_insert_sample`,
+  `test_service.py`'s `_seed_application` and one inline fake, all
+  seeded at `"PENDING_UNDERWRITING"` — none of those tests are about
+  risk assessment) plus `test_worker_main.py`'s activities-list
+  assertion widened to 5 entries. **With `DATABASE_URL` actually pointed
+  at a reachable Postgres this time** (earlier P21-1..P21-4 runs in this
+  same session used the checked-in `.env`'s Docker-internal
+  `db:5432`/`backoffice-redis:6379` hostnames, unreachable from this
+  host process, so every DB-/Redis-backed test errored rather than
+  running at all — this run is the first time this session's own new
+  code was actually exercised against a real database, not just the
+  tests that don't need one): `pytest tests/unit risk_adapter/tests`:
+  312/312 passed, 0 failed, 0 errored. `lint-imports`: 10/10 contracts
+  kept (no new contract needed — `application/` importing `risk/` was
+  already permitted by the existing layers contract from P21-3).
+
   **What the next session should know**: the `nats`/`temporal`/`db`/
   `risk-adapter` containers were all left running (`docker compose ps`)
-  — reuse them for P21-5 rather than restarting. `risk-adapter`'s
-  `depends_on` deliberately omits `krakend` for now (not yet built,
-  P21-6) — add it once that service exists. P21-5 (the
-  `PENDING_RISK_ASSESSMENT` workflow state + `submit_risk_assessment`
-  activity) is next; once it lands, `POST /decisions` can be used to
-  manually simulate a risk decision against a real running workflow,
-  ahead of P21-6/P21-7 existing.
+  — reuse them for P21-6 rather than restarting. **The live stack's own
+  `loan_onboarding` database (distinct from the disposable `_test` one
+  used above) has NOT been migrated for `risk_tier`/the widened `status`
+  `CHECK`** — hand-apply the `ALTER TABLE` before ever rebuilding the
+  live `worker-workflow`/`worker-activity` images with this phase's
+  code, or every real Approve/Reject breaks the same way Phase 18's own
+  un-migrated-table incident did (this file's Known Gaps /
+  `known-gaps-and-gotchas` skill has the full story). A real end-to-end
+  signal (`risk-adapter` → `signal_risk_decision` against a real running
+  workflow) is now technically possible to check manually via a direct
+  `POST /decisions` (bypassing KrakenD/the mock Risk Engine, neither of
+  which exist yet) — not attempted this session, left as an optional
+  sanity check for whoever picks up P21-6/P21-7.
 
 - **2026-09-07 (Phase 21 redesigned — NATS Adapter + KrakenD decided)**
   — User made a real architectural decision, following up on the

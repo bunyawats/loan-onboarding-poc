@@ -170,8 +170,16 @@ CREATE TABLE applications (
     applicant_phone            TEXT NOT NULL,
     amount                     NUMERIC(14, 2) NOT NULL CHECK (amount > 0),
 
+    -- DEFAULT 'PENDING_UNDERWRITING' is now unreachable in practice --
+    -- Phase 21's application/db.py's insert() always passes an explicit
+    -- status (PENDING_RISK_ASSESSMENT, workflows.py's own new initial
+    -- state -- see CLAUDE.md's "Automated risk assessment via NATS" /
+    -- the risk-assessment-nats skill). Left in place rather than
+    -- dropped -- removing a column DEFAULT is a bigger, non-additive
+    -- change out of proportion to this task.
     status                     TEXT NOT NULL DEFAULT 'PENDING_UNDERWRITING'
                                    CHECK (status IN (
+                                       'PENDING_RISK_ASSESSMENT',
                                        'PENDING_UNDERWRITING',
                                        'MORE_INFO_REQUESTED',
                                        'PENDING_MANAGER_APPROVAL',

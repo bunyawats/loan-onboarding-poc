@@ -54,11 +54,22 @@ async def insert(
     applicant_email: str,
     applicant_phone: str,
     amount: Decimal,
+    status: str,
 ) -> asyncpg.Record:
     """Written by `persist_application` (the workflow's first activity),
     never directly by `application.service.create_application` -- see
     CLAUDE.md's "Applying without being a customer yet" / the
     application module section for why.
+
+    `status` is caller-supplied (Phase 21: `workflows.py`'s own
+    `self._status`, `PENDING_RISK_ASSESSMENT`), not left to the
+    `applications` table's own `DEFAULT` -- same "no implicit database
+    default" discipline this codebase already applies to primary keys
+    (see CLAUDE.md's "Data storage"). The schema's `DEFAULT
+    'PENDING_UNDERWRITING'` is now unreachable in practice (this is the
+    only code that inserts into `applications`) but deliberately left in
+    place rather than dropped -- removing it is a bigger, non-additive
+    schema change out of proportion to this task.
 
     `ON CONFLICT (application_id) DO NOTHING` makes this safe against a
     Temporal activity retry (the workflow's `DEFAULT_RETRY_POLICY`
@@ -81,8 +92,8 @@ async def insert(
         INSERT INTO applications (
             application_id, applicant_identifier, customer_id, workflow_id,
             product_type, payload, applicant_name, applicant_email,
-            applicant_phone, amount
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            applicant_phone, amount, status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (application_id) DO NOTHING
         RETURNING *
         """,
@@ -96,6 +107,7 @@ async def insert(
         applicant_email,
         applicant_phone,
         amount,
+        status,
     )
     if record is not None:
         return record
@@ -119,6 +131,7 @@ async def update_decision(
     manager_decided_at: datetime | None = None,
     customer_id: str | None = None,
     updated_at: datetime | None = None,
+    risk_tier: str | None = None,
 ) -> asyncpg.Record:
     """Generic decision-outcome writer. Every column here is optional
     and preserved (via `COALESCE`) rather than overwritten with `NULL`
@@ -134,7 +147,10 @@ async def update_decision(
     defaults to `now()` but can be overridden (native-Temporal-cancel
     path) to reflect the moment Temporal actually delivered the
     cancellation rather than whenever the (possibly retried) activity
-    happens to execute."""
+    happens to execute. `risk_tier` (Phase 21) is only ever passed for a
+    risk-driven auto-decision (LOW/HIGH) -- `None` for every human
+    decision, which leaves the column untouched (already `NULL` in that
+    case, so `COALESCE` is a no-op, not just a safety net)."""
     pool = await _get_pool()
     return await pool.fetchrow(
         """
@@ -147,7 +163,8 @@ async def update_decision(
             manager_comment = COALESCE($7, manager_comment),
             manager_decided_at = COALESCE($8, manager_decided_at),
             customer_id = COALESCE($9, customer_id),
-            updated_at = COALESCE($10, now())
+            updated_at = COALESCE($10, now()),
+            risk_tier = COALESCE($11, risk_tier)
         WHERE application_id = $1
         RETURNING *
         """,
@@ -161,6 +178,29 @@ async def update_decision(
         manager_decided_at,
         customer_id,
         updated_at,
+        risk_tier,
+    )
+
+
+async def clear_risk_assessment(application_id: str) -> asyncpg.Record:
+    """Phase 21's MEDIUM-tier outcome: no decision was made (no
+    underwriter/manager column to write, no `risk_tier` recorded --
+    CLAUDE.md's "Automated risk assessment via NATS" is explicit that
+    `risk_tier` is only ever set for an auto-*decided* LOW/HIGH
+    outcome), just a plain status flip out of `PENDING_RISK_ASSESSMENT`
+    into the existing `PENDING_UNDERWRITING` wait. A dedicated, minimal
+    function rather than routing this through `update_decision` with
+    every other column `None` -- there is no "decision" here for that
+    function's own column semantics to attach to."""
+    pool = await _get_pool()
+    return await pool.fetchrow(
+        """
+        UPDATE applications
+        SET status = 'PENDING_UNDERWRITING', updated_at = now()
+        WHERE application_id = $1
+        RETURNING *
+        """,
+        application_id,
     )
 
 

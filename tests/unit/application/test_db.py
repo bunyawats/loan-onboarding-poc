@@ -34,6 +34,12 @@ async def _insert_sample(application_id=None, **overrides):
         applicant_email="alice@example.com",
         applicant_phone="555-0100",
         amount=Decimal("10000.00"),
+        # Phase 21 added a required `status` param (workflows.py's own
+        # self._status, no longer an implicit database DEFAULT) -- this
+        # file isn't testing risk-assessment behavior, so its rows are
+        # seeded straight at PENDING_UNDERWRITING, same as every one of
+        # these tests already assumed before that column existed.
+        status="PENDING_UNDERWRITING",
     )
     defaults.update(overrides)
     return await db.insert(**defaults)
@@ -54,6 +60,16 @@ async def test_insert_defaults_status_and_nullable_columns():
     record = await _insert_sample()
     assert record["status"] == "PENDING_UNDERWRITING"
     assert record["customer_id"] is None
+
+
+async def test_insert_writes_caller_supplied_status_verbatim():
+    """Phase 21: `status` is no longer left to the table's own `DEFAULT`
+    -- the real caller (persist_application) always passes
+    PENDING_RISK_ASSESSMENT explicitly now. This test proves insert()
+    writes whatever it's given, not just this file's own
+    PENDING_UNDERWRITING fixture convention."""
+    record = await _insert_sample(status="PENDING_RISK_ASSESSMENT")
+    assert record["status"] == "PENDING_RISK_ASSESSMENT"
 
 
 async def test_insert_is_idempotent_on_retry_same_application_id():
@@ -174,6 +190,54 @@ async def test_update_decision_honors_explicit_updated_at_for_native_cancel():
     record = await db.update_decision(application_id, status="CANCELLED", updated_at=forced_time)
 
     assert record["updated_at"] == forced_time
+
+
+async def test_update_decision_writes_risk_tier_when_passed():
+    application_id = _new_application_id()
+    await _insert_sample(application_id=application_id, status="PENDING_RISK_ASSESSMENT")
+
+    record = await db.update_decision(
+        application_id,
+        status="APPROVED",
+        underwriter_name="risk-engine-auto",
+        underwriter_comment="Automated decision by risk assessment",
+        underwriter_decided_at=datetime.now(timezone.utc),
+        risk_tier="LOW",
+    )
+
+    assert record["risk_tier"] == "LOW"
+
+
+async def test_update_decision_leaves_risk_tier_null_when_not_passed():
+    """A human decision never passes risk_tier -- COALESCE(NULL, ...)
+    must leave the column untouched (already NULL in that case), not
+    overwrite it with NULL explicitly (which would be indistinguishable
+    from "never assessed" but is worth confirming isn't accidentally a
+    destructive overwrite of a previously-set value)."""
+    application_id = _new_application_id()
+    await _insert_sample(application_id=application_id, status="PENDING_UNDERWRITING")
+
+    record = await db.update_decision(
+        application_id,
+        status="APPROVED",
+        underwriter_name="u1",
+        underwriter_comment="looks fine",
+        underwriter_decided_at=datetime.now(timezone.utc),
+    )
+
+    assert record["risk_tier"] is None
+
+
+async def test_clear_risk_assessment_flips_status_without_touching_other_columns():
+    application_id = _new_application_id()
+    await _insert_sample(application_id=application_id, status="PENDING_RISK_ASSESSMENT")
+
+    record = await db.clear_risk_assessment(application_id)
+
+    assert record["status"] == "PENDING_UNDERWRITING"
+    assert record["underwriter_name"] is None
+    assert record["manager_name"] is None
+    assert record["risk_tier"] is None
 
 
 async def test_update_resubmission_replaces_payload_and_resets_status():

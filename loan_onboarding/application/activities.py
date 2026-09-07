@@ -9,7 +9,12 @@ terminal `APPROVED` decision actually does now (see CLAUDE.md's
 managed-document calls below aren't a new module-boundary edge; the
 Welcome Letter email (Phase 19) is, exactly the same
 activities.py-only-exception shape `account/activities.py` already has
-for its own closure-decision email.
+for its own closure-decision email. `risk/` (Phase 21) is a normal,
+whole-module-level import (like `document/`), not an activities.py-only
+exception -- but only this file actually calls it, matching the
+"activities.py is where outbound calls to leaf integration modules
+happen" pattern `document/`/`workflow/`/`notifications/` already
+follow.
 
 Each of the three activities writes to `application/db.py` directly --
 the one place in this module allowed to touch the `applications` table
@@ -31,6 +36,7 @@ from loan_onboarding.application import db as application_db
 from loan_onboarding.customer import service as customer_service
 from loan_onboarding.document import service as document_service
 from loan_onboarding.notifications import service as notifications_service
+from loan_onboarding.risk import service as risk_service
 from loan_onboarding.workflow.workflows import (
     ROLE_MANAGER,
     ROLE_UNDERWRITER,
@@ -40,6 +46,8 @@ from loan_onboarding.workflow.workflows import (
     PersistApplicationInput,
     PersistDecisionInput,
     PersistResubmitInput,
+    PersistRiskAssessmentClearedInput,
+    SubmitRiskAssessmentInput,
 )
 
 # The one business-rule constraint account/db.py's create() deliberately
@@ -68,7 +76,36 @@ async def persist_application(inp: PersistApplicationInput) -> None:
         # binary-float precision artifacts a direct Decimal(float) would
         # introduce (e.g. Decimal(50000.1) != Decimal("50000.1")).
         amount=Decimal(str(inp.amount)),
+        status=inp.initial_status,
     )
+
+
+@activity.defn
+async def submit_risk_assessment(inp: SubmitRiskAssessmentInput) -> None:
+    """Phase 21 -- the one call site for `risk.service.submit_risk_assessment`
+    in this codebase. `inp.amount` is a plain float over the wire, same
+    `Decimal(str(...))` precision-safe conversion `persist_application`
+    above already uses. A raised exception here (network failure, a
+    non-2xx from the NATS Adapter) retries this activity per
+    `DEFAULT_RETRY_POLICY` -- deliberately not caught-and-logged the way
+    the best-effort notification calls elsewhere in `persist_decision`
+    are, since nothing else will ever move this application out of
+    `PENDING_RISK_ASSESSMENT` if the submission itself never lands."""
+    await risk_service.submit_risk_assessment(
+        application_id=inp.application_id,
+        applicant_identifier=inp.applicant_identifier,
+        product_type=inp.product_type,
+        amount=Decimal(str(inp.amount)),
+        payload=inp.payload,
+    )
+
+
+@activity.defn
+async def persist_risk_assessment_cleared(inp: PersistRiskAssessmentClearedInput) -> None:
+    """Phase 21's MEDIUM-tier outcome -- see `application/db.py`'s
+    `clear_risk_assessment` for why this is a dedicated, minimal
+    activity rather than routed through `persist_decision`."""
+    await application_db.clear_risk_assessment(inp.application_id)
 
 
 @activity.defn
@@ -215,6 +252,9 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
         manager_decided_at=manager_decided_at,
         customer_id=customer_id,
         updated_at=inp.decided_at,
+        # Phase 21: only ever set for a risk-driven auto-decision --
+        # None for every human decision, leaving the column untouched.
+        risk_tier=inp.risk_tier,
     )
     return final_status
 

@@ -146,6 +146,10 @@ async def test_complete_application_starts_workflow_and_waits_for_persisted_row(
             applicant_email=applicant_email,
             applicant_phone=applicant_phone,
             amount=Decimal(str(amount)),
+            # Simulates workflows.py's own initial self._status -- this
+            # fake stands in for the real persist_application activity,
+            # which now always passes it explicitly (Phase 21).
+            status="PENDING_RISK_ASSESSMENT",
         )
         start_workflow_calls.append(locals())
         return f"loan-application-{application_id}"
@@ -164,7 +168,10 @@ async def test_complete_application_starts_workflow_and_waits_for_persisted_row(
 
     assert result.missing_categories == []
     assert result.application is not None
-    assert result.application.status == "PENDING_UNDERWRITING"
+    # Phase 21: every application now starts at PENDING_RISK_ASSESSMENT,
+    # not PENDING_UNDERWRITING -- see workflows.py's own initial
+    # self._status.
+    assert result.application.status == "PENDING_RISK_ASSESSMENT"
     assert result.application.customer_id is None
     assert len(start_workflow_calls) == 1
 
@@ -388,6 +395,10 @@ async def _seed_application(**overrides) -> str:
         applicant_email="alice@example.com",
         applicant_phone="555-0100",
         amount=Decimal("10000"),
+        # These tests are about resubmit/check_decision_allowed, not risk
+        # assessment -- seed rows already past that stage, same as this
+        # fixture already assumed before `status` became a required param.
+        status="PENDING_UNDERWRITING",
     )
     defaults.update(overrides)
     await application_db.insert(**defaults)

@@ -29,6 +29,8 @@ from loan_onboarding.application.activities import (
     persist_application,
     persist_decision,
     persist_resubmit,
+    persist_risk_assessment_cleared,
+    submit_risk_assessment,
 )
 from loan_onboarding.workflow.worker import run_account_closure_worker, run_worker
 
@@ -38,7 +40,13 @@ async def main() -> None:
     product_type = os.environ.get("LOAN_PRODUCT_TYPE") or None
     await asyncio.gather(
         run_worker(
-            [persist_application, persist_decision, persist_resubmit],
+            [
+                persist_application,
+                persist_decision,
+                persist_resubmit,
+                submit_risk_assessment,
+                persist_risk_assessment_cleared,
+            ],
             worker_mode=worker_mode,
             product_type=product_type,
         ),

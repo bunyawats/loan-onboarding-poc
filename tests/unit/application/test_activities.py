@@ -19,6 +19,8 @@ from loan_onboarding.workflow.workflows import (
     PersistApplicationInput,
     PersistDecisionInput,
     PersistResubmitInput,
+    PersistRiskAssessmentClearedInput,
+    SubmitRiskAssessmentInput,
 )
 
 _application_id_counter = itertools.count()
@@ -76,6 +78,20 @@ def _mock_notifications_service(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def _mock_risk_service(monkeypatch):
+    """Not autouse -- only submit_risk_assessment's own tests need
+    risk.service mocked (an httpx call this test suite doesn't need a
+    real NATS Adapter for)."""
+    calls = []
+
+    async def fake_submit_risk_assessment(application_id, applicant_identifier, product_type, amount, payload):
+        calls.append((application_id, applicant_identifier, product_type, amount, payload))
+
+    monkeypatch.setattr(activities.risk_service, "submit_risk_assessment", fake_submit_risk_assessment)
+    return calls
+
+
 def _application_input(**overrides):
     application_id = _new_application_id()
     defaults = dict(
@@ -108,6 +124,17 @@ async def test_persist_application_inserts_row():
     assert record is not None
     assert record["applicant_identifier"] == inp.applicant_identifier
     assert record["amount"] == Decimal("10000.0")
+    # Phase 21: PersistApplicationInput.initial_status defaults to
+    # PENDING_RISK_ASSESSMENT -- persist_application writes it verbatim,
+    # no longer relying on the table's own PENDING_UNDERWRITING DEFAULT.
+    assert record["status"] == "PENDING_RISK_ASSESSMENT"
+
+
+async def test_persist_application_writes_explicit_initial_status():
+    inp = _application_input(initial_status="PENDING_UNDERWRITING")
+    await activities.persist_application(inp)
+
+    record = await application_db.get(inp.application_id)
     assert record["status"] == "PENDING_UNDERWRITING"
 
 
@@ -135,6 +162,78 @@ async def test_persist_decision_underwriter_reject_writes_columns_with_no_provis
     assert _mock_document_service["tag"] == []
     assert _mock_document_service["promote"] == []
     assert _mock_document_service["welcome_letter"] == []
+
+
+async def test_persist_decision_risk_driven_approve_writes_risk_tier(_mock_document_service):
+    application_id = await _seed_application(initial_status="PENDING_RISK_ASSESSMENT")
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="risk-engine-auto",
+            comment="Automated decision by risk assessment",
+            resulting_status="APPROVED",
+            risk_tier="LOW",
+        )
+    )
+
+    record = await application_db.get(application_id)
+    assert record["status"] == "APPROVED"
+    assert record["underwriter_name"] == "risk-engine-auto"
+    assert record["risk_tier"] == "LOW"
+
+
+async def test_persist_decision_human_decision_leaves_risk_tier_null(_mock_document_service):
+    application_id = await _seed_application()
+
+    await activities.persist_decision(
+        PersistDecisionInput(
+            application_id=application_id,
+            actor_role="underwriter",
+            decision="APPROVE",
+            actor_name="u1",
+            comment="looks fine",
+            resulting_status="APPROVED",
+        )
+    )
+
+    record = await application_db.get(application_id)
+    assert record["risk_tier"] is None
+
+
+async def test_submit_risk_assessment_calls_risk_service(_mock_risk_service):
+    await activities.submit_risk_assessment(
+        SubmitRiskAssessmentInput(
+            application_id="APP-000000001",
+            applicant_identifier="alice@example.com",
+            product_type="personal_loan",
+            amount=15000.0,
+            payload={"purpose": "debt_consolidation"},
+        )
+    )
+
+    assert len(_mock_risk_service) == 1
+    application_id, applicant_identifier, product_type, amount, payload = _mock_risk_service[0]
+    assert application_id == "APP-000000001"
+    assert applicant_identifier == "alice@example.com"
+    assert product_type == "personal_loan"
+    # Decimal(str(...)), same precision-safe conversion persist_application
+    # already uses -- not a raw float, to avoid binary-float artifacts.
+    assert amount == Decimal("15000.0")
+    assert payload == {"purpose": "debt_consolidation"}
+
+
+async def test_persist_risk_assessment_cleared_flips_status():
+    application_id = await _seed_application(initial_status="PENDING_RISK_ASSESSMENT")
+
+    await activities.persist_risk_assessment_cleared(
+        PersistRiskAssessmentClearedInput(application_id=application_id)
+    )
+
+    record = await application_db.get(application_id)
+    assert record["status"] == "PENDING_UNDERWRITING"
 
 
 async def test_persist_decision_underwriter_escalation_writes_no_provisioning():

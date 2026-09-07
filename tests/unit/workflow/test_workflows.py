@@ -42,6 +42,8 @@ from loan_onboarding.workflow.workflows import (
     PersistClosureRequestInput,
     PersistDecisionInput,
     PersistResubmitInput,
+    PersistRiskAssessmentClearedInput,
+    SubmitRiskAssessmentInput,
 )
 
 BELOW_THRESHOLD = MANAGER_ESCALATION_THRESHOLD_USD - 1_000
@@ -79,7 +81,26 @@ def _make_fake_activities(calls: list[_RecordedCall]):
     async def persist_resubmit(inp: PersistResubmitInput) -> None:
         calls.append(_RecordedCall("persist_resubmit", inp))
 
-    return [persist_application, persist_decision, persist_resubmit]
+    # Phase 21 -- fakes for the two new risk-assessment activities.
+    # submit_risk_assessment's real implementation calls out to
+    # risk.service (an httpx POST) -- faked here as a no-op, same "test
+    # the orchestration, not the downstream call" split every other
+    # activity fake in this file already follows.
+    @activity.defn(name="submit_risk_assessment")
+    async def submit_risk_assessment(inp: SubmitRiskAssessmentInput) -> None:
+        calls.append(_RecordedCall("submit_risk_assessment", inp))
+
+    @activity.defn(name="persist_risk_assessment_cleared")
+    async def persist_risk_assessment_cleared(inp: PersistRiskAssessmentClearedInput) -> None:
+        calls.append(_RecordedCall("persist_risk_assessment_cleared", inp))
+
+    return [
+        persist_application,
+        persist_decision,
+        persist_resubmit,
+        submit_risk_assessment,
+        persist_risk_assessment_cleared,
+    ]
 
 
 def _input(**overrides) -> ApplicationWorkflowInput:
@@ -131,12 +152,51 @@ async def _wait_for_status(handle: WorkflowHandle, expected_status: str) -> Appl
         await asyncio.sleep(_POLL_INTERVAL_S)
 
 
-async def _wait_for_call_count(calls: list[_RecordedCall], count: int) -> None:
+async def _wait_for_call_count(
+    calls: list[_RecordedCall], count: int, activity_name: str | None = None
+) -> None:
+    """Without `activity_name`, waits for `len(calls) >= count` (any
+    activity). With it, waits for at least `count` calls *named*
+    `activity_name` specifically -- used where a fixed positional count
+    across all activities would be the wrong thing to wait for (see
+    `_advance_past_risk_assessment`'s own docstring)."""
     deadline = time.monotonic() + _POLL_TIMEOUT_S
-    while len(calls) < count:
+    while True:
+        matching = len(calls) if activity_name is None else sum(1 for c in calls if c.name == activity_name)
+        if matching >= count:
+            return
         if time.monotonic() >= deadline:
-            raise AssertionError(f"only {len(calls)} activity calls recorded, expected {count}")
+            raise AssertionError(
+                f"only {matching} matching activity calls recorded, expected {count} "
+                f"(activity_name={activity_name!r}, all calls so far: {_names(calls)!r})"
+            )
         await asyncio.sleep(_POLL_INTERVAL_S)
+
+
+async def _advance_past_risk_assessment(handle: WorkflowHandle, calls: list[_RecordedCall]) -> None:
+    """Every application now starts at PENDING_RISK_ASSESSMENT (Phase
+    21) -- tests exercising the pre-existing human-decision path (below)
+    aren't about risk assessment at all, so they use this helper to get
+    a MEDIUM resolution (the "falls straight through to today's
+    unchanged behavior" tier) out of the way first, same shape a real
+    NATS Adapter delivery would produce.
+
+    Waits for run()'s own submit_risk_assessment activity to land before
+    signalling -- a real, live-hit-in-this-test-suite race, not just
+    theoretical: signal_risk_decision's guard only checks
+    self._status == STATUS_PENDING_RISK_ASSESSMENT (true from __init__
+    onward, before run() has done anything), so signalling immediately
+    let the fake persist_risk_assessment_cleared activity's call land
+    *before* submit_risk_assessment's, flipping their order in `calls`
+    and breaking every positional assertion below. In real operation
+    this ordering is enforced for real (the NATS Adapter can only send
+    signal_risk_decision after a decided message arrives, which can only
+    happen after submit_risk_assessment's own submission was made) --
+    this wait reproduces that same real causal ordering here instead of
+    racing it."""
+    await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+    await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "MEDIUM")
+    await _wait_for_status(handle, "PENDING_UNDERWRITING")
 
 
 async def test_happy_path_below_threshold(env: WorkflowEnvironment):
@@ -149,6 +209,7 @@ async def test_happy_path_below_threshold(env: WorkflowEnvironment):
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _advance_past_risk_assessment(handle, calls)
         await handle.signal(
             LoanApplicationWorkflow.submit_decision,
             args=["underwriter", "APPROVE", "u1", "looks fine"],
@@ -157,9 +218,14 @@ async def test_happy_path_below_threshold(env: WorkflowEnvironment):
 
     assert result.status == "APPROVED"
     assert result.closed_by == "u1"
-    assert _names(calls) == ["persist_application", "persist_decision"]
-    assert calls[1].inp.resulting_status == "APPROVED"
-    assert calls[1].inp.actor_role == "underwriter"
+    assert _names(calls) == [
+        "persist_application",
+        "submit_risk_assessment",
+        "persist_risk_assessment_cleared",
+        "persist_decision",
+    ]
+    assert calls[3].inp.resulting_status == "APPROVED"
+    assert calls[3].inp.actor_role == "underwriter"
 
 
 async def test_happy_path_escalates_then_manager_approves(env: WorkflowEnvironment):
@@ -172,6 +238,7 @@ async def test_happy_path_escalates_then_manager_approves(env: WorkflowEnvironme
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=AT_OR_ABOVE_THRESHOLD)
+        await _advance_past_risk_assessment(handle, calls)
         await handle.signal(
             LoanApplicationWorkflow.submit_decision,
             args=["underwriter", "APPROVE", "u1", "escalating"],
@@ -188,12 +255,14 @@ async def test_happy_path_escalates_then_manager_approves(env: WorkflowEnvironme
     assert result.closed_by == "m1"
     assert _names(calls) == [
         "persist_application",
+        "submit_risk_assessment",
+        "persist_risk_assessment_cleared",
         "persist_decision",
         "persist_decision",
     ]
-    assert calls[1].inp.resulting_status == "PENDING_MANAGER_APPROVAL"
-    assert calls[2].inp.resulting_status == "APPROVED"
-    assert calls[2].inp.actor_role == "manager"
+    assert calls[3].inp.resulting_status == "PENDING_MANAGER_APPROVAL"
+    assert calls[4].inp.resulting_status == "APPROVED"
+    assert calls[4].inp.actor_role == "manager"
 
 
 @pytest.mark.parametrize(
@@ -212,6 +281,7 @@ async def test_reject_at_each_stage(
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=amount)
+        await _advance_past_risk_assessment(handle, calls)
         if actor_role == "manager":
             # Get to PENDING_MANAGER_APPROVAL first.
             await handle.signal(
@@ -240,6 +310,7 @@ async def test_request_more_info_then_resubmit_then_approve(env: WorkflowEnviron
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _advance_past_risk_assessment(handle, calls)
         await handle.signal(
             LoanApplicationWorkflow.submit_decision,
             args=["underwriter", "REQUEST_MORE_INFO", "u1", "need bank statements"],
@@ -260,17 +331,23 @@ async def test_request_more_info_then_resubmit_then_approve(env: WorkflowEnviron
     assert result.status == "APPROVED"
     assert _names(calls) == [
         "persist_application",
+        "submit_risk_assessment",
+        "persist_risk_assessment_cleared",
         "persist_decision",
         "persist_resubmit",
         "persist_decision",
     ]
-    assert calls[2].inp.payload == {"purpose": "home_improvement"}
+    assert calls[4].inp.payload == {"purpose": "home_improvement"}
 
 
 @pytest.mark.parametrize(
     "setup_decision,expected_intermediate_status",
     [
-        (None, None),  # cancel directly from PENDING_UNDERWRITING
+        # A customer can also cancel directly from PENDING_RISK_ASSESSMENT
+        # itself -- _resolve_transition's CANCELLED branch only excludes
+        # TERMINAL_STATUSES, it doesn't check for a specific pending
+        # state, so no risk-assessment advance is needed for this case.
+        (None, None),
         (("underwriter", "APPROVE", "u1"), "PENDING_MANAGER_APPROVAL"),
         (("underwriter", "REQUEST_MORE_INFO", "u1"), "MORE_INFO_REQUESTED"),
     ],
@@ -288,6 +365,7 @@ async def test_cancel_from_each_non_terminal_state(
     ):
         handle = await _start(env, task_queue, amount=AT_OR_ABOVE_THRESHOLD)
         if setup_decision is not None:
+            await _advance_past_risk_assessment(handle, calls)
             actor_role, decision, actor_name = setup_decision
             await handle.signal(
                 LoanApplicationWorkflow.submit_decision,
@@ -302,7 +380,13 @@ async def test_cancel_from_each_non_terminal_state(
 
     assert result.status == "CANCELLED"
     assert result.closed_by == "applicant@example.com"
-    assert calls[-1].inp.resulting_status == "CANCELLED"
+    # Not calls[-1]: the (None, None) case cancels immediately, which can
+    # race run()'s own still-in-flight submit_risk_assessment activity
+    # call (a real, harmless race -- CLAUDE.md's "no timeout" gaps
+    # already accept a comparable class of benign concurrent-activity
+    # ordering elsewhere) and land persist_decision before it in `calls`.
+    decision_calls = [c for c in calls if c.name == "persist_decision"]
+    assert decision_calls[-1].inp.resulting_status == "CANCELLED"
 
 
 async def test_wrong_actor_role_for_current_state_is_rejected(env: WorkflowEnvironment):
@@ -315,6 +399,7 @@ async def test_wrong_actor_role_for_current_state_is_rejected(env: WorkflowEnvir
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _advance_past_risk_assessment(handle, calls)
         # PENDING_UNDERWRITING only accepts actor_role="underwriter".
         await handle.signal(
             LoanApplicationWorkflow.submit_decision,
@@ -325,7 +410,11 @@ async def test_wrong_actor_role_for_current_state_is_rejected(env: WorkflowEnvir
 
     assert isinstance(exc_info.value.cause, ApplicationError)
     # The rejected attempt never reached persist_decision.
-    assert _names(calls) == ["persist_application"]
+    assert _names(calls) == [
+        "persist_application",
+        "submit_risk_assessment",
+        "persist_risk_assessment_cleared",
+    ]
 
 
 async def test_native_cancel_lands_on_cancelled_via_fake_persist_decision(
@@ -340,21 +429,23 @@ async def test_native_cancel_lands_on_cancelled_via_fake_persist_decision(
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
-        # Wait for persist_application to land first -- cancelling before
-        # it does would deliver the CancelledError to that activity await
-        # instead of the wait_condition() this test means to exercise
-        # (that's a separate, un-recovered path -- see CLAUDE.md's "Known
-        # gaps": a terminate/very-early-cancel can't be recovered from
-        # inside the workflow, structurally).
-        await _wait_for_call_count(calls, 1)
+        # Wait for both pre-wait_condition activities to land first
+        # (persist_application, then Phase 21's submit_risk_assessment) --
+        # cancelling before both do would deliver the CancelledError to
+        # one of those activity awaits instead of the wait_condition()
+        # this test means to exercise (that's a separate, un-recovered
+        # path -- see CLAUDE.md's "Known gaps": a terminate/very-early-
+        # cancel can't be recovered from inside the workflow,
+        # structurally).
+        await _wait_for_call_count(calls, 2)
         await handle.cancel()
         result = await handle.result()
 
     assert result.status == "CANCELLED"
     assert result.closed_by == "temporal-admin"
-    assert _names(calls) == ["persist_application", "persist_decision"]
-    assert calls[1].inp.decision == "CANCELLED"
-    assert calls[1].inp.decided_at is not None
+    assert _names(calls) == ["persist_application", "submit_risk_assessment", "persist_decision"]
+    assert calls[2].inp.decision == "CANCELLED"
+    assert calls[2].inp.decided_at is not None
 
 
 async def test_two_concurrent_terminal_signals_only_write_once(env: WorkflowEnvironment):
@@ -376,7 +467,7 @@ async def test_two_concurrent_terminal_signals_only_write_once(env: WorkflowEnvi
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
-        await _wait_for_call_count(calls, 1)  # persist_application landed first
+        await _advance_past_risk_assessment(handle, calls)
         await asyncio.gather(
             handle.signal(
                 LoanApplicationWorkflow.submit_decision,
@@ -386,6 +477,196 @@ async def test_two_concurrent_terminal_signals_only_write_once(env: WorkflowEnvi
                 LoanApplicationWorkflow.submit_decision,
                 args=["underwriter", "REJECT", "u1", "reject"],
             ),
+        )
+        result = await handle.result()
+
+    decision_calls = [c for c in calls if c.name == "persist_decision"]
+    assert len(decision_calls) == 1
+    assert result.status == decision_calls[0].inp.resulting_status
+    assert result.status in ("APPROVED", "REJECTED")
+
+
+# ----------------------------------------------------------------------
+# Phase 21, "Automated risk assessment via NATS" -- the three risk-tier
+# outcomes signal_risk_decision resolves, plus its duplicate-signal
+# guard. Same WorkflowEnvironment/fake-activities pattern as every test
+# above -- signal_risk_decision is sent directly here (never by a BFF,
+# unlike every other signal in this file), same as the real NATS Adapter
+# would, just without the NATS/HTTP hop itself.
+# ----------------------------------------------------------------------
+
+
+async def test_risk_low_auto_approves(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[LoanApplicationWorkflow],
+        activities=_make_fake_activities(calls),
+    ):
+        handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "LOW")
+        result = await handle.result()
+
+    assert result.status == "APPROVED"
+    assert result.closed_by == "risk-engine-auto"
+    assert _names(calls) == ["persist_application", "submit_risk_assessment", "persist_decision"]
+    decision_call = calls[2]
+    assert decision_call.inp.resulting_status == "APPROVED"
+    assert decision_call.inp.actor_role == "underwriter"
+    assert decision_call.inp.actor_name == "risk-engine-auto"
+    assert decision_call.inp.risk_tier == "LOW"
+
+
+async def test_risk_high_auto_rejects(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[LoanApplicationWorkflow],
+        activities=_make_fake_activities(calls),
+    ):
+        handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "HIGH")
+        result = await handle.result()
+
+    assert result.status == "REJECTED"
+    assert result.closed_by == "risk-engine-auto"
+    decision_call = calls[2]
+    assert decision_call.inp.resulting_status == "REJECTED"
+    assert decision_call.inp.risk_tier == "HIGH"
+
+
+async def test_risk_medium_falls_through_to_unchanged_underwriting(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[LoanApplicationWorkflow],
+        activities=_make_fake_activities(calls),
+    ):
+        handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _advance_past_risk_assessment(handle, calls)
+        status = await handle.query(LoanApplicationWorkflow.get_status)
+        assert status.status == "PENDING_UNDERWRITING"
+
+        # From here on, MEDIUM looks identical to any application that
+        # never had a risk tier at all -- same human-decision path, same
+        # assertion shape as test_happy_path_below_threshold.
+        await handle.signal(
+            LoanApplicationWorkflow.submit_decision,
+            args=["underwriter", "APPROVE", "u1", "looks fine"],
+        )
+        result = await handle.result()
+
+    assert result.status == "APPROVED"
+    assert result.closed_by == "u1"
+    assert _names(calls) == [
+        "persist_application",
+        "submit_risk_assessment",
+        "persist_risk_assessment_cleared",
+        "persist_decision",
+    ]
+    # MEDIUM itself never touches risk_tier (CLAUDE.md: only an
+    # auto-*decided* LOW/HIGH outcome does) -- the eventual human
+    # decision's own persist_decision call carries risk_tier=None too.
+    assert calls[3].inp.risk_tier is None
+
+
+async def test_signal_risk_decision_invalid_tier_is_rejected(env: WorkflowEnvironment):
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[LoanApplicationWorkflow],
+        activities=_make_fake_activities(calls),
+    ):
+        handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "BOGUS")
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+
+    assert isinstance(exc_info.value.cause, ApplicationError)
+    assert _names(calls) == ["persist_application", "submit_risk_assessment"]
+
+
+async def test_duplicate_signal_risk_decision_after_medium_is_ignored(env: WorkflowEnvironment):
+    """NATS is at-least-once, and so is the Adapter's own retry of a
+    failed signal call -- a second signal_risk_decision arriving after
+    the first already resolved MEDIUM (a non-terminal transition, so
+    _claim_transition() alone would happily succeed again) must be a
+    silent no-op, not a second, incorrect transition. This is exactly
+    what the `self._status != STATUS_PENDING_RISK_ASSESSMENT` half of
+    signal_risk_decision's guard exists for, not just
+    `self._finalized`."""
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[LoanApplicationWorkflow],
+        activities=_make_fake_activities(calls),
+    ):
+        handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _advance_past_risk_assessment(handle, calls)
+
+        # A duplicate delivery of the same (already-resolved) decision.
+        await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "MEDIUM")
+        # Give the (should-be-ignored) signal a beat to misbehave, then
+        # confirm nothing changed -- there is no observable state
+        # transition to poll for on a correctly-ignored no-op.
+        await asyncio.sleep(_POLL_INTERVAL_S * 2)
+        status = await handle.query(LoanApplicationWorkflow.get_status)
+        assert status.status == "PENDING_UNDERWRITING"
+
+        await handle.signal(
+            LoanApplicationWorkflow.submit_decision,
+            args=["underwriter", "APPROVE", "u1", "looks fine"],
+        )
+        result = await handle.result()
+
+    assert result.status == "APPROVED"
+    assert _names(calls) == [
+        "persist_application",
+        "submit_risk_assessment",
+        "persist_risk_assessment_cleared",
+        "persist_decision",
+    ]
+
+
+async def test_two_concurrent_risk_decisions_only_write_once(env: WorkflowEnvironment):
+    """Same invariant test_two_concurrent_terminal_signals_only_write_once
+    already proves for two racing submit_decision signals, here for two
+    racing signal_risk_decision signals instead -- a real, not just
+    theoretical, possibility given NATS's at-least-once delivery plus
+    the Adapter's own retry of a failed signal call (CLAUDE.md's
+    "Automated risk assessment via NATS"). Note this does NOT exercise
+    "signal a workflow after its execution has already closed" --
+    Temporal itself rejects that at the server/RPC level (a real
+    `temporalio.service.RPCError: Completed workflow`, confirmed while
+    writing this test), not something signal_risk_decision's own
+    in-workflow guard is ever asked to handle; the two-signals-in-flight
+    race below is what's actually reachable and worth guarding."""
+    task_queue = str(uuid.uuid4())
+    calls: list[_RecordedCall] = []
+    async with Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[LoanApplicationWorkflow],
+        activities=_make_fake_activities(calls),
+    ):
+        handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
+        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await asyncio.gather(
+            handle.signal(LoanApplicationWorkflow.signal_risk_decision, "LOW"),
+            handle.signal(LoanApplicationWorkflow.signal_risk_decision, "HIGH"),
         )
         result = await handle.result()
 

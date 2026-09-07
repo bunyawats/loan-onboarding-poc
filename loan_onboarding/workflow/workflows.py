@@ -49,6 +49,7 @@ DECISION_REQUEST_MORE_INFO = "REQUEST_MORE_INFO"
 DECISION_CANCELLED = "CANCELLED"
 VALID_DECISIONS = (DECISION_APPROVE, DECISION_REJECT, DECISION_REQUEST_MORE_INFO, DECISION_CANCELLED)
 
+STATUS_PENDING_RISK_ASSESSMENT = "PENDING_RISK_ASSESSMENT"
 STATUS_PENDING_UNDERWRITING = "PENDING_UNDERWRITING"
 STATUS_PENDING_MANAGER_APPROVAL = "PENDING_MANAGER_APPROVAL"
 STATUS_MORE_INFO_REQUESTED = "MORE_INFO_REQUESTED"
@@ -57,6 +58,18 @@ STATUS_REJECTED = "REJECTED"
 STATUS_CANCELLED = "CANCELLED"
 
 TERMINAL_STATUSES = frozenset({STATUS_APPROVED, STATUS_REJECTED, STATUS_CANCELLED})
+
+# Phase 21, "Automated risk assessment via NATS" -- see CLAUDE.md / the
+# risk-assessment-nats skill. RISK_ENGINE_ACTOR_NAME is the documented,
+# deliberate exception to "underwriter_name/manager_name are always an
+# authenticated Keycloak username, never client-submitted free text" --
+# an automated decision has no Keycloak session behind it by definition.
+RISK_TIER_LOW = "LOW"
+RISK_TIER_MEDIUM = "MEDIUM"
+RISK_TIER_HIGH = "HIGH"
+VALID_RISK_TIERS = (RISK_TIER_LOW, RISK_TIER_MEDIUM, RISK_TIER_HIGH)
+RISK_ENGINE_ACTOR_NAME = "risk-engine-auto"
+RISK_ENGINE_AUTO_COMMENT = "Automated decision by risk assessment"
 
 DEFAULT_RETRY_POLICY = RetryPolicy(maximum_attempts=5)
 DEFAULT_ACTIVITY_TIMEOUT = timedelta(seconds=30)
@@ -94,6 +107,13 @@ class PersistApplicationInput:
     applicant_email: str
     applicant_phone: str
     customer_id: Optional[str] = None
+    # Written verbatim as the row's initial status -- STATUS_PENDING_RISK_
+    # ASSESSMENT as of Phase 21, not a database DEFAULT (CLAUDE.md's "no
+    # implicit database default" discipline, same reasoning primary keys
+    # already follow -- see "Data storage"). run() below passes
+    # self._status here explicitly (not this field's own default) so the
+    # two can never drift apart.
+    initial_status: str = STATUS_PENDING_RISK_ASSESSMENT
 
 
 @dataclass
@@ -111,6 +131,10 @@ class PersistDecisionInput:
     # signal-driven decision, which has no separate "decided at" moment
     # to reconcile against.
     decided_at: Optional[datetime] = None
+    # Phase 21: only ever set for a risk-driven auto-decision (LOW ->
+    # this terminal APPROVE, HIGH -> this terminal REJECT) -- None for
+    # every human decision, which leaves applications.risk_tier NULL.
+    risk_tier: Optional[str] = None
 
 
 @dataclass
@@ -119,13 +143,40 @@ class PersistResubmitInput:
     payload: dict[str, Any]
 
 
+@dataclass
+class SubmitRiskAssessmentInput:
+    application_id: str
+    applicant_identifier: str
+    product_type: str
+    amount: float
+    payload: dict[str, Any]
+
+
+@dataclass
+class PersistRiskAssessmentClearedInput:
+    """The MEDIUM-tier outcome: no decision was made, so none of
+    PersistDecisionInput's actor_role/decision/comment fields apply --
+    this is a dedicated, minimal activity input rather than overloading
+    PersistDecisionInput with a fourth, non-decision "decision" value
+    (CLAUDE.md's "each activity has different column-update semantics,
+    don't collapse into one generic activity")."""
+
+    application_id: str
+
+
 @workflow.defn
 class LoanApplicationWorkflow:
     def __init__(self) -> None:
         self._application_id: str = ""
         self._payload: dict[str, Any] = {}
         self._amount: float = 0.0
-        self._status = STATUS_PENDING_UNDERWRITING
+        # Phase 21: every application now passes through an automated
+        # risk assessment first -- see "Automated risk assessment via
+        # NATS" (CLAUDE.md / the risk-assessment-nats skill).
+        # signal_risk_decision() is what moves this out of this initial
+        # status, same role submit_decision() already plays for
+        # STATUS_PENDING_UNDERWRITING below.
+        self._status = STATUS_PENDING_RISK_ASSESSMENT
         self._closed_by: Optional[str] = None
         self._closed_comment: Optional[str] = None
         self._finalized = False
@@ -196,6 +247,24 @@ class LoanApplicationWorkflow:
             f"(use resubmit() while MORE_INFO_REQUESTED)"
         )
 
+    def _resolve_risk_decision(self, risk_tier: str) -> tuple[str, bool]:
+        """Returns (resulting_status, is_terminal), or raises ValueError
+        for an unrecognized tier. Only ever called while
+        self._status == STATUS_PENDING_RISK_ASSESSMENT (signal_risk_decision
+        checks this before calling in)."""
+        if risk_tier == RISK_TIER_LOW:
+            return STATUS_APPROVED, True
+        if risk_tier == RISK_TIER_HIGH:
+            return STATUS_REJECTED, True
+        if risk_tier == RISK_TIER_MEDIUM:
+            # Falls straight through into today's unchanged human
+            # PENDING_UNDERWRITING wait -- no tagging or badge, an
+            # application resolved MEDIUM looks identical to any other
+            # row in the underwriting queue (confirmed with the user,
+            # CLAUDE.md's "Automated risk assessment via NATS").
+            return STATUS_PENDING_UNDERWRITING, False
+        raise ValueError(f"invalid risk_tier {risk_tier!r}, expected one of {VALID_RISK_TIERS!r}")
+
     @workflow.run
     async def run(self, req: ApplicationWorkflowInput) -> ApplicationStatus:
         self._application_id = req.application_id
@@ -215,6 +284,28 @@ class LoanApplicationWorkflow:
                 applicant_email=req.applicant_email,
                 applicant_phone=req.applicant_phone,
                 customer_id=req.customer_id,
+                initial_status=self._status,
+            ),
+            start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
+        )
+
+        # Phase 21: kick off the automated risk assessment -- fire-and-
+        # forget from this workflow's own perspective (the eventual
+        # decision arrives later, as the signal_risk_decision signal
+        # below, sent by the NATS Adapter, not as this activity's return
+        # value). Still awaited, not detached, so a submission failure
+        # retries per DEFAULT_RETRY_POLICY like every other activity here
+        # -- nothing else will ever move this application out of
+        # PENDING_RISK_ASSESSMENT if the submission itself never lands.
+        await workflow.execute_activity(
+            "submit_risk_assessment",
+            SubmitRiskAssessmentInput(
+                application_id=req.application_id,
+                applicant_identifier=req.applicant_identifier,
+                product_type=req.product_type,
+                amount=req.amount,
+                payload=req.payload,
             ),
             start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -305,6 +396,61 @@ class LoanApplicationWorkflow:
             self._finalized = True
             self._closed_by = actor_name
             self._closed_comment = comment
+        self._busy = False
+
+    @workflow.signal
+    async def signal_risk_decision(self, risk_tier: str) -> None:
+        """Sent directly by the standalone NATS Adapter service (not a
+        BFF route handler, unlike every other signal here) once the Risk
+        Engine has decided a tier -- see CLAUDE.md's "Automated risk
+        assessment via NATS" / the risk-assessment-nats skill. NATS is
+        at-least-once, and so is the Adapter's own retry of a failed
+        signal call, so a duplicate/late delivery is expected, not
+        exceptional -- the `self._status != STATUS_PENDING_RISK_ASSESSMENT`
+        check below (not just `_claim_transition()`'s busy/finalized
+        guard, which alone would still be True again once a MEDIUM
+        resolution's own `self._busy = False` runs) is what actually
+        makes a second delivery arriving after a MEDIUM resolution a
+        silent no-op instead of an incorrect second transition."""
+        if self._finalized or self._status != STATUS_PENDING_RISK_ASSESSMENT:
+            return  # already resolved, or a duplicate/late delivery -- ignore
+        if not self._claim_transition():
+            return
+
+        try:
+            resulting_status, is_terminal = self._resolve_risk_decision(risk_tier)
+        except ValueError as e:
+            self._busy = False  # this attempt never actually transitioned
+            raise ApplicationError(str(e))
+
+        if is_terminal:
+            actual_status = await workflow.execute_activity(
+                "persist_decision",
+                PersistDecisionInput(
+                    application_id=self._application_id,
+                    actor_role=ROLE_UNDERWRITER,
+                    decision=DECISION_APPROVE if resulting_status == STATUS_APPROVED else DECISION_REJECT,
+                    actor_name=RISK_ENGINE_ACTOR_NAME,
+                    comment=RISK_ENGINE_AUTO_COMMENT,
+                    resulting_status=resulting_status,
+                    risk_tier=risk_tier,
+                ),
+                start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+                result_type=str,
+            )
+            self._status = actual_status
+            self._finalized = True
+            self._closed_by = RISK_ENGINE_ACTOR_NAME
+            self._closed_comment = RISK_ENGINE_AUTO_COMMENT
+        else:
+            await workflow.execute_activity(
+                "persist_risk_assessment_cleared",
+                PersistRiskAssessmentClearedInput(application_id=self._application_id),
+                start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            self._status = STATUS_PENDING_UNDERWRITING
         self._busy = False
 
     @workflow.signal

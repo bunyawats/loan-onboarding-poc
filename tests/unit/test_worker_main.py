@@ -20,6 +20,8 @@ from loan_onboarding.application.activities import (
     persist_application,
     persist_decision,
     persist_resubmit,
+    persist_risk_assessment_cleared,
+    submit_risk_assessment,
 )
 
 
@@ -42,7 +44,13 @@ async def test_main_forwards_the_three_concrete_activities_and_env_vars(monkeypa
 
     assert len(calls) == 1
     activities, worker_mode, product_type = calls[0]
-    assert activities == [persist_application, persist_decision, persist_resubmit]
+    assert activities == [
+        persist_application,
+        persist_decision,
+        persist_resubmit,
+        submit_risk_assessment,
+        persist_risk_assessment_cleared,
+    ]
     assert worker_mode == "activity"
     assert product_type == "mortgage"
 
