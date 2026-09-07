@@ -1061,8 +1061,8 @@ the domain modules' `service.py` functions.
   to hide the option. See "One customer, one active account per product
   type" above for the full design and why `check_decision_allowed`'s
   approval-time gate is unaffected by this.
-- **Account closure request/cancel (built, P18-7)**: the application
-  detail page's Account closure section
+- **Account closure request/cancel**: the application detail page's
+  Account closure section
   (`POST /apply/applications/{application_id}/closure/request` /
   `.../closure/cancel`), gated the same way Consent-upload's own account
   section is (`_owned_account` — `APPROVED` application + an account
@@ -1073,12 +1073,9 @@ the domain modules' `service.py` functions.
   applicant_identifier)` / `workflow.service.signal_close_account_cancel(...)`
   then `account.service.wait_for_status_change(...)`, both plain
   POST-redirect-GET forms like this module's existing Cancel/Resubmit
-  actions. See "Account closure" above for the full design. Live-
-  verified end to end over real HTTP (local `uvicorn`/`worker_main.py`
-  against the real stack, scripted identify → verify → request → cancel
-  flow) — button/status visibility, the account's `ACTIVE` →
-  `CLOSURE_REQUESTED` → `ACTIVE` round trip, and the fake closure-
-  decision email all confirmed.
+  actions. See "Account closure" above for the full design and
+  `IMPLEMENTATION_PLAN.md`'s Phase 18 (P18-7) for the live-verification
+  sweep.
 
 ### 2. `bff_backoffice/` — Back-Office BFF (the "LOS")
 
@@ -1142,35 +1139,26 @@ System) is this module's working name.
   (shared with `bff_customer`, see `document/`'s section) backs the
   preview link — `/ui/{role}/{application_id}/consent/{document_id}/preview`,
   ownership resolved via `account.service.get_by_application_id(...)`
-  rather than trusting a raw `account_id` path param. Live-verified via
-  a real Keycloak login: both surfaces confirmed to share one Mayan
-  document (a staff-side replace immediately visible via the
-  customer-side preview URL), role-gating (`403` for `manager` on
-  `underwriter`-scoped routes) and the non-`APPROVED` `400` guard both
-  held — full sweep moved to `IMPLEMENTATION_PLAN.md`'s Session Log,
+  rather than trusting a raw `account_id` path param — full
+  live-verification sweep (shared Mayan document, role-gating,
+  non-`APPROVED` guard) in `IMPLEMENTATION_PLAN.md`'s Session Log,
   2026-09-04 docs-consolidation entry.
-- **Account closure review queue (built, P18-6)**: `GET
-  /ui/{role}/closures` lists every account
-  `account.service.list_pending_closure_requests()` returns, each row a
-  plain `<form>` (POST-redirect-GET, not htmx) with a required
-  attestation comment field and Approve/Reject submit buttons posting
-  to `/ui/{role}/closures/{account_id}/decision`. **Gated by role only
-  (`_role_dependency`), not a Keycloak permission** — same reasoning
-  Consent-upload above already uses; either `Underwriter` or `Manager`
-  may decide, no escalation tier. The decision route calls
-  `workflow.service.signal_close_account_decision(...)` then
-  `account.service.wait_for_status_change(...)` before redirecting back
-  to the queue; a stale page (the request was already decided, or the
-  customer cancelled it) re-renders the queue with an explanatory
+- **Account closure review queue**: `GET /ui/{role}/closures` lists
+  every account `account.service.list_pending_closure_requests()`
+  returns, each row a plain `<form>` (POST-redirect-GET, not htmx) with
+  a required attestation comment field and Approve/Reject submit
+  buttons posting to `/ui/{role}/closures/{account_id}/decision`.
+  **Gated by role only (`_role_dependency`), not a Keycloak
+  permission** — same reasoning Consent-upload above already uses;
+  either `Underwriter` or `Manager` may decide, no escalation tier. The
+  decision route calls `workflow.service.signal_close_account_decision(...)`
+  then `account.service.wait_for_status_change(...)` before redirecting
+  back to the queue; a stale page (the request was already decided, or
+  the customer cancelled it) re-renders the queue with an explanatory
   message instead of a raw error. See "Account closure" above for the
   full design and why this screen is deliberately unpaginated with no
-  bulk actions, unlike the application queues. **Live-verified, P18-8**:
-  a real Keycloak-authenticated `underwriter1` session logged in through
-  this project's own realm, saw both a pending Approve-bound and a
-  pending Reject-bound request on this exact screen, decided both with
-  real attestation comments, and the queue correctly emptied to "No
-  pending closure requests" afterward — not just import/template-compile
-  checks this time.
+  bulk actions, unlike the application queues; live-verification sweep
+  in `IMPLEMENTATION_PLAN.md`'s Phase 18 (P18-8).
 
 ### 3. `customer/` — Customer module
 
@@ -1765,7 +1753,7 @@ domain knowledge."
   parameter (see "Breaking the cycle"); same `WORKER_MODE`
   (`both`/`workflow`/`activity`) and `LOAN_PRODUCT_TYPE` env vars as the
   reference project's `REVIEW_TYPE`, same reasoning. **Gained a second,
-  sibling bootstrap for account closure (built, P18-5)**:
+  sibling bootstrap for account closure**:
   `_build_account_closure_worker`/`run_account_closure_worker`, a
   single non-product-type-keyed `Worker` (no per-product-type fan-out —
   see `task_queue_for_account_closure()`) registering
@@ -1777,18 +1765,13 @@ domain knowledge."
   are built around doesn't apply to a single fixed queue.
   `worker_main.py` (the composition root) `asyncio.gather()`s
   `run_worker(...)` and `run_account_closure_worker(...)` together in
-  one process, one `WORKER_MODE` value governing both. **A real hang
-  found while writing this task's own tests, not a design flaw in the
-  new code itself**: `tests/unit/test_worker_main.py`'s three existing
-  tests only mocked `run_worker`, not the new
-  `run_account_closure_worker` — since `main()` now gathers both, the
-  real (unmocked) `run_account_closure_worker` tried to connect to a
-  real Temporal server and then run its `Worker` forever, hanging every
-  test that calls `worker_main.main()` indefinitely rather than failing
-  fast. Fixed by mocking both in every test — a reminder that
-  `asyncio.gather`ing a new call into an existing composition root's
-  `main()` means every existing test of that `main()` needs updating,
-  not just tests of the new code path.
+  one process, one `WORKER_MODE` value governing both — this is exactly
+  the kind of change (`asyncio.gather`ing a new call into an existing
+  composition root's `main()`) whose test-suite gotcha
+  (`IMPLEMENTATION_PLAN.md`'s Phase 18, P18-5: an unmocked
+  `run_account_closure_worker` hung every existing `worker_main.main()`
+  test indefinitely, since it connects to a real Temporal server) is
+  worth knowing about before touching this file again.
 - **`task_queues.py`** — `KNOWN_PRODUCT_TYPES` + queue naming, the
   canonical registry `application/schemas.py` asserts against at import
   time (see "Breaking the cycle").

@@ -4475,7 +4475,32 @@ is.)*
   and `docs/api-specification.md` were not touched — neither had drifted
   out of sync the way `README.md`/`docs/api-specification.md` had by
   2026-09-04. No `loan_onboarding/` code changed; commit covers docs
-  only.
+  only. **Committed and pushed** (`8867f83`).
+
+  **Follow-up, same session, user asked to continue into "Modules, in
+  detail"**: swept all eight module sections (`bff_customer/` through
+  `risk/`) for the same shape of leftover Phase 18 build-narrative that
+  had already been cut from the standalone "Account closure"/"Real
+  email delivery" sections above but not yet from their duplicate
+  mentions inside the per-module bullets. Found and trimmed three:
+  `bff_customer/`'s account-closure-request/cancel bullet (dropped a
+  "Live-verified end to end over real HTTP..." paragraph, kept the
+  route/gating description, added a pointer to Phase 18/P18-7),
+  `bff_backoffice/`'s Consent-upload and Account-closure-review-queue
+  bullets (same treatment, pointers to the 2026-09-04 entry and
+  P18-8), and `workflow/`'s `worker.py` bullet (cut the ~15-line
+  `run_account_closure_worker` test-hang story down to a two-sentence
+  pointer at P18-5's own DONE note, which already carries the full
+  story verbatim). Read the remaining five module sections
+  (`customer/`, `account/`, `application/`, `document/`, `risk/`) in
+  full and left them alone — their "(Phase 14, built)"/"(built,
+  P18-4)"-style tags and "a real bug/gap found while building this"
+  asides are load-bearing rationale for *why* a signature or module
+  boundary is shaped the way it is, not incident narrative, so cutting
+  them would remove the actual architecture spec `CLAUDE.md` exists to
+  hold rather than de-duplicate it. `CLAUDE.md`: 2,884 → 2,867 lines.
+  Not committed yet this session — the user hadn't asked to commit at
+  the point this entry was written.
 
 - **2026-09-07 (Phase 21 planned)** — User described a future
   enhancement (separate from Phases 18-20's account-closure/notification
