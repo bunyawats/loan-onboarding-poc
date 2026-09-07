@@ -55,13 +55,14 @@ erDiagram
         text applicant_email
         text applicant_phone
         numeric amount "> 0"
-        text status "PENDING_UNDERWRITING | MORE_INFO_REQUESTED | PENDING_MANAGER_APPROVAL | APPROVED | REJECTED | CANCELLED"
+        text status "PENDING_RISK_ASSESSMENT | PENDING_UNDERWRITING | MORE_INFO_REQUESTED | PENDING_MANAGER_APPROVAL | APPROVED | REJECTED | CANCELLED"
         text underwriter_name
         text underwriter_comment
         timestamptz underwriter_decided_at
         text manager_name
         text manager_comment
         timestamptz manager_decided_at
+        text risk_tier "nullable -- LOW | MEDIUM | HIGH; built Phase 21, set only for an auto-decided LOW/HIGH outcome, never for MEDIUM or a human decision"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -121,6 +122,18 @@ erDiagram
   request is still pending. Not flagged anywhere as a gap; noted here
   only because reviewing this diagram against Phase 18's schema change
   is what surfaced it.
+- **`APPLICATIONS.status`'s `PENDING_RISK_ASSESSMENT` value (built,
+  Phase 21) is now every application's real initial status** — no
+  longer an implicit table `DEFAULT`; `application/db.py`'s `insert()`
+  takes an explicit `status` argument (`workflows.py`'s own
+  `self._status`) instead. `APPLICATIONS.risk_tier` is written only for
+  a risk-driven auto-Approve/auto-Reject (`underwriter_name` set to the
+  fixed marker `"risk-engine-auto"` in that case, the one deliberate,
+  documented break of "always an authenticated Keycloak username") —
+  never for `MEDIUM` (a real, minor, accepted gap: the tier that
+  triggered human review isn't retained on the row) and never for a
+  human decision. See `CLAUDE.md`'s "Automated risk assessment via
+  NATS" / the `risk-assessment-nats` skill for the full design.
 - **`ACCOUNTS`'s five `closure_*` columns (built, Phase 18) track at
   most one *current* closure request** — all nullable, all unset until
   a customer first requests closure; a second request after a rejection

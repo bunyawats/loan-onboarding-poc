@@ -1,10 +1,18 @@
 # Research note: NATS.io
 
-Not used anywhere in this codebase today — this is reference material
-from an ad hoc research session (2026-09-06), kept in case a future
-phase considers it. `workflow/` in this project uses Temporal for
-orchestration, not a message broker; nothing here proposes replacing
-that.
+This started as reference material from an ad hoc research session
+(2026-09-06), from before NATS had a real use in this codebase.
+**Since Phase 21 (built and live-verified)**, NATS is real and running
+— but confined entirely to one standalone service, the NATS Adapter
+(`risk-adapter`), which is the *only* thing anywhere in this system
+that depends on the NATS protocol; see `CLAUDE.md`'s "Automated risk
+assessment via NATS" / the `risk-assessment-nats` skill for the
+authoritative design. `workflow/` in this project still uses Temporal
+for orchestration, not a message broker, and nothing shipped here
+replaces that — NATS carries the risk-assessment submission/decision
+legs specifically, a genuinely different concern. The general research
+below (what NATS is, how it compares to Kafka/RabbitMQ) still stands as
+background.
 
 ## What it is
 
@@ -45,11 +53,13 @@ Rough consensus: Kafka for high-throughput event streaming/analytics,
 RabbitMQ for complex routing at moderate scale, NATS when simplicity
 and low latency matter most.
 
-## Where this could matter for this project, if ever revisited
+## Where this could matter for this project, if ever revisited further
 
-Purely speculative, not scoped or decided — listed only because they're
-the two places this codebase currently does the kind of thing NATS is
-good at:
+**One of these two speculative ideas below already became real** (see
+the note at the top) — the risk-assessment use case isn't listed here
+again since it's no longer speculative. The remaining two are still
+purely speculative, not scoped or decided, listed only because they're
+places this codebase does the kind of thing NATS is good at:
 
 - `notifications/service.py`'s fake/real (Phase 20) email delivery is
   a single fire-and-forget send with no queueing — a real notification

@@ -13,11 +13,10 @@ file previously drifted from the shipped contracts more than once (see
 "Status" at the bottom), so this pass re-derived everything directly
 from source rather than from the architecture doc's descriptions of it.
 
-If any of the seven built modules (plus the planned eighth, `risk/`)
-is ever extracted into a real network service later (`CLAUDE.md`'s
-"Known gaps" already anticipates this), these signatures become the
-new HTTP contract more or less directly — another reason to keep them
-accurate.
+If any of the eight built modules is ever extracted into a real network
+service later (`CLAUDE.md`'s "Known gaps" already anticipates this),
+these signatures become the new HTTP contract more or less directly —
+another reason to keep them accurate.
 
 **Read `CLAUDE.md`'s "Applying without being a customer yet" section
 first** — the account-on-approval model (most applicants aren't
@@ -49,9 +48,14 @@ Conventions used below:
   and `notifications.service.send_welcome_letter_email`/
   `send_account_closure_decision` take `amount`/money fields as `str`
   (they only ever interpolate it into rendered text, never do
-  arithmetic on it). If this ever needs fixing for real precision
-  reasons, it's a `workflow/`/`document/`/`notifications/`-side change,
-  not an `application/`-side one.
+  arithmetic on it). `risk.service.submit_risk_assessment` (built,
+  Phase 21) sits back on the `Decimal` side — `application/activities.py`'s
+  `submit_risk_assessment` activity converts the `float` it received
+  over the wire back to `Decimal(str(...))` before calling it, same
+  precision-safe conversion `persist_application` already uses. If this
+  ever needs fixing for real precision reasons, it's a
+  `workflow/`/`document/`/`notifications/`-side change, not an
+  `application/`- or `risk/`-side one.
 - Every dataclass shown is copied from the module's own `models.py` (or
   `workflows.py` for the two Temporal activity-input dataclasses) —
   `frozen=True` unless noted.
@@ -802,20 +806,42 @@ class ApplicationPage:
 Not called directly by any BFF — invoked by `workflow/workflows.py`
 **by string name** (see `CLAUDE.md`'s "Breaking the cycle"). **This is
 also the one file in `application/` allowed to import `customer/`,
-`account/`, and (for one call only) `notifications/`** — see
-`CLAUDE.md`'s "Applying without being a customer yet".
+`account/`, and (for one call each) `notifications/` and `risk/`** —
+see `CLAUDE.md`'s "Applying without being a customer yet" and
+"Automated risk assessment via NATS".
 
 ```python
 @activity.defn
 async def persist_application(inp: PersistApplicationInput) -> None: ...
-    # INSERTs the applications row -- first step of run().
+    # INSERTs the applications row -- first step of run(). Writes
+    # inp.initial_status verbatim (PENDING_RISK_ASSESSMENT, per Phase
+    # 21) -- no longer an implicit database DEFAULT.
+
+@activity.defn
+async def submit_risk_assessment(inp: SubmitRiskAssessmentInput) -> None: ...
+    # built, Phase 21. Calls risk.service.submit_risk_assessment(...) --
+    # a plain httpx POST, no NATS here. Second step of run(), right
+    # after persist_application. Raises (retrying the activity) on
+    # failure, unlike the best-effort notification calls inside
+    # persist_decision below -- nothing else will ever move the
+    # application out of PENDING_RISK_ASSESSMENT if this never lands.
 
 @activity.defn
 async def persist_decision(inp: PersistDecisionInput) -> str: ...
     # returns the status ACTUALLY written -- see the conflict-to-
-    # REJECTED note below. workflows.py's submit_decision uses this
+    # REJECTED note below. workflows.py's submit_decision (and, since
+    # Phase 21, signal_risk_decision's terminal branch) uses this
     # return value (not its own pre-computed resulting_status) for
     # self._status.
+
+@activity.defn
+async def persist_risk_assessment_cleared(inp: PersistRiskAssessmentClearedInput) -> None: ...
+    # built, Phase 21. The MEDIUM-tier outcome only: a plain status
+    # flip out of PENDING_RISK_ASSESSMENT into PENDING_UNDERWRITING --
+    # no actor/decision/comment, no risk_tier write. A dedicated,
+    # minimal activity rather than routing this through
+    # persist_decision, which has no column slot for "no decision was
+    # made."
 
 @activity.defn
 async def persist_resubmit(inp: PersistResubmitInput) -> None: ...
@@ -835,6 +861,15 @@ class PersistApplicationInput:
     applicant_email: str
     applicant_phone: str
     customer_id: str | None = None
+    initial_status: str = STATUS_PENDING_RISK_ASSESSMENT  # built, Phase 21
+
+@dataclass
+class SubmitRiskAssessmentInput:  # built, Phase 21
+    application_id: str
+    applicant_identifier: str
+    product_type: str
+    amount: float
+    payload: dict[str, Any]
 
 @dataclass
 class PersistDecisionInput:
@@ -845,6 +880,13 @@ class PersistDecisionInput:
     comment: str
     resulting_status: str
     decided_at: datetime | None = None  # set only for a native Temporal cancel
+    risk_tier: str | None = None  # built, Phase 21 -- set only for a
+                                   # risk-driven auto-decision (LOW/HIGH),
+                                   # never for a human decision or MEDIUM
+
+@dataclass
+class PersistRiskAssessmentClearedInput:  # built, Phase 21
+    application_id: str
 
 @dataclass
 class PersistResubmitInput:
@@ -852,16 +894,21 @@ class PersistResubmitInput:
     payload: dict[str, Any]
 ```
 
-`persist_decision` handles all four decision outcomes
-(APPROVE/REJECT/REQUEST_MORE_INFO/CANCELLED) in one activity, writing
+`persist_decision` handles all four human decision outcomes
+(APPROVE/REJECT/REQUEST_MORE_INFO/CANCELLED) **and** (built, Phase 21)
+a risk-driven auto-Approve/auto-Reject, in one activity, writing
 `underwriter_name`/`underwriter_comment`/`underwriter_decided_at` or
 `manager_name`/`manager_comment`/`manager_decided_at` depending on
 `actor_role` — same activity, column choice branches on the argument.
+For a risk-driven decision, `workflows.py`'s `signal_risk_decision`
+passes `actor_role="underwriter"`, `actor_name="risk-engine-auto"` (the
+one deliberate, documented break of "always an authenticated Keycloak
+username"), and `risk_tier` set to the decided tier.
 
 **When `resulting_status == "APPROVED"`** (a terminal approval — the
-Underwriter's below-threshold approve, or the Manager's approve after
-escalation; *not* the intermediate `PENDING_MANAGER_APPROVAL` step),
-`persist_decision` additionally:
+Underwriter's below-threshold approve, the Manager's approve after
+escalation, or a risk-driven `LOW` auto-approve; *not* the intermediate
+`PENDING_MANAGER_APPROVAL` step), `persist_decision` additionally:
 
 1. Calls `account.service.get_by_application_id(application_id)`. A
    non-`None` result means this is a Temporal retry of an
@@ -884,26 +931,24 @@ escalation; *not* the intermediate `PENDING_MANAGER_APPROVAL` step),
    `notifications.service.send_welcome_letter_email(...)` (the fourth
    call, built Phase 19) — all four skipped, permanently, on a retry
    that finds the account already provisioned (step 1).
-5. Writes `status`, the decision columns, and `customer_id` (`COALESCE`d
-   — harmless if already set). There is no `account_id` column on
-   `applications` to write.
+5. Writes `status`, the decision columns, `customer_id`, and (built,
+   Phase 21) `risk_tier` (`COALESCE`d — harmless if already set, and
+   `None` for every human decision, which leaves the column untouched).
+   There is no `account_id` column on `applications` to write.
 
 ---
 
-## `risk/service.py` (planned — Phase 21, not yet built)
+## `risk/service.py` (built and live-verified — Phase 21)
 
-**Nothing in this section exists in the codebase today** — no
-`loan_onboarding/risk/` package. Included here, clearly marked, because
-it's the target contract for this design. See `CLAUDE.md`'s "Automated
-risk assessment via NATS" and `PRD.md` §6.7 for the full design.
+See `CLAUDE.md`'s "Automated risk assessment via NATS" / the
+`risk-assessment-nats` skill and `PRD.md` §6.7 for the full design.
 
-**Revised after a follow-up decision**: this module has **no NATS
-dependency at all** — all NATS connectivity moved to a new, separately
-deployed service, the NATS Adapter (`risk-adapter`, outside the
-`loan_onboarding` package entirely, so it has no `service.py` contract
-of its own to document here — see its four responsibilities in
-`CLAUDE.md`). `risk/service.py` is now the thinnest module in the
-codebase: one function, one plain HTTP call.
+This module has **no NATS dependency at all** — all NATS connectivity
+lives in a separately deployed service, the NATS Adapter (`risk-adapter`,
+outside the `loan_onboarding` package entirely, so it has no
+`service.py` contract of its own to document here — see its four
+responsibilities in `CLAUDE.md`). `risk/service.py` is the thinnest
+module in the codebase: one function, one plain HTTP call.
 
 ```python
 async def submit_risk_assessment(
@@ -914,36 +959,60 @@ async def submit_risk_assessment(
     payload: dict[str, Any],
 ) -> None: ...
     # a plain httpx.post(...) to RISK_ADAPTER_URL's POST /assessments --
-    # not a NATS publish. Called only from a new
-    # application/activities.py activity, submit_risk_assessment, by
+    # not a NATS publish. Called only from
+    # application/activities.py's submit_risk_assessment activity, by
     # the workflow's own execute_activity(...)-by-name call -- same
     # "activities.py is where outbound calls to leaf integration
     # modules happen" pattern document/workflow/notifications already
-    # follow.
+    # follow. Raises on any non-2xx response or transport failure
+    # (retrying the activity), unlike the best-effort notification
+    # calls elsewhere in this codebase.
 ```
 
-Also planned: a new `workflow.service.signal_risk_decision(client,
-workflow_id, risk_tier)` signal (exact signature not yet pinned down
-against real code — `risk/`/`workflow/` don't exist to write against
-yet) — but note it's **not** the NATS Adapter calling this function
-directly (the Adapter isn't part of this package and can't import
-`workflow.service`). The Adapter instead computes the deterministic
-`loan-application-<application_id>` workflow id itself and sends the
-signal via its own independent `temporalio.client.Client` connection —
-the same standard, client-authorized action `bff_backoffice`'s decision
-routes already perform, just from a different process. This function's
-real callers, once built, are anything already inside the `loan_onboarding`
-process that needs to send this signal (none currently planned) — its
-signature exists here mainly as the documented "shape" the Adapter's
-own direct-Temporal-client call mirrors, not because the Adapter calls
-it.
+**Corrected from an earlier draft of this section, which described a
+`workflow.service.signal_risk_decision(client, workflow_id, risk_tier)`
+function that was never built and never needed to be**: the actual
+risk-decision signal is a **workflow-level `@workflow.signal` method**
+on `LoanApplicationWorkflow` itself
+(`workflow/workflows.py`'s `signal_risk_decision(self, risk_tier: str) -> None`),
+not a `workflow/service.py` wrapper function. `risk-adapter` (which
+isn't part of this package and can't import `workflow.service` even if
+one existed) sends it by computing the deterministic
+`loan-application-<application_id>` workflow id itself and calling
+`handle.signal("signal_risk_decision", risk_tier)` via its own
+independent `temporalio.client.Client` — a signal *by name*, the same
+mechanism every activity in this codebase is already called by name
+rather than by import (`CLAUDE.md`'s "Breaking the application ↔
+workflow cycle"). **This is the one signal in the whole codebase with
+no `workflow/service.py` wrapper** — every other signal
+(`signal_decision`/`signal_resubmit`/the `CloseAccountWorkflow` pair)
+is sent through a `workflow/service.py` function a BFF route calls;
+this one is sent directly by an external service, so there was never a
+caller inside this package that would need such a wrapper.
 
-**KrakenD is decided, not a candidate** — it fronts the NATS Adapter ↔
-Risk Engine boundary, both directions (see `CLAUDE.md`, and
-`docs/research-krakend.md` for the full reasoning). This doesn't change
-`risk/service.py`'s own signature at all; the gateway sits entirely
-between the Adapter and the Risk Engine, two steps removed from
-anything in this package.
+Internally, `signal_risk_decision` routes `LOW`/`HIGH` through the same
+`persist_decision` activity a human Approve/Reject already uses
+(`actor_role="underwriter"`, `actor_name="risk-engine-auto"`,
+`risk_tier` set) and `MEDIUM` through the new
+`persist_risk_assessment_cleared` activity — see the
+`application/activities.py` section above and
+`docs/diagrams/loan-workflow-state-machine.md` for the full state
+diagram.
+
+**KrakenD fronts the NATS Adapter ↔ Risk Engine boundary, both
+directions** (see `CLAUDE.md`, and `docs/research-krakend.md` for the
+full reasoning). This doesn't change `risk/service.py`'s own signature
+at all; the gateway sits entirely between the Adapter and the Risk
+Engine, two steps removed from anything in this package.
+
+**Live-verified end to end through the real customer UI**: three real
+applications (one per amount bucket) submitted via a real browser
+session each resolved correctly through the complete chain
+(`risk/service.submit_risk_assessment` → `risk-adapter` → `nats` →
+`risk-adapter`'s own subscriber → KrakenD → `mock-risk-engine`'s real
+amount-bucketing → KrakenD → `risk-adapter`'s `/decisions` webhook →
+`nats` → `risk-adapter`'s decision subscriber → a real
+`signal_risk_decision` call).
 
 ---
 
@@ -964,12 +1033,13 @@ here — see `CLAUDE.md` for the full detection/fix logic.
 
 Every signature above was re-derived directly from the real code in
 `loan_onboarding/` (not from `CLAUDE.md`'s prose) as of the codebase
-built through **Phase 20** (Gmail SMTP), plus the **planned, not yet
-built** Phase 21 (`risk/`) design included for completeness and clearly
-marked. This file previously described the codebase only through
-Phase 16 and had drifted from the real, shipped contracts in more ways
-than just missing Phases 17-20 — several real discrepancies were found
-and fixed in this pass, not just additions:
+built through **Phase 21** (automated risk assessment via NATS, all ten
+tasks done and live-verified — `risk/` is a real, shipped module, not a
+target contract anymore). This file previously described the codebase
+only through Phase 16 and had drifted from the real, shipped contracts
+in more ways than just missing later phases — several real
+discrepancies were found and fixed across two passes, not just
+additions:
 
 - `document.service`'s `DocumentRef.document_id` is `int`, not `str`;
   `DocumentRef` has no `uploaded_at` field; `upload()`/`upload_consent()`
@@ -987,6 +1057,17 @@ and fixed in this pass, not just additions:
 - Every Temporal activity (`application/activities.py`,
   `account/activities.py`) takes one dataclass argument (`inp: ...Input`),
   not a flat parameter list.
+- **A real discrepancy found while updating this file for Phase 21,
+  not just a stale-status label**: an earlier draft of this file's
+  `risk/service.py` section described a planned
+  `workflow.service.signal_risk_decision(client, workflow_id, risk_tier)`
+  function. The actual shipped design never built one and never needed
+  to — `signal_risk_decision` is a `@workflow.signal` method on
+  `LoanApplicationWorkflow` itself, sent by name via a direct
+  `temporalio.client.Client` call from the standalone `risk-adapter`
+  service, exactly like every activity in this codebase is already
+  called by name rather than by import. Corrected in place in that
+  section, not just re-marked "built."
 
 If a future session changes any of these signatures, update this file
 in the same commit — don't let it drift again. If in doubt, grep the

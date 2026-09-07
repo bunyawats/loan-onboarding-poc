@@ -4,10 +4,9 @@ Source of truth: `CLAUDE.md`'s "Module dependency graph" (the ASCII
 version, with the exact per-module rules). This is the same graph,
 rendered — useful to check "is this import allowed?" at a glance
 without parsing the ASCII art. **Read direction: `A --> B` means "A
-imports B."** A dashed arrow marks either a narrow, deliberate
-exception to the otherwise-strict layering, or an edge that only
-exists once Phase 21 (planned, not yet built — dotted node border)
-ships.
+imports B."** A dashed arrow marks a narrow, deliberate exception to
+the otherwise-strict layering — a file-level distinction (e.g.
+`activities.py` only) rather than a whole-module one.
 
 ```mermaid
 graph TD
@@ -26,7 +25,7 @@ graph TD
     workflow["workflow/"]
     idgen["idgen/"]
     notifications["notifications/"]
-    risk["risk/ (planned, Phase 21 --<br/>an httpx call, no NATS here)"]
+    risk["risk/ (built, Phase 21 --<br/>an httpx call, no NATS here)"]
 
     appPy --> bffCustomer
     appPy --> bffBackoffice
@@ -59,7 +58,7 @@ graph TD
     application -->|"service.py + activities.py"| document
     application -->|"service.py + activities.py"| workflow
     application -.->|"activities.py ONLY: send_welcome_letter_email"| notifications
-    application -.->|"planned, Phase 21: submit_risk_assessment"| risk
+    application -.->|"activities.py ONLY: submit_risk_assessment (Phase 21)"| risk
     application --> idgen
 
     account -.->|"start/signal CloseAccountWorkflow"| workflow
@@ -67,8 +66,6 @@ graph TD
 
     customer --> idgen
     account --> idgen
-
-    style risk stroke-dasharray: 5 5
 ```
 
 ## Reading this diagram
@@ -81,14 +78,13 @@ graph TD
   18, P18-2) is the same "zero dependency on anything else in this
   codebase" shape as `idgen/`, promoted out of `bff_customer/` so a
   Temporal *activity* (not just a BFF route handler) can send an email.
-- **`risk/` (planned, Phase 21, dotted border) is a leaf, but not a NATS
-  client** — no outgoing arrows, and (revised after a follow-up design
-  decision) no NATS dependency either: `service.submit_risk_assessment`
-  is a plain `httpx` call to a new, separately-deployed NATS Adapter
-  service (`risk-adapter` — not part of this diagram, since it's
-  outside the `loan_onboarding` package entirely, same treatment
-  `mock_risk_engine/` already gets). Not built yet; included here so the
-  target shape is visible alongside what's actually running today.
+- **`risk/` (built, Phase 21) is a leaf, but not a NATS client** — no
+  outgoing arrows, and (per a design decision made before it was built)
+  no NATS dependency either: `service.submit_risk_assessment` is a
+  plain `httpx` call to a separately-deployed NATS Adapter service
+  (`risk-adapter` — not part of this diagram, since it's outside the
+  `loan_onboarding` package entirely, same treatment `mock_risk_engine/`
+  already gets).
 - **`customer/` and `account/` both have an edge to `idgen/`, for
   primary-key generation — but `account/` is no longer a pure leaf**
   (built, Phase 18 P18-4): it also has dashed edges to `workflow/` (to
@@ -98,7 +94,7 @@ graph TD
   exactly the one edge, to `idgen/`, and nothing else.
 - **The dashed arrows are the whole point of this diagram** — narrow,
   deliberate exceptions to the otherwise-strict layering, not sloppy
-  edges. Three shapes of dashed edge appear:
+  edges. Two shapes of dashed edge appear:
   1. **File-level, not module-level**: `application/` has *both* a
      solid and a dashed edge into `customer/`/`account/` — the solid
      edge is `application/service.py`'s **read-only** calls
@@ -112,12 +108,12 @@ graph TD
   2. **`activities.py`-only exceptions to reach a leaf a module's
      `service.py` has no other reason to import**: `application/` →
      `notifications/` (built, Phase 19 — only for the Welcome Letter
-     email) and `account/` → `notifications/` (built, Phase 18). Same
-     shape, same reasoning, two separate call sites.
-  3. **Planned, not yet built (Phase 21)**: `application/` → `risk/`
-     (`submit_risk_assessment`). Renders dashed purely because it
-     doesn't exist in the codebase yet, not because it's a narrow
-     exception the way (1) and (2) are.
+     email), `account/` → `notifications/` (built, Phase 18), and
+     `application/` → `risk/` (built, Phase 21 — only for
+     `submit_risk_assessment`). Same shape, same reasoning, three
+     separate call sites — none of `application/service.py`,
+     `account/service.py` needs `notifications/`, and nothing in
+     `application/service.py` needs `risk/` either.
 - **`bff_customer/` and `bff_backoffice/` never import each other** —
   no arrow between them, and neither is a source for the other. Both
   feed into `app.py` (the web process's composition root), not into

@@ -6,14 +6,13 @@ one Docker image, multiple running processes, several third-party
 containers. For the *code-module* view (which Python package imports
 which), see [`application-modules.md`](application-modules.md).
 
-**Two build statuses appear in this diagram**: solid boxes/arrows are
-**built and live-verified**; the dashed `riskPlanned` subgraph (Phase
-21) is **planned, not yet built** — `nats`/`mock-risk-engine`/
-`risk-adapter`/`krakend` don't exist as running containers today.
-Everything inside that subgraph, including KrakenD, is a **decided**
-part of the target design (confirmed with the user), not a candidate —
-see `CLAUDE.md`'s "Automated risk assessment via NATS" for the full
-reasoning, and `docs/research-krakend.md` for the general KrakenD
+**Everything in this diagram is built and live-verified**, including
+the `risk` subgraph (Phase 21) — `nats`/`mock-risk-engine`/
+`risk-adapter`/`krakend` are real running containers, exercised end to
+end through the actual customer UI (three real applications, one per
+amount bucket, each resolving correctly). See `CLAUDE.md`'s "Automated
+risk assessment via NATS" / the `risk-assessment-nats` skill for the
+full reasoning, and `docs/research-krakend.md` for the general KrakenD
 research that led here.
 
 ```mermaid
@@ -71,25 +70,23 @@ graph TB
     mayan --> mayanDb
     mayan --> mayanRedis
 
-    subgraph riskPlanned["Planned -- Phase 21, not yet built (all decided, none running today)"]
+    subgraph risk["Automated risk assessment (built, Phase 21)"]
         nats[("nats<br/>(core pub/sub)")]
         riskAdapter["risk-adapter<br/>(the NATS Adapter --<br/>sole owner of NATS in<br/>this whole system)"]
         krakend{{"krakend<br/>(fronts the Risk-Engine<br/>boundary, both directions --<br/>plain HTTP proxy only,<br/>no NATS backend)"}}
         mockRisk["mock-risk-engine<br/>(HTTP-only -- POST /assess in,<br/>POST /decisions webhook out --<br/>never touches NATS)"]
     end
 
-    workerActivity -.->|"risk.service.submit_risk_assessment<br/>(plain httpx POST /assessments)"| riskAdapter
-    riskAdapter -.->|"publish: risk.assessment.submitted"| nats
-    nats -.->|"subscribe (Adapter's own loop)"| riskAdapter
-    riskAdapter -.->|"POST /assess"| krakend
-    krakend -.-> mockRisk
-    mockRisk -.->|"POST /decisions (webhook)"| krakend
-    krakend -.-> riskAdapter
-    riskAdapter -.->|"publish: risk.assessment.decided"| nats
-    nats -.->|"subscribe (Adapter's own loop)"| riskAdapter
-    riskAdapter -.->|"signal_risk_decision<br/>(direct Temporal client,<br/>deterministic workflow_id)"| temporalServer
-
-    style riskPlanned stroke-dasharray: 5 5
+    workerActivity -->|"risk.service.submit_risk_assessment<br/>(plain httpx POST /assessments)"| riskAdapter
+    riskAdapter -->|"publish: risk.assessment.submitted"| nats
+    nats -->|"subscribe (Adapter's own loop)"| riskAdapter
+    riskAdapter -->|"POST /assess"| krakend
+    krakend --> mockRisk
+    mockRisk -->|"POST /decisions (webhook)"| krakend
+    krakend --> riskAdapter
+    riskAdapter -->|"publish: risk.assessment.decided"| nats
+    nats -->|"subscribe (Adapter's own loop)"| riskAdapter
+    riskAdapter -->|"signal_risk_decision<br/>(direct Temporal client,<br/>deterministic workflow_id)"| temporalServer
 ```
 
 ## Reading this diagram

@@ -1,15 +1,19 @@
 # Research note: KrakenD
 
-Not used anywhere in this codebase today — this started as reference
-material from an ad hoc research session (2026-09-07). **Superseded by
-a real decision later the same day**: KrakenD is now the chosen gateway
-for Phase 21's Risk-Engine boundary, alongside a new standalone NATS
-Adapter service — see `CLAUDE.md`'s "Automated risk assessment via
-NATS" for the authoritative, current design. This file's general
-KrakenD research (below) still stands; its own speculative topology
-sketch has been updated to show the decided shape instead of the three
-options it originally weighed, since the decision it was weighing has
-now been made.
+This started as reference material from an ad hoc research session
+(2026-09-07), superseded the same day by a real decision, and **built
+and live-verified as of Phase 21 (all ten tasks done)**: KrakenD is the
+real, running gateway fronting Phase 21's Risk-Engine boundary
+(`krakend/krakend.json`, a plain HTTP↔HTTP reverse-proxy — its own NATS
+pub/sub backend feature, discussed below, was deliberately never used),
+alongside the standalone NATS Adapter service (`risk-adapter`) — see
+`CLAUDE.md`'s "Automated risk assessment via NATS" / the
+`risk-assessment-nats` skill for the authoritative, current design and
+the real KrakenD gotcha found while wiring it up (a `202` response is
+rejected by default; fixed with `"encoding": "no-op"`). This file's
+general KrakenD research (below) still stands as background; its own
+topology sketch shows the shape that actually shipped, not a
+speculative option.
 
 ## What it is
 
@@ -67,7 +71,7 @@ never needs a NATS dependency. Known limitation of this feature, for
 whenever it *is* the right fit elsewhere: NATS subjects don't support
 query-parameter-style config the way some other KrakenD backends do.
 
-## The decided topology (not speculative anymore)
+## The built topology (decided, then shipped)
 
 This section originally sketched three options for fitting KrakenD into
 Phase 21, unresolved, because at the time it was written the design had
