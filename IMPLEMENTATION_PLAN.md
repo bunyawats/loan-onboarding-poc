@@ -4431,6 +4431,52 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-07 (docs consolidation, round 2)** — User asked to offload
+  `CLAUDE.md` context to a more dedicated document again — the same
+  request as the 2026-09-04 "(docs consolidation)" entry below, this
+  time covering Phases 18-20, which were built after that earlier pass
+  and had re-accumulated the same shape of bloat: full "built and
+  live-verified" narrative (task-by-task build history, live-
+  verification sweeps, root-cause writeups for bugs found along the
+  way) sitting directly in `CLAUDE.md`'s architecture prose instead of
+  in this file, where the same material already lives in full. Unlike
+  2026-09-04's pass, **nothing needed relocating this time** — every
+  paragraph trimmed from `CLAUDE.md`'s "Account closure" and "Real
+  email delivery via Gmail SMTP" sections was already fully present,
+  often near-verbatim, in this file's own Phase 18/20 task `DONE:`
+  notes and Session Log entries (confirmed by grep before cutting
+  anything, e.g. the `KeyError: 'closure_workflow_id'` and dockerized-
+  worker-race narratives both already at P18's/P19's own Session Log
+  entries below). Trimmed:
+  - "Account closure" (Phase 18) — cut the per-bullet "(built, P18-4)"-
+    style build-progress annotations and the P18-8 live-verification
+    paragraph; kept the state-machine/module-boundary architecture
+    description itself, since that's `CLAUDE.md`'s actual job.
+  - "Real email delivery via Gmail SMTP" (Phase 20) — cut the ~30-line
+    "Live-verified, P20-3" paragraph (the two real bugs found — Docker
+    stdout buffering, the `confirm()`-dialog browser-automation hang —
+    and the delivery-confirmation sweep) down to a one-line pointer at
+    this file's Phase 20 section.
+  - "Known gaps" — the three still-narrative bullets that predated
+    2026-09-04's own pass (`docker compose up -d` not rebuilding
+    images, no schema-migration tooling, the local/dockerized worker
+    race) each had their repro narrative cut down to the one-line
+    operating rule plus a pointer, matching the shape 2026-09-04
+    already gave every other bullet in this section.
+  - Left "Automated risk assessment via NATS" (Phase 21) untouched —
+    it's un-built design, not build narrative; `CLAUDE.md` is the
+    correct, primary home for it (this file's own Phase 21 section
+    already points back to `CLAUDE.md` for the full design, not the
+    other way around), so there was nothing here to consolidate away
+    from it.
+  `CLAUDE.md` went from 3,043 to 2,884 lines (~5%) — a smaller cut than
+  2026-09-04's, since this pass only had three sections' worth of
+  reaccumulated bloat to remove rather than the whole file's. `PRD.md`
+  and `docs/api-specification.md` were not touched — neither had drifted
+  out of sync the way `README.md`/`docs/api-specification.md` had by
+  2026-09-04. No `loan_onboarding/` code changed; commit covers docs
+  only.
+
 - **2026-09-07 (Phase 21 planned)** — User described a future
   enhancement (separate from Phases 18-20's account-closure/notification
   work, done in an earlier session that day): simulate a genuinely

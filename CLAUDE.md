@@ -628,27 +628,18 @@ re-uploading a Government ID they already have on file.
 
 ### Account closure (built and live-verified — Phase 18)
 
-This section originally described the target design for
-`IMPLEMENTATION_PLAN.md`'s Phase 18, written first per this project's
-own convention, before any of it was implemented. **All eight tasks
-(P18-1 through P18-8) are now built and live-verified against the real
-stack** — every "planned"/"not yet built" marker below that hasn't
-already been corrected in place describes a real implementation detail,
-not a future intention; see `IMPLEMENTATION_PLAN.md`'s own Phase 18
-section and Session Log for the full build history, and P18-8's own
-entry for the final end-to-end sweep (a real Keycloak-authenticated
-staff session approving one closure, rejecting another, and a customer
-cancelling a third — all three outcomes, plus the product-picker
-payoff, confirmed against the real Postgres/Temporal/Keycloak/Mayan
-stack, not `WorkflowEnvironment` fakes). Raised directly by the user as
-the natural follow-up to the product-picker's hard elimination (see
+Built and live-verified against the real stack (P18-1 through P18-8) —
+full build history, task-by-task DONE notes, and the final end-to-end
+staff/customer verification sweep live in `IMPLEMENTATION_PLAN.md`'s
+Phase 18 section and Session Log, not here. Raised directly by the user
+as the natural follow-up to the product-picker's hard elimination (see
 "Modules, in detail" → `application/`'s `get_available_product_types`):
-once that shipped, a customer approved for a product type can never
-apply for that type again, because nothing in this codebase can ever
+once that shipped, a customer approved for a product type could never
+apply for that type again, because nothing in this codebase could ever
 move an `accounts.status` row from `ACTIVE` back to `CLOSED`. Three
-scoping decisions were confirmed with the user before any design work
-below: (1) balance verification is a **staff attestation** (a comment
-field staff fills in confirming the balance is zero), not a real ledger
+scoping decisions were confirmed with the user before any design work:
+(1) balance verification is a **staff attestation** (a comment field
+staff fills in confirming the balance is zero), not a real ledger
 computation — this POC has no ledger at all, consistent with PRD §4's
 disbursement/servicing non-goal; (2) the closure-decision email is a
 **narrow, deliberate reversal** of PRD §4's "no proactive notification"
@@ -662,235 +653,121 @@ escalate on for a closure, unlike the loan-approval threshold).
   entity.** `ACTIVE` → (customer requests) → `CLOSURE_REQUESTED` →
   (staff decides) → `CLOSED` (approved) or back to `ACTIVE` (rejected —
   a closure request has no terminal "rejected" status of its own; the
-  account simply resumes being usable). The customer may also
-  `CANCEL` their own still-`CLOSURE_REQUESTED` request back to
-  `ACTIVE`, same shape as an application's existing Cancel action.
-  New nullable `accounts` columns: `closure_workflow_id`,
-  `closure_requested_at`, `closure_decision_comment` (the staff
-  attestation text), `closure_decided_by`, `closure_decided_at`. Only
-  the *current* request's data is kept — like `applications`' own
-  decision columns, a second request after a rejection overwrites these
-  rather than preserving history, an accepted POC-scale simplification
-  consistent with this project's existing stance elsewhere in this
-  file.
-- **A second Temporal workflow, `CloseAccountWorkflow`, in
-  `workflow/workflows.py` alongside `LoanApplicationWorkflow` (built,
-  P18-3)** — same "generic orchestration, concrete activities live in
-  the owning domain module" split `application/`/`workflow/` already
-  established (see "Breaking the application ↔ workflow cycle"). A
-  single dedicated task queue (`task_queue_for_account_closure()`, not
-  product-type-keyed — closure review doesn't vary by product the way
-  underwriting does), registered in `worker_main.py` alongside the
-  existing per-product-type workers (built, P18-5 — see `workflow/`'s
-  own module section's `worker.py` bullet below). One execution per
-  closure *request*, not per account — a rejected or
-  customer-cancelled request always reverts the account to `ACTIVE` and
-  that execution then completes; a later request against the same
-  account starts a brand-new execution (safe because
-  `account.service.request_closure()`, P18-4, will only ever be
-  reachable while the account is `ACTIVE`, so there's never a live
-  `CloseAccountWorkflow` to collide with — `workflow/service.py`'s
-  `start_close_account_workflow` uses a deterministic
-  `account-closure-<account_id>` workflow id on that assumption, same
-  reasoning `_workflow_id_for_application` already uses for loan
-  applications). Reuses `LoanApplicationWorkflow`'s own
-  `ROLE_UNDERWRITER`/`ROLE_MANAGER`/`DECISION_APPROVE`/`DECISION_REJECT`/
-  `DECISION_CANCELLED` constants rather than a parallel taxonomy — same
-  actors, same decision vocabulary. Two signals: `submit_decision(actor_role,
-  decision, actor_name, comment)` (staff only — `actor_role` must be
-  `underwriter` or `manager`, enforced both inside the workflow's own
-  `_resolve_decision` and again in `workflow/service.py`'s
-  `signal_close_account_decision` before the signal is ever sent) and a
-  no-argument `cancel()` the customer can send while still
-  `CLOSURE_REQUESTED` (a no-op once already decided — enforced by the
-  same synchronous `_claim_transition()` single-writer guard
-  `LoanApplicationWorkflow` uses, so a decision racing a cancel only
-  ever writes once). Calls `persist_closure_request`/
+  account simply resumes being usable). The customer may also `CANCEL`
+  their own still-`CLOSURE_REQUESTED` request back to `ACTIVE`, same
+  shape as an application's existing Cancel action. New nullable
+  `accounts` columns: `closure_workflow_id`, `closure_requested_at`,
+  `closure_decision_comment` (the staff attestation text),
+  `closure_decided_by`, `closure_decided_at` — only the *current*
+  request's data is kept, same "a later request overwrites rather than
+  preserves history" simplification `applications`' own decision
+  columns already use.
+- **A second Temporal workflow, `CloseAccountWorkflow`**, in
+  `workflow/workflows.py` alongside `LoanApplicationWorkflow` — same
+  "generic orchestration, concrete activities live in the owning domain
+  module" split `application/`/`workflow/` already established (see
+  "Breaking the application ↔ workflow cycle"). A single dedicated task
+  queue (`task_queue_for_account_closure()`, not product-type-keyed —
+  closure review doesn't vary by product), registered in
+  `worker_main.py` alongside the per-product-type workers. One
+  execution per closure *request*, not per account — a rejected or
+  customer-cancelled request reverts the account to `ACTIVE` and
+  completes; a later request starts a brand-new execution under the
+  same deterministic `account-closure-<account_id>` workflow id (safe
+  because `request_closure` is only reachable while `ACTIVE`, so
+  there's never a live execution to collide with). Reuses
+  `LoanApplicationWorkflow`'s own role/decision constants rather than a
+  parallel taxonomy. Two signals: `submit_decision(actor_role,
+  decision, actor_name, comment)` (staff only) and a no-argument
+  `cancel()` the customer can send while still `CLOSURE_REQUESTED`,
+  guarded by the same synchronous `_claim_transition()` single-writer
+  pattern `LoanApplicationWorkflow` uses. Calls `persist_closure_request`/
   `persist_closure_decision` by string name, exactly like
-  `LoanApplicationWorkflow` calls `persist_application`/
-  `persist_decision` — the concrete `account/activities.py`
-  implementations were built in P18-4 (see `account/`'s own module
-  section below);
-  `tests/unit/workflow/test_workflows.py` covers all three outcomes
-  (approve, reject-reverts-to-`ACTIVE`, customer-cancel) against small
-  fake activities registered under those same string names, the same
-  "doesn't depend on the real activities existing first" property
-  `LoanApplicationWorkflow`'s own tests already rely on.
-- **`account/` stops being a leaf module (built, P18-4) — a real,
-  deliberate change to the dependency graph, not an oversight.** Today's
-  rule ("`customer/` and `account/` never import anything else in this
-  codebase, with one exception: `idgen/`") gained a second exception for
-  `account/` only: `workflow/` (to start/signal `CloseAccountWorkflow`,
-  exactly the same justified exception `application/` already has) and
-  the new shared `notifications/` leaf (below). `customer/` is
-  unaffected — it gains no new responsibilities here. The concrete
-  activities (`persist_closure_request`, `persist_closure_decision` —
-  the actual `UPDATE accounts SET status = ...` and the email trigger)
-  live in a new `account/activities.py`, the same role
-  `application/activities.py` already plays; `account/service.py`
-  gained `request_closure(account_id, applicant_identifier)` (starts
-  the workflow) — see `account/`'s own module section below for why a
-  second, opaque `applicant_identifier` parameter turned out to be
-  necessary (a real gap found while building this, not part of the
-  original plan). **Resolved, P18-6/P18-7**: neither `bff_backoffice`
-  nor `bff_customer` needed a thin `account.service` decision-signal
-  wrapper after all — both routes call
+  `LoanApplicationWorkflow` calls `persist_application`/`persist_decision`.
+- **`account/` stops being a leaf module — a real, deliberate change to
+  the dependency graph, not an oversight.** It gained two exceptions to
+  "never imports anything else in this codebase": `workflow/` (to
+  start/signal `CloseAccountWorkflow`, the same justified exception
+  `application/` already has) and the new shared `notifications/` leaf
+  (below). `customer/` is unaffected. The concrete activities
+  (`persist_closure_request`, `persist_closure_decision` — the actual
+  `UPDATE accounts SET status = ...` and the email trigger) live in a
+  new `account/activities.py`, the same role `application/activities.py`
+  already plays; `account/service.py` gained `request_closure(account_id,
+  applicant_identifier)` — see `account/`'s own module section below
+  for why the second, opaque `applicant_identifier` parameter turned
+  out to be necessary. Neither BFF needed a thin `account.service`
+  decision-signal wrapper — both call
   `workflow.service.signal_close_account_decision`/
-  `signal_close_account_cancel` directly (both BFFs already import
-  `workflow/` for the loan-application decision signals), the same
-  open call this bullet originally left for whichever session built the
-  route. `.importlinter`'s contract for `account/` was updated alongside
-  this — not automatic
-  just because this file says so — and needed one change beyond adding
-  the two exceptions: the overall layers contract had `account/` sharing
-  a bar with `workflow/` (siblings, which a `layers` contract checks for
-  mutual independence), so `account/` had to move to its own layer below
-  `customer | document` and above `workflow/` rather than just widening
-  the module-specific forbidden-imports contract alone.
-- **A new shared leaf module, `notifications/` (built, P18-2)** (same
-  "zero dependency on anything else in this codebase" shape as
-  `idgen/`) — promoted out of `bff_customer/notifications.py`, which
-  used to be the only place fake/dev-only email delivery existed,
-  reachable only from a BFF's synchronous HTTP request handler.
-  `persist_closure_decision` (`account/activities.py`, built P18-4)
-  needs to send an email from inside a Temporal *activity* (the backend worker
-  process, not a BFF), and `account/activities.py` cannot reach into
-  `bff_customer` (wrong direction entirely — BFFs are consumers of
-  domain modules, never the reverse). Promoting the existing
-  `send_verification_code`-style fake delivery into its own leaf module
-  (`loan_onboarding/notifications/service.py`) lets both
-  `bff_customer`'s OTP flow (`bff_customer/routes.py` now imports it as
-  `notifications_service`, same import convention every other
-  `service.py` caller in this codebase uses) and
-  `account/activities.py`'s eventual closure-decision email share one
-  mechanism instead of duplicating it. Gains one new function,
+  `signal_close_account_cancel` directly. `.importlinter`'s layers
+  contract had to move `account/` to its own layer, below `customer |
+  document` and above `workflow/`, rather than just widening its
+  forbidden-imports list — a `layers` contract checks same-bar modules
+  for mutual independence, and `account/` sat on the same bar as
+  `workflow/` before this.
+- **A new shared leaf module, `notifications/`** (same "zero dependency
+  on anything else in this codebase" shape as `idgen/`), promoted out
+  of `bff_customer/notifications.py` — needed because
+  `persist_closure_decision` sends an email from inside a Temporal
+  *activity*, and `account/activities.py` cannot reach into
+  `bff_customer` (wrong direction — BFFs consume domain modules, never
+  the reverse). `bff_customer`'s OTP flow now imports it too, so both
+  share one mechanism instead of duplicating it. Gains
   `send_account_closure_decision(applicant_identifier, account_id,
   product_type, decision, comment)`, fake/dev-only exactly like the
-  existing OTP delivery (printed, not a real provider — same accepted
-  POC limitation `notifications/service.py`'s docstring now states, no
-  longer confined to `bff_customer/`). `.importlinter`/`pyproject.toml`
-  gained `notifications/`'s own "never imports anything else in this
-  codebase" contract plus a place in the layers contract's bottom leaf
-  tier, alongside `idgen/` — `account/`'s own widened contract (the
-  exception this module needs to actually call in) is still P18-4, not
-  yet added.
-- **Staff review surface (built, P18-6)**: a new `bff_backoffice` queue,
-  `GET /ui/{underwriter,manager}/closures`, listing every account at
-  `CLOSURE_REQUESTED` (`account.service.list_pending_closure_requests()`
-  — deliberately **unpaginated, no bulk actions**, unlike the
-  application queues' full list-pagination-bulk-actions treatment; a
+  existing OTP delivery.
+- **Staff review surface**: `GET /ui/{underwriter,manager}/closures`
+  lists every account at `CLOSURE_REQUESTED`
+  (`account.service.list_pending_closure_requests()` — deliberately
+  **unpaginated, no bulk actions**, unlike the application queues; a
   closure request is expected to be rare enough at POC scale that a
-  plain list is the right-sized answer, not a missing feature). Each
-  row is its own plain `<form>` (comment field required, Approve/Reject
-  submit buttons sharing one `name="decision"`) — a **plain
-  POST-redirect-GET**, not an htmx fragment swap, same pattern
-  `bff_customer`'s own Cancel/Resubmit actions already use, appropriate
-  for a low-frequency staff action rather than the applications queue's
-  live-polling in-place row updates. Gated by **role only** (either
-  `Underwriter` or `Manager`, via the existing `_role_dependency`), not
-  a new Keycloak permission scope — same reasoning the existing
-  Consent-upload action already uses ("this isn't one of the five
-  decision scopes, it's a supplementary action available to anyone who
-  can see the account at all"). The decision route
-  (`POST /ui/{role}/closures/{account_id}/decision`) calls
+  plain list is the right-sized answer). Each row is its own plain
+  `<form>` (comment field required, Approve/Reject buttons sharing one
+  `name="decision"`) — a **plain POST-redirect-GET**, not an htmx
+  fragment swap, same pattern `bff_customer`'s Cancel/Resubmit actions
+  use. Gated by **role only**, not a new Keycloak permission scope —
+  same reasoning Consent-upload already uses. The decision route calls
   `workflow.service.signal_close_account_decision(...)` then
-  `account.service.wait_for_status_change(...)` (new — same
-  `_wait_until`-backed role `application.service.wait_for_status_change`
-  already plays) before redirecting back to the queue; a stale page
-  (someone else already decided it, or the customer cancelled it in the
-  meantime) re-renders the queue with an explanatory message instead of
-  a raw error, rather than trusting the page was still accurate.
-- **Customer-facing trigger (built, P18-7)**: a "Request account
-  closure" action on `bff_customer`'s account/application detail page
+  `account.service.wait_for_status_change(...)` before redirecting; a
+  stale page (already decided, or cancelled meanwhile) re-renders with
+  an explanatory message instead of a raw error.
+- **Customer-facing trigger**: a "Request account closure" action on
+  `bff_customer`'s application detail page
   (`POST /apply/applications/{application_id}/closure/request`), shown
-  only once `application.status == APPROVED` and the resolved account's
-  own `status == 'ACTIVE'` (reusing the existing `_owned_account`
-  ownership check the Consent-upload feature already built — it already
-  404s a non-owning applicant and 400s a non-`APPROVED` application, so
-  this route's own extra check is just `account.status != "ACTIVE"`) —
-  hidden entirely once a request is already pending or the account is
-  already `CLOSED`. A pending request shows its own status plus a
-  Cancel action (`POST .../closure/cancel`, calling the new
-  `workflow.service.signal_close_account_cancel(...)` then
-  `account.service.wait_for_status_change(...)`). Both routes are plain
-  POST-redirect-GET forms, same pattern as this module's own existing
-  Cancel/Resubmit actions, not htmx — appropriate for a low-frequency
-  customer action. **Live-verified end to end over real HTTP** (a local
-  `uvicorn`/`worker_main.py` pair against the real Postgres/Temporal/
-  Mayan stack, driven by a scripted identify → verify → request →
-  cancel flow): the button/pending-status/cancel-button visibility
-  toggled correctly at every step, the account's own status flipped
-  `ACTIVE` → `CLOSURE_REQUESTED` → `ACTIVE`, and the fake closure-
-  decision email printed with the correct `applicant_identifier`.
-- **The payoff this exists for (confirmed live, P18-8)**: once
-  `persist_closure_decision` writes `CLOSED`,
-  `account.service.has_active_account_of_type` (and therefore
-  `application.service.get_available_product_types`) stops counting
-  this account at all — the product picker automatically re-offers that
-  product type on the customer's very next visit, with no change needed
-  to either of those two functions. This is the "path back" PRD §11
+  only once `application.status == APPROVED` and the resolved account
+  is `ACTIVE` (reusing the existing `_owned_account` ownership check) —
+  hidden once a request is pending or the account is `CLOSED`. A
+  pending request shows its status plus a Cancel action
+  (`POST .../closure/cancel`). Both routes are plain
+  POST-redirect-GET forms, not htmx, appropriate for a low-frequency
+  customer action.
+- **The payoff this exists for**: once `persist_closure_decision`
+  writes `CLOSED`, `account.service.has_active_account_of_type` (and
+  therefore `application.service.get_available_product_types`) stops
+  counting this account at all — the product picker automatically
+  re-offers that product type on the customer's next visit, with no
+  change needed to either function. This is the "path back" PRD §11
   flagged as missing when the picker's hard elimination first shipped.
-  Verified against the real stack: a customer holding three `ACTIVE`
-  accounts (`[]` from `get_available_product_types` — active in every
-  product type) had one approved and one rejected via a real
-  Keycloak-authenticated staff session; `get_available_product_types`
-  immediately returned exactly the one freed-up product type
-  afterward — the rejected account's own type correctly stayed
-  excluded (it reverted to `ACTIVE`, nothing freed up), matching the
-  design exactly.
 
 ### Real email delivery via Gmail SMTP (built and live-verified — Phase 20)
 
-This section originally described the target design for
-`IMPLEMENTATION_PLAN.md`'s Phase 20, written first per this project's
-own convention, before any of it was implemented. **All three tasks
-(P20-1 through P20-3) are now built and live-verified against the real
-stack** — every "planned"/"not yet built" marker below that hasn't
-already been corrected in place describes a real implementation detail,
-not a future intention; see `IMPLEMENTATION_PLAN.md`'s own Phase 20
-section and Session Log for the full build history. Raised directly by
-the user: `notifications/service.py`'s own docstring had said, since
-Phase 18, that fake `print()` delivery is "the one thing that would
-need to change (same signatures, real bodies) if a real provider is
-ever wired up" — this phase is that. The user has a Gmail account they
-can send from; the design below wires it in as an **optional** real
-delivery path, confirmed with the user as SMTP + a Gmail App Password
-(stdlib `smtplib`, zero new dependencies), not the Gmail API/OAuth2
-(heavier setup — a Google Cloud project, an OAuth consent screen, token
-storage/refresh — out of proportion to what this POC needs).
-
-**Live-verified, P20-3**: against the real stack, using the user's own
-Gmail account (App Password added directly to the user's local `.env`,
-never pasted into chat — a pasted App Password mid-session was refused
-and the user revoked and regenerated it before proceeding, per this
-project's own credential-handling discipline). All 3 real-send outcomes
-this phase covers — Welcome Letter, closure-decision Approve, and
-closure-decision Reject — were positively confirmed delivered to the
-user's inbox across two real applications and two real closure
-decisions, driven through the actual browser UI with real Keycloak
-staff logins, not `WorkflowEnvironment` fakes. `send_verification_code`
-confirmed still fake-only, as designed (no OTP email ever arrives, by
-design — the verify-code page shows the code directly). Two real,
-previously-unknown gaps were found and fixed along the way:
-1. **Docker stdout buffering was hiding every `print()`-based delivery
-   confirmation in this codebase, not just this feature's.** Python
-   block-buffers stdout when it isn't attached to a TTY (true of every
-   process in this image), so `print()` output could sit invisible in
-   the buffer indefinitely under this container's low output volume,
-   never reaching `docker compose logs` even though the code ran.
-   Fixed by adding `ENV PYTHONUNBUFFERED=1` to `Dockerfile`
-   (unconditional, not per-service — every process here relies on
-   `print()` being actually visible, per `send_verification_code`'s own
-   deliberate print-not-logging design).
-2. **A live-browser-automation-only gotcha, not an app bug**: the
-   customer-side closure-request/cancel/cancel-application forms all
-   carry `onsubmit="return confirm(...)"` — programmatically calling
-   `form.requestSubmit()` on one of these fires that native `confirm()`
-   dialog, which blocks the browser tab's renderer entirely until a
-   human dismisses it. Recovered by asking the user to click OK in the
-   real browser window; worked around afterward by calling
-   `fetch(url, {method:'POST'})` directly against those specific routes
-   instead of triggering the form's submit event.
+Built and live-verified against the real stack (P20-1 through P20-3),
+using the user's own Gmail account — full build history, the two real
+gaps found and fixed along the way (Docker stdout buffering hiding
+every `print()`-based delivery confirmation; a browser-automation-only
+`confirm()`-dialog hang), and the live-verification sweep (all 3
+real-send outcomes confirmed delivered: Welcome Letter,
+closure-decision Approve, closure-decision Reject) all live in
+`IMPLEMENTATION_PLAN.md`'s Phase 20 section and Session Log, not here.
+Raised directly by the user: `notifications/service.py`'s own docstring
+had said, since Phase 18, that fake `print()` delivery is "the one
+thing that would need to change (same signatures, real bodies) if a
+real provider is ever wired up" — this phase is that. The design below
+wires it in as an **optional** real delivery path, confirmed with the
+user as SMTP + a Gmail App Password (stdlib `smtplib`, zero new
+dependencies), not the Gmail API/OAuth2 (heavier setup — a Google Cloud
+project, an OAuth consent screen, token storage/refresh — out of
+proportion to what this POC needs).
 
 - **Scoped to exactly the two functions the user named — `send_account_closure_decision`
   and `send_welcome_letter_email` — not `send_verification_code`.**
@@ -2706,73 +2583,37 @@ full repro/root-cause/reverification narrative for each lives in
 entry, unless a more specific pointer is given.)*
 
 - **`docker compose up -d` does not rebuild images, and Mayan's own
-  index-template/metadata-type config can independently drift or reset
-  — both hit live, in the same session.** A long-running local stack
-  ran stale `app`/`worker-workflow`/`worker-activity` images for over a
-  day without warning, and separately Mayan's live config reverted to
-  an old single index and lost two P16-4 metadata-type associations
-  (root cause unconfirmed, a `mayan-db` volume reset independent of
-  `db`/Temporal is the leading guess). **The operating rule this
-  confirms**: this file's "already built and live-verified" describes a
-  point in time, not a durable guarantee — re-verify both the running
-  image and Mayan's live config directly before trusting a "clear test
-  data and re-verify" pass to exercise current code. Full write-up: see
-  this file's own "2026-09-04 (new session)" Session Log entry.
-- **This project has no schema migration tooling — `db/schema.sql`
-  changes only ever apply to a brand-new `db` volume (via
-  `db/init/01-init.sh`, first container start only), never to an
-  already-running one, and this bit for real after Phase 18.** Every
-  Phase 18 build/verify session deliberately tested against a separate
-  disposable `loan_onboarding_test` database specifically to avoid
-  touching the live stack's own `loan_onboarding` volume — but that
-  also meant the live volume's `accounts` table was never actually
-  migrated to add `CLOSURE_REQUESTED`/the five `closure_*` columns.
-  Rebuilding and restarting the `app`/`worker-*` containers with the
-  merged Phase 18 code (`docker compose up -d --build`) then made
-  *every* loan-application Approve/Reject fail outright — not just
-  account closure — because `account/activities.py`'s `persist_decision`
-  provisioning path unconditionally calls `Account.from_record()`
-  (`account/models.py`), which reads `record["closure_workflow_id"]`
-  unconditionally; a `RETURNING *` against the old, un-migrated table
-  simply doesn't have that key, so this raised `KeyError` inside a
-  Temporal activity, exhausted its retries, and failed the whole
-  workflow (same permanently-stuck-with-no-error-surfaced shape as this
-  file's other Temporal-activity-failure entries below). **Fixed by
-  hand-applying the same `ALTER TABLE` this file's schema section
-  already describes** (widen the `status` `CHECK`, add the five
-  nullable columns) directly against the live database — confirmed
-  correct against a subsequent real approval, which then provisioned an
-  account and rendered the "Request account closure" button correctly.
-  **The operating rule this confirms**: a schema change landing in
-  `db/schema.sql` is not "deployed" just because it's merged and the
-  images are rebuilt — an existing `db` volume needs either this same
-  manual `ALTER` or a full `docker compose down -v` (destroying all
-  data) before new code that assumes the new columns exist can run
-  safely against it. No tooling in this project currently detects or
-  prevents this mismatch.
+  index-template/metadata-type config can independently drift or
+  reset.** Both hit live, in the same session — full repro in
+  `IMPLEMENTATION_PLAN.md`'s "2026-09-04 (new session)" Session Log
+  entry. **The operating rule this confirms**: this file's "already
+  built and live-verified" describes a point in time, not a durable
+  guarantee — re-verify both the running image and Mayan's live config
+  directly before trusting a "clear test data and re-verify" pass to
+  exercise current code.
+- **This project has no schema migration tooling** — `db/schema.sql`
+  changes only ever apply to a brand-new `db` volume
+  (`db/init/01-init.sh`, first container start only), never to an
+  already-running one. Bit for real after Phase 18 (a live `KeyError:
+  'closure_workflow_id'` inside a Temporal activity, from an
+  un-migrated `accounts` table — full repro and fix in
+  `IMPLEMENTATION_PLAN.md`'s Session Log). **The operating rule this
+  confirms**: a schema change landing in `db/schema.sql` is not
+  "deployed" just because it's merged and the images are rebuilt — an
+  existing `db` volume needs either a manual `ALTER TABLE` or a full
+  `docker compose down -v` (destroying all data) before new code that
+  assumes the new columns exist can run safely against it. No tooling
+  in this project currently detects or prevents this mismatch.
 - **A local `worker_main.py` process and the dockerized
   `worker-workflow`/`worker-activity` containers silently race each
   other for the same Temporal task queues if both are left running at
-  once — found live during Phase 19's own verification, not previously
-  documented.** Multiple workers polling one task queue is normal,
-  intentional Temporal behavior (this file's own "Deployment" section
-  says so), but it becomes a real hazard the moment those workers point
-  at *different* databases — exactly the situation every P18/P19
-  local-process verification session creates on purpose (a local worker
-  against the disposable `loan_onboarding_test`, so the live stack's own
-  data is never touched), if the session only stops the `app` container
-  and forgets the two worker containers are still up and still polling
-  against the *live* `loan_onboarding` database. Whichever worker
-  happens to win a given activity attempt determines whether it succeeds
-  (found the row in the database it's pointed at) or fails outright
-  (`AssertionError: application ... not found`) — confirmed live via
-  `tctl workflow show`'s full event history, whose `/app/...` stack-trace
-  paths (vs. this machine's own `/Users/...` ones) revealed a dockerized
-  worker had picked up a retry meant for the local one. **The operating
-  rule this confirms**: any local-worker verification session must stop
-  *all three* of `app`/`worker-workflow`/`worker-activity`, not just
-  `app` — the two worker containers hold no port to conflict with, so
-  it's easy to forget they're still silently polling and racing.
+  once, pointed at different databases** — found live during Phase 19's
+  verification, full repro in `IMPLEMENTATION_PLAN.md`'s Session Log.
+  **The operating rule this confirms**: any local-worker verification
+  session must stop *all three* of `app`/`worker-workflow`/
+  `worker-activity`, not just `app` — the two worker containers hold no
+  port to conflict with, so it's easy to forget they're still silently
+  polling and racing.
 - **Reconciliation (`reconcile.py`) only detects and fixes drift — it
   never prevents it, and nothing runs it automatically.** It has to be
   invoked by a human or a scheduled job, neither of which this project
