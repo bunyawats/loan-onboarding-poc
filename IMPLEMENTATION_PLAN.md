@@ -4431,6 +4431,35 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-07 (docs consolidation, round 3)** — User asked again to
+  "continue trimming the module detail sections" (a follow-up to round
+  2, below, in an unrelated later part of the same overall session —
+  KrakenD research happened in between). This time there was no more
+  cross-document duplication left to remove (already confirmed by grep
+  in round 2 that the remaining content in `customer/`/`account/`/
+  `application/`/`document/`/`risk/` was load-bearing design rationale,
+  not narrative). Instead, tightened prose on the largest bullets: found
+  the "Corrected from an earlier draft of this file, which said X..."
+  framing repeated across ~7 bullets (`bff_customer`'s session-cookie
+  bullet, `customer/`'s `customer_id` scheme, `account/`'s
+  `request_closure`/`applications.application_id` bullets,
+  `application/`'s `create_application` bullet, `document/`'s
+  `generate_welcome_letter`/`upload_consent` bullets, `workflow/`'s
+  `bulk_signal_decision` bullet) — narrating *what an earlier draft
+  said* costs more words than just stating the current design plus its
+  one-line reason, with zero loss of the actual rationale a fresh
+  session needs (why `application_id` is optional, why
+  `applicant_identifier` is required on Welcome Letter/Consent
+  documents, why `accounts.application_id` points the direction it
+  does, etc. — every fact preserved, just not narrated as a correction
+  of a prior wording). `create_application`'s bullet (the single densest
+  bullet in the file, 78 lines) dropped to 55 by this alone.
+  `CLAUDE.md`: 2,867 → 2,826 lines (~1.4%, smaller than the two
+  duplication-removal rounds, as expected once actual duplication was
+  gone — this round was pure compression). Not committed yet this
+  session — the user hadn't asked to commit at the point this entry was
+  written.
+
 - **2026-09-07 (docs consolidation, round 2)** — User asked to offload
   `CLAUDE.md` context to a more dedicated document again — the same
   request as the 2026-09-04 "(docs consolidation)" entry below, this

@@ -953,16 +953,14 @@ the domain modules' `service.py` functions.
 
 - Owns the customer self-identify session cookie (PRD §7.1) — signed,
   holding `applicant_identifier`, no password, no Redis (nothing
-  token-shaped to store). **Corrected from an earlier draft of this
-  file**, which said this was a slot inside `bff_backoffice`'s
-  Starlette `SessionMiddleware` session; built instead (Phase 11) as
-  its own dedicated cookie, hand-rolled with `itsdangerous` directly in
-  `bff_customer/identity.py` (the same library `SessionMiddleware` uses
-  internally) — `.env.example`'s `CUSTOMER_SESSION_SECRET_KEY`, present
-  since P5-1, already anticipated this as a value distinct from
-  `BACKOFFICE_SESSION_SECRET_KEY`, and Starlette supports only one
-  `SessionMiddleware`/cookie per app, which `bff_backoffice`'s Keycloak
-  session id already occupies. **Setting this
+  token-shaped to store). **Its own dedicated cookie, not a slot inside
+  `bff_backoffice`'s Starlette `SessionMiddleware` session** — Starlette
+  supports only one `SessionMiddleware`/cookie per app, which
+  `bff_backoffice`'s Keycloak session id already occupies, so this is
+  hand-rolled with `itsdangerous` directly in `bff_customer/identity.py`
+  (the same library `SessionMiddleware` uses internally); `.env.example`'s
+  `CUSTOMER_SESSION_SECRET_KEY` is distinct from
+  `BACKOFFICE_SESSION_SECRET_KEY` for exactly this reason. **Setting this
   cookie is a pure client-side write — no database call at all**;
   `customer/`'s row doesn't get created until (and unless) an
   application under this identifier is approved (see "Applying without
@@ -1171,11 +1169,9 @@ create path only fires from inside an approval.
 
 **`customer_id` is `CUS-` followed by a random 9-digit number
 (`idgen.service.generate_id("CUS", 9)`), assigned by `db.get_or_create`
-at insert time — not a database default.** Corrected from an earlier
-draft of this file, which had Postgres generate a `UUID` via
-`DEFAULT gen_random_uuid()`; every domain module's primary key moved to
-this application-assigned, human-readable scheme at once (see "Data
-storage" for the full rationale and the shared `idgen/` module). Because
+at insert time — application-generated, not a Postgres `DEFAULT`** (see
+"Data storage" for the full rationale and the shared `idgen/` module,
+which every domain module's primary key uses). Because
 `get_or_create` is already a find-or-create keyed on
 `applicant_identifier` (its own unique index), it now has *two*
 independent conflict paths to handle on insert: the existing
@@ -1273,7 +1269,7 @@ doubles as `persist_decision`'s idempotency guard).
   read-only check `application/service.py` is allowed to make).
 - `service.get(account_id) -> Account`.
 - **`service.request_closure(account_id, applicant_identifier) -> str`
-  (workflow id) — built, P18-4.** Starts `CloseAccountWorkflow` via
+  (workflow id).** Starts `CloseAccountWorkflow` via
   `workflow.service.start_close_account_workflow(...)`, then waits for
   `persist_closure_request` to actually commit before returning (same
   `_wait_until`-style confirm-then-return pattern
@@ -1291,25 +1287,22 @@ doubles as `persist_decision`'s idempotency guard).
   have broken the contract even though the module-specific "never
   imports" contract already allowed it) to make room for this.
   **`applicant_identifier` is an opaque pass-through parameter, not
-  resolved internally — a real design gap found while building this,
-  not part of the original P18-4 task wording** (which read
-  `request_closure(account_id) -> str`, with no second parameter):
-  `accounts` carries no `applicant_identifier` column of its own, only
-  `customer_id`, and `account/` still isn't granted a `customer/`
-  import (only `workflow/` and `notifications/` are the new
-  exceptions) — so there's no way for this module to resolve
-  `customer_id -> applicant_identifier` itself the way
-  `notifications.service.send_account_closure_decision` needs it. Fixed
-  by threading it through as an opaque string, the same role
+  resolved internally**: `accounts` carries no `applicant_identifier`
+  column of its own, only `customer_id`, and `account/` isn't granted a
+  `customer/` import (only `workflow/` and `notifications/` are the
+  exceptions) — so this module can't resolve `customer_id ->
+  applicant_identifier` itself the way
+  `notifications.service.send_account_closure_decision` needs it.
+  Threaded through as an opaque string instead, the same role
   `ApplicationWorkflowInput`'s own `applicant_*` fields already play for
-  `LoanApplicationWorkflow` — `bff_customer` (P18-7) already holds this
-  value from its own session cookie and passes it straight through;
-  `CloseAccountWorkflowInput`/`PersistClosureDecisionInput` (both
-  P18-3, revised in this same P18-4 pass) carry it across however many
-  signals arrive, and `account/activities.py`'s `persist_closure_decision`
-  is what actually forwards it to `notifications.service`.
-- **New `account/activities.py` (built, P18-4)** — the concrete Temporal
-  activity implementations `CloseAccountWorkflow` calls by string name,
+  `LoanApplicationWorkflow` — `bff_customer` already holds this value
+  from its own session cookie and passes it straight through;
+  `CloseAccountWorkflowInput`/`PersistClosureDecisionInput` carry it
+  across however many signals arrive, and `account/activities.py`'s
+  `persist_closure_decision` is what actually forwards it to
+  `notifications.service`.
+- **`account/activities.py`** — the concrete Temporal activity
+  implementations `CloseAccountWorkflow` calls by string name,
   same "Breaking the application ↔ workflow cycle" split
   `application/activities.py` already established: `persist_closure_request(account_id,
   workflow_id)` (idempotent on a Temporal retry — the `UPDATE`'s `WHERE`
@@ -1350,77 +1343,54 @@ modules.
   application_id=None)` — **no `customer_id`/`account_id` params** —
   neither is guaranteed to exist yet (see "Applying without being a
   customer yet" above; there is no `account_id` column on `applications`
-  at all anymore, see that section). **`application_id` is optional,
-  corrected from an earlier draft of this file that gave this function
-  no such parameter at all** — that draft said this function "generates
-  `application_id` (a `UUID`) first," full stop, which quietly conflicts
-  with the customer-facing flow it's paired with elsewhere in this same
-  file: `document.service.upload(applicant_identifier, application_id,
-  category, file)` needs an `application_id` to tag uploads with, and
-  Phase 11's own New Application flow is specified as "document upload
-  → review & submit, calling `application.service.create_application(...)`"
-  — uploads happening *before* this call, against an id this function
-  alone was supposed to mint, is not satisfiable. The fix: `bff_customer`
-  mints a provisional `application_id` (`idgen.service.generate_id("APP",
-  9)`, via the shared `application.service.APPLICATION_ID_PREFIX`/
-  `APPLICATION_ID_LENGTH` constants both call sites reference — corrected
-  from an earlier draft that used a plain `uuid4()`,
-  before every id in this codebase moved to the shared human-readable
-  scheme, see "Data storage") at the *start* of its wizard, threads it
-  through every `document.service.upload(...)` call during the flow,
-  and passes that same id to `create_application(...)` at final submit
-  — this function uses it verbatim instead of minting its own. If
-  omitted (a caller with no upload-first flow), this function generates
-  a fresh one itself the same way, same as the original draft. Either way, the
-  returned result always carries `application_id` (even in the
-  missing-categories branch, which persists no row) so a caller that
-  *didn't* pre-mint one can still learn what id its just-checked
-  documents should be tagged under, then retry this same call once
-  they're uploaded. Resolves
-  `customer_id` via the **read-only** `customer.service.find_by_identifier(applicant_identifier)`
-  (`None` if this is a new applicant — `account_id` is always `None` at
-  this point, full stop, regardless), validates
-  `payload` against the `product_type`'s Pydantic schema (owned here, in
-  `application/schemas.py`), calls `document.service.check_completeness(...)`;
-  if satisfied, calls `workflow.service.start_workflow(application_id,
-  product_type, payload, amount, applicant_identifier, applicant_name,
-  applicant_email, applicant_phone, customer_id)`. **`amount` is passed
-  to `start_workflow` as its own argument, never folded into `payload`**
-  — the workflow needs it to run PRD §6.3's escalation-threshold check
-  at the Approve transition, but `payload` stays
-  product-specific-fields-only and the workflow stays payload-agnostic
-  (never inspects `payload` itself — `amount` is the one common field it
-  *does* need to see, so it travels as a named parameter, not a payload
-  lookup). `applicant_identifier`, `applicant_name`, `applicant_email`,
-  `applicant_phone`, and the possibly-`None` `customer_id` travel the
-  same way, purely so `persist_application` (the workflow's first
-  activity) has them to write into the row — `workflow/` still never
-  inspects any of them, just forwards them as opaque activity arguments.
-  **The actual `applications` row isn't
-  written by this function directly** — `persist_application` is one of
-  the four activities in `application/activities.py` (see "Breaking
-  the cycle"), invoked by the workflow's own `run()` method as its
-  first step, the same way `review-approval-temporal`'s workflow calls
-  `persist_request` at the start of `run()` rather than the caller
-  writing Postgres before starting the workflow. So
-  `create_application()` reuses the reference project's `_wait_until()`
-  pattern after calling `start_workflow()` — bounded poll (~50ms/5s)
-  against `application/db.py`'s own read, always returning whatever it
-  last read even on timeout — for the same reason: `start_workflow()`
-  only confirms Temporal *accepted* the start, not that
-  `persist_application` has actually committed yet, and the caller
-  (a BFF) immediately wants to show the created application. If
-  documents are missing, return the specific missing categories without
-  ever calling `workflow.service` — never start a workflow for an
-  incomplete application. **(Phase 14, built)**: takes a
-  `reuse_existing_id_photo: bool = False` parameter — when `True`
-  *and* the resolved `customer_id` isn't `None` *and*
+  at all anymore). **`application_id` is optional, not always
+  self-minted**, because `document.service.upload(...)` needs one to
+  tag uploads with and Phase 11's flow uploads documents *before*
+  calling this function: `bff_customer` mints a provisional
+  `application_id` (`idgen.service.generate_id("APP", 9)`, via the
+  shared `APPLICATION_ID_PREFIX`/`APPLICATION_ID_LENGTH` constants both
+  call sites reference) at the start of its wizard, threads it through
+  every upload, then passes that same id here, which this function uses
+  verbatim; a caller with no upload-first flow omits it and this
+  function mints its own the same way. Either way the returned result
+  always carries `application_id` — even on the missing-categories
+  branch, which persists no row — so a caller that didn't pre-mint one
+  can still learn what id its just-checked documents were tagged under
+  and retry once they're uploaded.
+  Resolves `customer_id` via the **read-only**
+  `customer.service.find_by_identifier(applicant_identifier)` (`None`
+  for a new applicant), validates `payload` against the `product_type`'s
+  Pydantic schema (owned here, in `application/schemas.py`), calls
+  `document.service.check_completeness(...)`; if satisfied, calls
+  `workflow.service.start_workflow(application_id, product_type,
+  payload, amount, applicant_identifier, applicant_name,
+  applicant_email, applicant_phone, customer_id)`. **`amount` travels as
+  its own argument, never folded into `payload`** — the workflow needs
+  it for PRD §6.3's escalation-threshold check at the Approve
+  transition, but stays payload-agnostic otherwise (never inspects
+  `payload` itself). `applicant_identifier`/`applicant_name`/
+  `applicant_email`/`applicant_phone`/`customer_id` travel the same way,
+  purely so `persist_application` (the workflow's first activity) has
+  them to write into the row — `workflow/` never inspects any of them.
+  **The `applications` row isn't written by this function directly** —
+  `persist_application` is one of `application/activities.py`'s four
+  activities (see "Breaking the cycle"), invoked by the workflow's own
+  `run()` as its first step, same as `review-approval-temporal`'s
+  `persist_request`. So `create_application()` reuses the reference
+  project's `_wait_until()` pattern after `start_workflow()` — bounded
+  poll (~50ms/5s) against `application/db.py`'s own read, since
+  `start_workflow()` only confirms Temporal *accepted* the start, not
+  that `persist_application` has committed, and the caller (a BFF)
+  immediately wants to show the created application. If documents are
+  missing, returns the specific missing categories without ever calling
+  `workflow.service` — never start a workflow for an incomplete
+  application. Also takes `reuse_existing_id_photo: bool = False` — when
+  `True` *and* `customer_id` resolves *and*
   `document.service.has_id_photo(customer_id)` is `True`, the
   `check_completeness` call above passes
   `exclude_categories=[document_service.CATEGORY_GOVERNMENT_ID]`
-  instead of the bare call; otherwise it falls through to the bare call
-  unchanged. See "Returning-customer profile refresh and ID reuse"
-  above for why this can't be a silent, automatic skip. Note:
+  instead of the bare call. See "Returning-customer profile refresh and
+  ID reuse" above for why this can't be a silent, automatic skip.
   `resubmit_application` below does *not* get this parameter — deferred
   on purpose, see that function's own note.
 - `service.resubmit_application(application_id, payload)` — same gate
@@ -1623,24 +1593,17 @@ through the application flow:
   document tied to this account/application carries `customer_id` too;
   leaving the Welcome Letter as the one exception would have been
   inconsistent). System-generated, no human in the loop, exactly one per
-  account. **`applicant_identifier` was added to this signature after a
-  real bug, found live, under the original single-index design** (since
-  replaced by the three-index redesign in "Document hierarchy" below,
-  but `applicant_identifier` stays attached to every document regardless
-  of index shape — it's a required field on both document types, see
-  `scripts/setup_document_hierarchy.sh`): that index's account branch
-  was nested under an applicant node whose own expression evaluated
-  `applicant_identifier` metadata — an earlier version of this function
-  attached only `account_id`/`category`, which gotcha #1 (leaf
-  conditions don't inherit an ancestor's match) turned into a document
-  landing under a top-level "None" bucket in the Mayan UI instead of the
-  applicant's own branch. Confirmed against a real instance (not caught
-  by any unit test — `FakeMayanClient` doesn't enforce Mayan's own
-  required-metadata rules, so this was invisible until a genuine
-  end-to-end run actually looked at the index tree); fixed by attaching
-  `applicant_identifier` alongside the existing two fields. A document
-  created before this fix stays orphaned under `None` — not
-  retroactively backfilled.
+  account. **`applicant_identifier` is a required field here, not
+  optional** — `scripts/setup_document_hierarchy.sh` requires it on
+  both document types, since gotcha #1 (leaf conditions don't inherit
+  an ancestor's match) means an index branch nested under an applicant
+  node needs every descendant document to carry
+  `applicant_identifier` metadata itself or it lands under a top-level
+  "None" bucket instead of the applicant's own branch — invisible to
+  `FakeMayanClient`-backed unit tests, since Mayan's own
+  required-metadata enforcement is what actually catches an omission.
+  A document created before this was fixed stays orphaned under `None`
+  — not retroactively backfilled.
 - `service.upload_consent(applicant_identifier, account_id, customer_id,
   file) -> DocumentRef` — **true Mayan document versioning, not a new
   document per call**: if the account already has a "consent" document,
@@ -1651,21 +1614,18 @@ through the application flow:
   document first (attaching `applicant_identifier` too, same reasoning
   and same fix as `generate_welcome_letter` above — the new-version path
   doesn't re-attach metadata at all, so it needs nothing new).
-  **`customer_id` (corrected — this function originally didn't take
-  it)**: attached alongside `account_id`/`applicant_identifier` on the
-  create-first-version path, same as `generate_welcome_letter` already
-  does — consent is an account-level document, exactly like Welcome
-  Letter, so both carry `customer_id` for the same reason (Customer
-  Index's `<customer_id>/<account_id>/<category>` branch needs it to
-  nest either one under the customer). Not restricted to one caller —
-  either BFF can call it once `account_id`/`customer_id` exist (both
-  already import `document/`). **The UI surface question is resolved,
-  both halves built**: `bff_customer`'s own application detail page,
-  once the application is `APPROVED`, plus `bff_backoffice`'s review
-  dialog for staff to upload/replace on the customer's behalf — see
-  both modules' sections below. Both write to the same document; a
-  replace from either surface is immediately visible from the other
-  (live-verified).
+  `customer_id` is attached alongside `account_id`/`applicant_identifier`
+  on the create-first-version path, same as `generate_welcome_letter` —
+  consent is an account-level document, exactly like Welcome Letter, so
+  both carry `customer_id` for the same reason (Customer Index's
+  `<customer_id>/<account_id>/<category>` branch needs it to nest either
+  one under the customer). Not restricted to one caller — either BFF can
+  call it once `account_id`/`customer_id` exist (both already import
+  `document/`): `bff_customer`'s own application detail page, once
+  `APPROVED`, plus `bff_backoffice`'s review dialog for staff to
+  upload/replace on the customer's behalf — see both modules' sections
+  below. Both write to the same document; a replace from either surface
+  is immediately visible from the other.
 - `service.preview_account_document(account_id, document_id) ->
   DocumentStream` — the account-scoped sibling of `preview(application_id,
   document_id)`, needed because an account-level document (Consent,
@@ -1732,11 +1692,10 @@ domain knowledge."
   actor_name, comment)` — fans out `asyncio.gather()` over the
   single-item signal path, same shape as the reference project's
   `bulk_submit_decision()`, cap at `_MAX_BULK_SIZE` (start at 50).
-  Called only by `bff_backoffice`. **Also corrected from an earlier
-  draft**, which omitted `actor_role` — `submit_decision` needs it for
-  the same reason the single-item `signal_decision` above does (which
-  role is deciding is what `LoanApplicationWorkflow._resolve_transition`
-  validates against the application's current state), and every
+  Called only by `bff_backoffice`. **Takes `actor_role`** for the same
+  reason the single-item `signal_decision` above does (which role is
+  deciding is what `LoanApplicationWorkflow._resolve_transition`
+  validates against the application's current state) — every
   application in one bulk-approve batch is decided by the same
   signed-in staff member, so it travels once per batch, not once per
   item.
