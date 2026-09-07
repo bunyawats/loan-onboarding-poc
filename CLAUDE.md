@@ -322,14 +322,13 @@ the *outcome* of an approved loan, not something that pre-exists it.**
   approved.
 - **`accounts.application_id` is `NOT NULL` and `UNIQUE`** — the
   account points at the application that produced it, not the other
-  way around. **Corrected from an earlier draft of this file**, which
-  had `applications.account_id` (nullable, set once at approval)
-  instead; flipped because (a) there was previously no way, given an
-  account, to find which application produced it, and (b) the reversed
-  direction lets the `UNIQUE` constraint on `accounts.application_id`
-  serve as `persist_decision`'s idempotency guard directly (see step 2
-  below), instead of a separately-written, easy-to-get-wrong nullable
-  column on `applications`. There is still no "auto-opened account" —
+  way around (not `applications.account_id`), because (a) that reverse
+  pointer would give no way, given an account, to find which
+  application produced it, and (b) this direction lets the `UNIQUE`
+  constraint on `accounts.application_id` serve as `persist_decision`'s
+  idempotency guard directly (see step 2 below), instead of a
+  separately-written, easy-to-get-wrong nullable column on
+  `applications`. There is still no "auto-opened account" —
   `account.service.find_or_create_for_customer(...)` is gone, and
   `account/` still doesn't enforce one-account-per-customer (see
   `account/`'s module section).

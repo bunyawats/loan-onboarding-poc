@@ -4431,6 +4431,44 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-07 (docs consolidation, round 7 — file-wide sweep,
+  smallest yield yet)** — User asked once more to "continue trimming a
+  different section." Ran the same narrative-scaffolding grep against
+  every remaining un-swept section: "Breaking the application ↔
+  workflow cycle", "Applying without being a customer yet",
+  "Returning-customer profile refresh and ID reuse", "Known gaps"
+  (beyond round 1's three bullets), "Testing", and "What this is".
+  Found and fixed exactly one real instance: "Applying without being a
+  customer yet"'s `accounts.application_id` bullet had the same
+  "Corrected from an earlier draft of this file, which had
+  `applications.account_id`..." framing round 3/4/6 already removed
+  elsewhere — tightened to state the current design plus its two
+  reasons directly. Checked the rest and found nothing worth cutting:
+  "Breaking the cycle" and "What this is" have no narrative bloat at
+  all (every sentence explains a distinct current mechanism); the
+  "used to"/"an earlier draft" mentions in "Returning-customer profile
+  refresh", "Known gaps", and a `db/schema.sql` comment reference are
+  legitimate "here's a real gap and its fix" content, not narrative
+  about `CLAUDE.md`'s own drafting history, so cutting them would lose
+  facts, not padding. "Testing"'s two incident paragraphs (the
+  wrong-database wipe, the `asyncpg` connection-exhaustion hazard) were
+  checked against `IMPLEMENTATION_PLAN.md` for possible duplication
+  (grepped for `TooManyConnectionsError`, `min_size=10`) and found to
+  be **not** duplicated anywhere else in this file — unlike everything
+  cut in rounds 1-6, so left in full rather than assumed-safe to trim.
+  `CLAUDE.md`: 2,804 → 2,803 lines. **This confirms the file-wide
+  version of round 5's finding**: the two techniques used across this
+  whole seven-round pass (narrative-scaffolding removal,
+  duplicate-reasoning merge) have now been run against essentially
+  every section of `CLAUDE.md` except "Automated risk assessment via
+  NATS" (left alone on purpose — it's un-built design, not narrative)
+  and the standalone research notes in `docs/`. A further "keep
+  trimming" request should probably be answered with this finding
+  rather than another marginal pass — real further reduction at this
+  point would mean a structural change (e.g. splitting rarely-needed
+  historical rationale into an appendix), not more sentence-level
+  editing. Not committed yet this session.
+
 - **2026-09-07 (docs consolidation, round 6, new section)** — User
   asked to "continue trimming a different section," per the previous
   entry's own suggestion (the "Modules, in detail" sweeps had hit their
