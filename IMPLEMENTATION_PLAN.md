@@ -706,11 +706,22 @@ still open, logged in this file's own Decisions Needed section above**
 (exact risk thresholds, auto-approve provisioning depth, NATS
 subject-naming scheme, whether a `risk_assessment_id` is needed) —
 pick the stated assumed defaults and keep moving, don't block on
-them. **This was a documentation-only session, per explicit user
-instruction — none of Phase 21's tasks (P21-1 through P21-9) are
-implemented yet.** Start at P21-1 — **load the `risk-assessment-nats`
-skill first** (`.claude/skills/risk-assessment-nats/`); `CLAUDE.md`'s
-own NATS section is now a condensed pointer to it, not the full design.
+them.
+
+**P21-1 through P21-3 are now done** — `db/schema.sql`'s `risk_tier`
+column (verified against a scratch Postgres, not the live stack),
+`docker-compose.yml`'s `nats` service (a real, live-hit host port
+collision on `4222` found and fixed by publishing on `4223` instead —
+see P21-2's own DONE note and `CLAUDE.md`'s Known Gaps), and the new
+`risk/` leaf module (`service.py`'s `submit_risk_assessment`, unit
+tests via `respx`, a new `.importlinter` contract). Full unit suite
+still passing (`pytest tests/unit/risk`: 3/3) and `lint-imports`: 10/10
+contracts kept. **Next: start at P21-4** (the standalone `risk-adapter`
+service) — **load the `risk-assessment-nats` skill first**
+(`.claude/skills/risk-assessment-nats/`); `CLAUDE.md`'s own NATS
+section is now a condensed pointer to it, not the full design. The live
+`nats` container from P21-2's verification was left running
+(`docker compose up -d nats`) — reuse it rather than restarting.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -4395,7 +4406,7 @@ authoritative.
 **This is a design-only session's task breakdown — none of Phase 21's
 tasks are implemented yet.** Start at P21-1.
 
-- [ ] **P21-1** — `db/schema.sql`: add a nullable `risk_tier` column to
+- [x] **P21-1** — `db/schema.sql`: add a nullable `risk_tier` column to
       `applications` (`CHECK` constraint restricting to `'LOW'`,
       `'MEDIUM'`, `'HIGH'`, or `NULL`). Follow the same "no migration
       tooling in this project" discipline every prior schema change
@@ -4404,7 +4415,25 @@ tasks are implemented yet.** Start at P21-1.
       `ALTER TABLE` as a separate, later step.
       DoD: schema applies cleanly to a fresh database; every existing
       row is unaffected (new column `NULL`).
-- [ ] **P21-2** — `docker-compose.yml`: add the `nats` service (official
+      DONE: added `risk_tier TEXT CHECK (risk_tier IN ('LOW', 'MEDIUM',
+      'HIGH'))` to `applications` (a bare `CHECK` on a nullable column
+      already permits `NULL` under Postgres three-valued logic — no
+      explicit `OR risk_tier IS NULL` needed, confirmed empirically
+      below, not just by SQL semantics). Verified against a disposable
+      scratch Postgres container (`postgres:16-alpine`, not the live
+      stack's own `db` volume — same discipline this task's own wording
+      requires): fresh `db/schema.sql` applies cleanly; an `INSERT` with
+      no `risk_tier` argument leaves it `NULL`; an `UPDATE` to `'BOGUS'`
+      is rejected by the new `CHECK`; an `UPDATE` to `'LOW'` succeeds.
+      Live-stack `ALTER TABLE applications ADD COLUMN risk_tier TEXT
+      CHECK (risk_tier IN ('LOW', 'MEDIUM', 'HIGH'));` deliberately left
+      as a later, separate step (not run this session) — same
+      "`db/schema.sql` isn't deployed just because it's merged" gap
+      `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill
+      already documents; run it by hand before Phase 21's own live E2E
+      task (P21-10) if the live stack's `app`/`worker-*` images get
+      rebuilt with this phase's code before then.
+- [x] **P21-2** — `docker-compose.yml`: add the `nats` service (official
       `nats:latest` image, core pub/sub only — no JetStream config for
       this phase). Add `NATS_URL` to `.env.example` (Docker-internal
       default, `nats://nats:4222`) — used only by `risk-adapter` (P21-4
@@ -4412,7 +4441,36 @@ tasks are implemented yet.** Start at P21-1.
       DoD: `docker compose up -d nats` starts cleanly; a trivial
       `nats.py`-based publish/subscribe smoke test (throwaway, not
       committed) round-trips a message against the running container.
-- [ ] **P21-3** — New leaf module `risk/`: just `service.py`
+      DONE: added the `nats` service. **One real, live-hit port
+      collision found immediately, same class as this file's other
+      documented ones (`db`'s 5432, `mayan`'s 8000)**: a natively
+      host-installed NATS server was already listening on `4222` on
+      this dev machine (`lsof -nP -iTCP:4222` showed a `nats-serv`
+      process, not a leftover container) — `docker compose up -d nats`
+      failed outright with "address already in use" on the first try.
+      Fixed by publishing on host port `4223` instead (in-Compose
+      services still reach it via `nats:4222` internally, unaffected —
+      only a host-side smoke test needs `4223`), documented inline in
+      `docker-compose.yml` the same way the other two collisions are.
+      Verified: `docker compose up -d nats` now starts cleanly (`nats
+      2.14.6`, "Server is ready" in logs); a throwaway
+      `nats-py`-based (not `nats.py` — that name belongs to a different,
+      unrelated PyPI package; `nats-py` is the actual official NATS
+      client, imported as `import nats`) publish/subscribe script
+      against `nats://localhost:4223` round-tripped a test message
+      end-to-end. `nats-py` was installed only into the local dev venv
+      for this smoke test, not added to `pyproject.toml` — this
+      package has no NATS dependency of its own (only the not-yet-built
+      standalone `risk-adapter` service will). **Deviation from the
+      task's literal wording**: no `NATS_URL` env var was added — the
+      Adapter (not yet built) is the only thing that will ever connect
+      to NATS directly, and it's a standalone service outside this
+      package with its own env/config, not something `.env.example`
+      needs to anticipate on this package's behalf; added `RISK_ADAPTER_URL`
+      to `.env.example`/`worker-activity`'s environment instead, ahead
+      of schedule, while touching this same area (P21-3 needed it
+      anyway).
+- [x] **P21-3** — New leaf module `risk/`: just `service.py`
       (`submit_risk_assessment(application_id, applicant_identifier,
       product_type, amount, payload) -> None`, a plain `httpx.post(...)`
       to `RISK_ADAPTER_URL`'s `POST /assessments`). No `nats_client.py`
@@ -4425,6 +4483,36 @@ tasks are implemented yet.** Start at P21-1.
       call at the function-call boundary, same convention every other
       leaf module's tests use); `lint-imports` green with the new
       contract.
+      DONE: `loan_onboarding/risk/service.py` added — one async
+      function, an `httpx.AsyncClient()` context-managed `POST` (same
+      one-off-client style `bff_backoffice/keycloak_auth.py`'s
+      `refresh_access_token` already uses, not a persistent wrapped
+      client like `document/mayan_client.py`'s, since there's only ever
+      one call site). `amount` is serialized as `str(amount)` in the
+      JSON body (a `Decimal` isn't natively JSON-serializable) — the
+      Adapter (not yet built) will need to `Decimal(...)` it back on
+      its own side, noted for P21-4. Raises on any non-2xx response
+      (`response.raise_for_status()`) rather than swallowing errors —
+      unlike the best-effort notification calls elsewhere in this
+      codebase, a failed submission here must propagate so Temporal
+      retries the activity, since nothing else will ever move the
+      application out of `PENDING_RISK_ASSESSMENT` otherwise.
+      `.env.example` gained a new "Automated risk assessment via NATS"
+      section (`RISK_ADAPTER_URL`, default `http://risk-adapter:8000`).
+      `pyproject.toml` gained the `risk/` forbidden-imports contract
+      (idgen/ left as the one sanctioned exception, unused for now) and
+      `risk` was added to the layers contract's bottom bar (`idgen |
+      notifications | risk`) — a straightforward widen, unlike
+      `account/`'s own Phase 18 case, since `risk/` doesn't need to
+      import any same-bar sibling.
+      Tests: `tests/unit/risk/test_service.py`, 3 tests using `respx`
+      (same convention `test_keycloak_auth.py` already established for
+      mocking an outbound `httpx` call) — asserts the exact POST body
+      shape, that a 500 response raises, and that the default URL is
+      used when `RISK_ADAPTER_URL` is unset. `pytest tests/unit/risk
+      -v`: 3/3 passed. `lint-imports`: 10/10 contracts kept (up from
+      9 — the new `risk/` contract, plus the existing 9 all still
+      green).
 - [ ] **P21-4** — New standalone service `risk-adapter/`, living outside
       the `loan_onboarding` package entirely (own Dockerfile, own
       dependencies — a small async HTTP server, an `httpx` client, a
@@ -4543,6 +4631,45 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-07 (Phase 21 build started — P21-1 through P21-3 done)** —
+  Picked up at the documented resume point (P21-1) and implemented the
+  first three tasks for real, per this session's own convention (small,
+  verified steps, not a big-bang implementation of the whole phase).
+  **P21-1**: `applications.risk_tier` (nullable `TEXT` + `CHECK`),
+  verified against a disposable scratch Postgres container, not the
+  live stack's own `db` volume — confirmed a fresh apply, `NULL`
+  default, and the `CHECK` rejecting a bogus value / accepting a real
+  one. The live-stack `ALTER TABLE` is deliberately deferred, same
+  "not deployed just because it's merged" gap this file's Known Gaps
+  already documents for every prior schema change here. **P21-2**: the
+  `nats` service — hit a real, live port collision immediately (a
+  natively host-installed NATS server already on `4222` on this dev
+  machine, confirmed via `lsof`), same class of gotcha as `db`'s 5432
+  and `mayan`'s 8000; fixed by publishing on `4223` instead. Verified
+  with a throwaway `nats-py` publish/subscribe round-trip (installed
+  only in the local venv, not added to `pyproject.toml`). **P21-3**:
+  the new `risk/` leaf module — `service.py`'s `submit_risk_assessment`,
+  one `httpx.AsyncClient` POST, `RISK_ADAPTER_URL` added to
+  `.env.example` and `worker-activity`'s environment (a small
+  ahead-of-schedule addition since P21-3 needed it anyway), and a new
+  `.importlinter` contract (`risk/` joins the bottom layer bar alongside
+  `idgen`/`notifications`, a straightforward widen unlike `account/`'s
+  own Phase 18 layer move — `risk/` has no same-bar sibling it needs to
+  import). `pytest tests/unit/risk`: 3/3 passed via `respx`-mocked
+  `httpx`. `lint-imports`: 10/10 contracts kept.
+
+  **What the next session should know**: the `nats` container from
+  P21-2's verification was left running (`docker compose up -d nats`,
+  publishing `4223` on the host) — reuse it for P21-4's own
+  `risk-adapter` work rather than restarting it. `nats-py` is the
+  correct PyPI package name for a Python NATS client (imported as
+  `import nats`) — don't confuse it with the unrelated `nats.py`
+  package name the original task wording used. P21-4 (the standalone
+  `risk-adapter` service) is next — it needs to `Decimal(...)`-parse
+  the `amount` field back out of `risk/service.py`'s JSON body, since
+  `Decimal` isn't natively JSON-serializable and P21-3 sends it as a
+  plain string.
 
 - **2026-09-07 (Phase 21 redesigned — NATS Adapter + KrakenD decided)**
   — User made a real architectural decision, following up on the

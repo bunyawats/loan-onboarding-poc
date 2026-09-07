@@ -184,6 +184,26 @@ services:
       - mayan-db
       - mayan-redis
 
+  # --- P21-2: core NATS pub/sub only, no JetStream -- neither leg of
+  # Phase 21's risk-assessment flow needs replay/durability beyond what
+  # Temporal's own activity retry already gives the publishing side
+  # (CLAUDE.md's "Automated risk assessment via NATS" / the
+  # risk-assessment-nats skill). The only consumer of this service is
+  # the standalone risk-adapter service (not yet added) -- nothing in
+  # the loan_onboarding Python package talks to NATS directly.
+  nats:
+    image: nats:latest
+    ports:
+      # Published on 4223, NOT 4222 -- same "native host process already
+      # bound to the default port" collision this file's other services
+      # already hit (db's 5432, mayan's 8000 -- see CLAUDE.md's Known
+      # Gaps): a natively-installed NATS server was found live, already
+      # listening on 4222 on this dev machine. Every in-Compose service
+      # (currently just the not-yet-added risk-adapter) reaches this one
+      # via the internal hostname `nats:4222`, unaffected by the host
+      # port chosen here -- only a host-side smoke test needs 4223.
+      - "4223:4222"
+
   # --- P7-2: worker processes (worker_main.py), same WORKER_MODE-split
   # pattern as review-approval-temporal's own worker-workflow/
   # worker-activity services.
@@ -231,6 +251,13 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-}
+      # P21-3: application/activities.py's submit_risk_assessment
+      # activity runs here and calls risk.service.submit_risk_assessment,
+      # which POSTs to this URL -- see .env.example. Left pointed at the
+      # not-yet-added risk-adapter service's default Docker-internal
+      # address; harmless until Phase 21's later tasks add that service
+      # and wire this activity into the workflow (P21-5).
+      RISK_ADAPTER_URL: ${RISK_ADAPTER_URL:-http://risk-adapter:8000}
     restart: on-failure
 
   # --- P12-3: the single web process (app.py mounts both bff_customer

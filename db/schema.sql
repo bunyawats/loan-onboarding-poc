@@ -191,6 +191,14 @@ CREATE TABLE applications (
     manager_comment            TEXT,
     manager_decided_at         TIMESTAMPTZ,
 
+    -- Written only by a risk-driven persist_decision (Phase 21, "Automated
+    -- risk assessment via NATS" -- see CLAUDE.md / the risk-assessment-nats
+    -- skill), never by a human decision, which leaves this NULL forever.
+    -- NULL also covers every application that predates this column and
+    -- every application still awaiting a decision of any kind.
+    risk_tier                  TEXT
+                                   CHECK (risk_tier IN ('LOW', 'MEDIUM', 'HIGH')),
+
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 

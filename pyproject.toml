@@ -67,7 +67,7 @@ layers = [
     "customer | document",
     "account",
     "workflow",
-    "idgen | notifications",
+    "idgen | notifications | risk",
 ]
 containers = ["loan_onboarding"]
 
@@ -134,6 +134,29 @@ forbidden_modules = [
     "loan_onboarding.document",
     "loan_onboarding.workflow",
     "loan_onboarding.application",
+    "loan_onboarding.bff_customer",
+    "loan_onboarding.bff_backoffice",
+    "loan_onboarding.worker_main",
+    "loan_onboarding.reconcile",
+]
+
+[[tool.importlinter.contracts]]
+name = "risk/ never imports anything else in this codebase, except idgen/ (Phase 21)"
+type = "forbidden"
+# P21-3: risk/ is the thinnest leaf in the codebase -- one httpx.post()
+# call to the standalone risk-adapter service, no NATS awareness at
+# all (that lives entirely outside this Python package -- see
+# CLAUDE.md's "Automated risk assessment via NATS"). idgen/ is left
+# available (the same exception every other leaf gets) even though
+# this module doesn't currently generate its own id.
+source_modules = ["loan_onboarding.risk"]
+forbidden_modules = [
+    "loan_onboarding.customer",
+    "loan_onboarding.account",
+    "loan_onboarding.document",
+    "loan_onboarding.workflow",
+    "loan_onboarding.application",
+    "loan_onboarding.notifications",
     "loan_onboarding.bff_customer",
     "loan_onboarding.bff_backoffice",
     "loan_onboarding.worker_main",
