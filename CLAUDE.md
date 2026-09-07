@@ -1495,17 +1495,15 @@ No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
   no account to tag at upload time at all, uploads happen before
   submission, before any account can possibly exist (see "Applying
   without being a customer yet").
-  **`customer_id` (see "Document metadata assignment lifecycle" below)**
-  is optional and caller-supplied, not resolved internally — same
-  "`document/` is a leaf module, never imports `application/`" reasoning
-  `applicant_identifier` already follows: the caller (`bff_customer`)
-  already knows it, when it's knowable at all (a returning applicant who
-  already resolves to an existing customer), and passes it straight
-  through; `None` for a brand-new applicant, same as today.
-  `applicant_identifier` is required here, not resolved internally —
-  `document/` is a leaf module and never imports `application/`, so the
-  caller (`bff_customer`, which already has it from the session cookie)
-  passes it straight through.
+  Neither `applicant_identifier` nor `customer_id` (see "Document
+  metadata assignment lifecycle" below) is resolved internally —
+  `document/` is a leaf module and never imports `application/`, so
+  both are caller-supplied: `bff_customer` already has
+  `applicant_identifier` from the session cookie and passes it straight
+  through (required); `customer_id` is optional, passed straight
+  through too when it's knowable at all (a returning applicant who
+  already resolves to an existing customer), `None` for a brand-new
+  one.
 - `service.list_documents(application_id)`.
 - `service.check_completeness(application_id, product_type,
   exclude_categories=None) -> list[str]` (missing categories, empty if

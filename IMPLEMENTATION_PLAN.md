@@ -4478,8 +4478,35 @@ is.)*
   appears to be the practical floor for prose-tightening in "Modules,
   in detail"** — a fifth "continue trimming" request should probably
   look at a different section of the file, or a different technique,
-  rather than re-sweeping this one again. Not committed yet this
-  session.
+  rather than re-sweeping this one again. Committed and pushed
+  (`0538c87`).
+
+  **Fifth pass, same session, user asked again**: switched technique
+  since the "corrected from an earlier draft" sweep was declared done —
+  ran an 8-word-shingle repeated-phrase scan across the whole "Modules,
+  in detail" range (946-1787 at the time) looking for near-duplicate
+  reasoning stated twice, rather than narrative to cut. Found one real
+  instance: `document/`'s `service.upload(...)` bullet explained the
+  "`document/` is a leaf module, never imports `application/`, so the
+  caller passes it straight through" reasoning twice in five lines —
+  once for `customer_id`, once for `applicant_identifier` — merged into
+  a single explanation covering both fields. Everything else the scan
+  surfaced was expected, legitimate repetition: the same handful of
+  cross-reference phrases (`See "Applying without being a customer
+  yet"...`, `See "Returning-customer profile refresh and ID reuse"
+  above...`) pointing back at the same design sections from multiple
+  call sites, which is what a reference document is supposed to do, not
+  bloat. `CLAUDE.md`: 2,823 → 2,821 lines. **Confirms the round-4
+  read**: "Modules, in detail" has no more low-risk trimming left in
+  it — both techniques tried (narrative-scaffolding removal, duplicate-
+  reasoning merge) are now exhausted here. A sixth "continue trimming"
+  request aimed at this same section should be met with that finding
+  rather than another marginal edit; if more trimming is wanted, it
+  needs a different section (e.g. "Document hierarchy", "Identity",
+  "Data storage" haven't had either sweep run against them) or a
+  structural change (e.g. extracting rationale for already-settled
+  historical corrections into a separate appendix), not a fourth pass
+  over this one. Not committed yet this session.
 
 - **2026-09-07 (docs consolidation, round 2)** — User asked to offload
   `CLAUDE.md` context to a more dedicated document again — the same
