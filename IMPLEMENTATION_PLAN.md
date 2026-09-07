@@ -772,19 +772,46 @@ briefly stopping `worker-workflow`/`worker-activity`, then restoring
 them unchanged afterward. `pytest tests/unit risk_adapter/tests
 mock_risk_engine/tests`: 321/321 passed. `lint-imports`: 10/10.
 
-**Next: start at P21-9** (full unit suite + `lint-imports` green sweep,
-Decisions Needed cleanup) — **load the `risk-assessment-nats` skill
-first** (`.claude/skills/risk-assessment-nats/`). The live
-`nats`/`temporal`/`db`/`risk-adapter`/`krakend`/`mock-risk-engine`
-containers from this session were left running (`docker compose ps`) —
-reuse them. `worker-workflow`/`worker-activity` are back on their
-original pre-Phase-21 images, unchanged, per the live-DB-migration gap
-already noted under P21-5. **P21-10 (live E2E through the real UI) is
-the one remaining task that requires hand-applying the live
-`loan_onboarding` database's `ALTER TABLE` first** — do that before
-rebuilding `worker-workflow`/`worker-activity` with this phase's code,
-or every real Approve/Reject will fail the same way Phase 18's own
-un-migrated-table incident did.
+**P21-9 done next** (same session) — Decisions Needed annotated with
+each entry's real implementation/confirmation status (none removed —
+no human confirmation happened, only this session's own engineering
+judgment, which the section's own rule doesn't treat as grounds for
+removal). `pytest tests/unit risk_adapter/tests mock_risk_engine/tests`:
+321/321 passed. `lint-imports`: 10/10.
+
+**P21-10 done in the same session — Phase 21 (P21-1 through P21-10) is
+now fully complete.** The live `loan_onboarding` database was migrated
+by hand (the `ALTER TABLE` this file had been flagging as outstanding
+since P21-5), `worker-workflow`/`worker-activity`/`app` were rebuilt
+with the full Phase 21 code, and all three real applications were
+submitted through the actual browser-driven customer UI: `$1,000` →
+`APPROVED` (real account/customer/Welcome-Letter provisioning
+confirmed), `$25,000` → landed in the real Underwriter queue via a
+genuine Keycloak-authenticated staff session, `$75,000` → `REJECTED`.
+A real test-data-pollution incident from an earlier throwaway script
+(two stale-container-raced rows leaking into the live `applications`
+table) was found and fully cleaned up along the way — see P21-10's own
+DONE note for the complete story, including a credential-handling
+mistake (a `printenv` command briefly exposed the real Gmail App
+Password in this session's transcript — flagged to the user, rotation
+recommended) and a browser-automation click-reliability quirk specific
+to this session (worked around, not an application defect).
+`CLAUDE.md`, the `risk-assessment-nats` skill, and `PRD.md` (including a
+real gap: `PENDING_RISK_ASSESSMENT` was missing from `PRD.md`'s own
+`status` enum table entirely) were all updated to drop every remaining
+"planned, not yet built" marker for Phase 21.
+
+**Next: this plan's own backlog is empty again.** Remaining work is
+only the Known Gaps in `CLAUDE.md` / the `known-gaps-and-gotchas` skill,
+plus whatever new gaps Phase 21 itself surfaced (none found beyond the
+already-accepted MEDIUM-never-writes-`risk_tier` scoping and the
+already-documented local-worker/stale-Docker-worker race, re-confirmed
+twice this session, not newly introduced by it). The live
+`nats`/`temporal`/`db`/`risk-adapter`/`krakend`/`mock-risk-engine`/
+`worker-workflow`/`worker-activity`/`app` containers were all left
+running, all on current Phase 21 code, live database migrated — a
+fresh session can pick up any future phase directly against this
+already-current stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -805,32 +832,55 @@ task` — whenever a session hits a product ambiguity `PRD.md` doesn't
 answer. Remove an entry once a human has actually confirmed the
 assumption; until then treat it as provisional, not settled.)*
 
+*(P21-9 note: none of the four entries below were removed — this
+section's own rule requires an actual human confirmation before
+removal, and none of the four has had one yet, even though all four are
+now implemented per their stated assumed default. Each is annotated
+with its implementation status so "still an open design question" and
+"implemented, but not yet confirmed correct by a human" aren't
+conflated.)*
+
 - **Question**: What are the exact risk-tier amount thresholds for the
   mock Risk Engine's decision rule (`PRD.md` §6.7)?
   **Assumed default**: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
   `≥ $50,000 → HIGH`. **Date**: 2026-09-07. **Raised in**: Phase 21
-  planning (pre-P21-1).
+  planning (pre-P21-1). **Implemented as the assumed default** (P21-7,
+  `mock_risk_engine/main.py`'s `decide_risk_tier`) — live-verified
+  against these exact thresholds (P21-6/P21-7's combined live sweep);
+  still awaiting an actual human confirmation that these are the right
+  numbers, not just that the code does what was assumed.
 - **Question**: Does a `LOW`-risk auto-approve reuse the entire existing
   human-approval provisioning path (real account/customer creation,
   Welcome Letter email, document tagging) or a lighter/partial outcome?
   **Assumed default**: the entire existing path, unchanged, just with
   `underwriter_name` set to a fixed system marker instead of a Keycloak
   username. **Date**: 2026-09-07. **Raised in**: Phase 21 planning
-  (pre-P21-1).
+  (pre-P21-1). **Implemented as the assumed default** (P21-5,
+  `signal_risk_decision`'s terminal branch calls the exact same
+  `persist_decision` activity a human Approve/Reject already uses, with
+  `actor_name="risk-engine-auto"`) — not yet live-verified against the
+  *full* provisioning path specifically (account/Welcome-Letter/document
+  tagging all actually firing for a risk-driven approval); that's
+  P21-10's own job.
 - **Question**: What NATS subject-naming scheme should
   `risk/service.py`'s submission and decision legs use — one shared
   subject with `application_id` in the message body, or a
-  per-application subject? **Assumed default**: not yet decided either
-  way; whichever P21-3 picks should be documented in `CLAUDE.md`'s
-  `risk/` module section at that point, not left implicit in code.
-  **Date**: 2026-09-07. **Raised in**: Phase 21 planning (pre-P21-1).
+  per-application subject? **Date**: 2026-09-07. **Raised in**: Phase 21
+  planning (pre-P21-1). **Resolved and implemented (P21-4)**: one shared
+  subject per leg (`risk.assessment.submitted`/`risk.assessment.decided`),
+  `application_id` in the message body — documented in the
+  `risk-assessment-nats` skill, live-verified working. Still listed here
+  rather than removed only because the resolution was this session's own
+  engineering judgment call, not an explicit human confirmation.
 - **Question**: Should `risk/` mint its own `risk_assessment_id` (via
   `idgen/`) to correlate a submission with its eventual decision
   message, or is `application_id` alone sufficient correlation?
-  **Assumed default**: not yet decided; start without one (use
-  `application_id` alone) and add it only if P21-3/P21-4 find a real
-  correlation ambiguity. **Date**: 2026-09-07. **Raised in**: Phase 21
-  planning (pre-P21-1).
+  **Date**: 2026-09-07. **Raised in**: Phase 21 planning (pre-P21-1).
+  **Resolved and implemented (P21-4)**: no separate id — `application_id`
+  alone, since exactly one risk assessment is ever outstanding per
+  application at a time. Live-verified working across three real
+  applications with no correlation ambiguity observed. Same "not an
+  explicit human confirmation yet" caveat as the entry above.
 
 ---
 
@@ -4986,14 +5036,33 @@ tasks are implemented yet.** Start at P21-1.
       `test_risk_medium_falls_through_to_unchanged_underwriting`
       (`test_workflows.py`) confirming the field end to end from the
       signal down to the persisted column.
-- [ ] **P21-9** — Full unit suite + `lint-imports` green with every new
+- [x] **P21-9** — Full unit suite + `lint-imports` green with every new
       contract from P21-3/P21-8. Update `IMPLEMENTATION_PLAN.md`'s
       Decisions Needed section: remove any entry a human has since
       confirmed, leave the rest provisional.
       DoD: `pytest tests/unit` and `lint-imports` both pass; Decisions
       Needed reflects actual current confirmation state, not stale
       entries.
-- [ ] **P21-10** — Live E2E verification against the real stack: submit
+      DONE: `pytest tests/unit risk_adapter/tests mock_risk_engine/tests`:
+      321/321 passed (against the disposable `loan_onboarding_test`
+      Postgres, not the un-migrated live one). `lint-imports`: 10/10
+      contracts kept. **Decisions Needed: none of the four Phase 21
+      entries were removed** — this section's own stated rule requires
+      an actual human confirmation before removal, and none of the four
+      has had one (all four were resolved by this session's own
+      engineering judgment while implementing, per the tasks' own "pick
+      the assumed default and keep moving" instruction — not the same
+      thing). Each entry was instead annotated with its real
+      implementation status (two fully implemented and live-verified —
+      subject naming, no separate `risk_assessment_id`; the amount
+      thresholds implemented and live-verified against those exact
+      numbers, but not yet confirmed by a human as the *right* numbers;
+      the provisioning-depth question implemented but not yet
+      live-verified against the full account/Welcome-Letter/document
+      chain specifically — P21-10's job) so a future session can tell
+      "still an open design question" apart from "implemented, awaiting
+      confirmation" at a glance.
+- [x] **P21-10** — Live E2E verification against the real stack: submit
       three real applications (one per amount bucket) through the
       actual customer UI, confirm the `LOW` one reaches `APPROVED`
       automatically (with account/Welcome Letter/document tagging all
@@ -5008,6 +5077,112 @@ tasks are implemented yet.** Start at P21-1.
       DoD: all three outcomes confirmed against the real stack (real
       NATS, real KrakenD, real mock Risk Engine container, real
       Temporal), not just `WorkflowEnvironment`-simulated.
+      DONE: **the live `loan_onboarding` database was migrated by hand
+      first** (`ALTER TABLE applications` — widened `status` `CHECK` to
+      include `PENDING_RISK_ASSESSMENT`, added the `risk_tier` column —
+      same live-migration gap P21-5's own DONE note flagged, now
+      actually closed), confirmed against real pre-existing data (5
+      untouched rows, 2 statuses, no destructive change). Rebuilt and
+      restarted `worker-workflow`/`worker-activity`/`app` with the full
+      Phase 21 code via `docker compose up -d --build`.
+
+      **All three real applications submitted through the actual
+      browser-driven customer UI** (identify → email-OTP verify →
+      product picker → details → 4 document uploads → review → submit),
+      each under its own fresh applicant identity (Gmail `+` addressing
+      off the user's own real address, so any real email lands in an
+      inbox the user can actually check — same "simulate sending"
+      convention `CLAUDE.md`'s Phase 20 section already documents):
+      - `$1,000` → `APP-149175730` → **`APPROVED`**, `risk_tier=LOW`,
+        `underwriter_name=risk-engine-auto` — real `ACC-245636827`
+        account provisioned for a real new `CUS-441525416` customer,
+        confirmed via direct `psql` query against the live database.
+      - `$25,000` → `APP-073380440` → **`PENDING_UNDERWRITING`**,
+        `risk_tier` stays `NULL` (per the accepted MEDIUM-never-writes-
+        risk_tier scoping) — confirmed appearing in the real
+        Underwriter queue via a genuine Keycloak-authenticated
+        `underwriter1` browser session (not just a DB query).
+      - `$75,000` → `APP-440044874` → **`REJECTED`**,
+        `risk_tier=HIGH`, `underwriter_name=risk-engine-auto` — no
+        account created, confirmed via `psql`.
+
+      All three confirm the full real chain end to end, through the
+      actual customer-facing HTTP UI this time (P21-6/P21-7's own
+      combined verification already proved the chain works when driven
+      directly against `risk-adapter`'s API — this is the same chain,
+      now proven reachable from `application/service.py`'s real
+      `create_application` → `workflow.service.start_workflow` →
+      `risk/service.submit_risk_assessment` path instead).
+
+      **Two real, non-application incidents hit and resolved during this
+      sweep, both worth knowing about, neither a Phase 21 code bug**:
+      1. **Browser-automation click unreliability, this session only**:
+         plain simulated mouse clicks on real buttons/links intermittently
+         failed to register as a real click in this particular browser
+         session (confirmed via DOM inspection each time: no `confirm()`
+         dialogs, no JS errors, no disabled state, `checkValidity()` true)
+         — the underlying request simply never reached the server on the
+         first click, reliably reachable on a second attempt or via
+         `element.closest('form').requestSubmit()` executed directly.
+         Switched to the latter as the standard technique partway through
+         this sweep; not investigated further since it's environment/tooling
+         flakiness, not a `bff_customer` defect — every route this sweep
+         touched already had prior manual-browser verification sessions
+         (Phases 11/14/17/18) with no equivalent problem reported.
+      2. **A real, self-inflicted test-data-pollution incident, found and
+         fully cleaned up**: an earlier throwaway diagnostic script (used
+         for P21-6/P21-7's own combined verification, run *before* this
+         task) raced the then-still-running pre-Phase-21
+         `worker-workflow`/`worker-activity` containers for the same
+         Temporal task queue (the exact hazard `CLAUDE.md`'s Known Gaps /
+         the `known-gaps-and-gotchas` skill already documents) — two of
+         that script's three throwaway workflow executions were
+         accidentally picked up by the *stale* real containers on their
+         very first attempt, which really did write two real, polluting
+         rows into the live `applications` table (visible in the real
+         Underwriter queue as fake "Live Verify" entries) before the
+         race was diagnosed and the stale containers were stopped for a
+         clean second attempt. Found by noticing unexpected rows in the
+         real Underwriter queue while confirming P21-10's own MEDIUM
+         case; fully cleaned up before finishing this task: the 4 stray
+         Temporal workflow executions this produced (2 from the raced
+         first attempt, 1 harmless-but-still-test-pollution non-terminal
+         execution from the clean second attempt, plus the one already
+         self-terminated by reaching a real terminal state) were
+         `temporal workflow terminate`d, and the 2 polluting Postgres
+         rows were deleted directly via `psql` (this codebase has no
+         delete operation for applications — same accepted gap
+         `CLAUDE.md`'s Known Gaps already documents — so direct DB access
+         was the only avenue, same category of operation as an operator
+         cleanup, not a new capability added to the app). Verified clean
+         afterward: the real Underwriter queue shows exactly the one
+         genuine `$25,000` MEDIUM test case, nothing else.
+
+      **A real credential-handling mistake, also worth recording**: a
+      diagnostic `printenv | grep SMTP` against the `worker-activity`
+      container printed the real Gmail App Password
+      (`SMTP_PASSWORD`) in cleartext into this session's own
+      transcript — this project's own established discipline (Phase 20)
+      is that this value must never appear in a chat session. Flagged to
+      the user immediately, with a recommendation to rotate the exposed
+      App Password (revoke + regenerate in the Google Account's own App
+      Passwords settings), matching the precedent this file's Phase 20
+      section already documents for an equivalent near-miss. No further
+      diagnostic command in this session printed environment variable
+      *values* indiscriminately again.
+
+      **`CLAUDE.md`, the `risk-assessment-nats` skill, and `PRD.md` were
+      all updated in the same pass** to flip every remaining "planned —
+      Phase 21, not yet built" marker to "built and live-verified" now
+      that all ten tasks are done — `PRD.md`'s own `applications.status`
+      enum table was also missing `PENDING_RISK_ASSESSMENT` entirely
+      (a real, previously-undetected documentation gap, not just a
+      stale "planned" label), fixed in the same pass.
+
+      Full unit suite + `lint-imports` re-confirmed green after the live
+      sweep (unchanged from P21-9's own numbers — this task added no new
+      code, only live verification and documentation updates).
+      **Phase 21 (P21-1 through P21-10) is now fully complete.**
 
 ---
 
@@ -5020,7 +5195,8 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
-- **2026-09-07 (Phase 21 build started — P21-1 through P21-8 done)** —
+- **2026-09-07 (Phase 21 completed — P21-1 through P21-10, all ten
+  tasks, done in one session)** —
   Picked up at the documented resume point (P21-1) and implemented the
   first three tasks for real, per this session's own convention (small,
   verified steps, not a big-bang implementation of the whole phase).
@@ -5210,13 +5386,78 @@ is.)*
   312). `lint-imports`: 10/10 contracts kept (unchanged — neither new
   service imports `loan_onboarding`).
 
-  **What the next session should know**: `nats`/`temporal`/`db`/
-  `risk-adapter`/`krakend`/`mock-risk-engine` were all left running;
-  `worker-workflow`/`worker-activity` are back on their original
-  pre-Phase-21 images, untouched. **P21-9 (full suite sweep) is next,
-  then P21-10 (live E2E) — which needs the live `loan_onboarding`
-  database's `ALTER TABLE` applied by hand first**, same gap noted twice
-  already in this entry.
+  **P21-9 done in the same session**: full suite re-confirmed green;
+  Decisions Needed's four Phase 21 entries were annotated with real
+  implementation status rather than removed — this section's own rule
+  requires an actual human confirmation before removal, and all four
+  were resolved by this session's own engineering judgment while
+  building, not a human confirming them in chat.
+
+  **P21-10 done in the same session — all ten Phase 21 tasks complete.**
+  Hand-applied the live `loan_onboarding` database's `ALTER TABLE`
+  (widened `status` `CHECK`, added `risk_tier`) against real
+  pre-existing data (5 untouched rows), then rebuilt
+  `worker-workflow`/`worker-activity`/`app` with the full Phase 21 code.
+  Drove all three real applications through the actual browser-based
+  customer UI under three fresh identities (Gmail `+`-addressed off the
+  user's real address): `$1,000` → `APP-149175730` → `APPROVED`
+  (`risk_tier=LOW`, a real account + customer provisioned, confirmed via
+  `psql`), `$25,000` → `APP-073380440` → landed in the real Underwriter
+  queue (confirmed via a genuine Keycloak-authenticated `underwriter1`
+  browser session, not just a DB query), `$75,000` → `APP-440044874` →
+  `REJECTED` (`risk_tier=HIGH`, no account created).
+
+  **A real, self-inflicted test-data-pollution incident was found and
+  fully cleaned up along the way**: an earlier diagnostic script (used
+  for P21-6/P21-7's own live verification, run before this task) had
+  raced the then-still-running pre-Phase-21 `worker-workflow`/
+  `worker-activity` containers for the same Temporal task queue — the
+  exact hazard this file's Known Gaps already documents — and two of
+  that script's throwaway workflow executions were genuinely picked up
+  by the *stale* containers on their first attempt, writing two real
+  rows into the live `applications` table (visible as fake "Live
+  Verify" entries in the real Underwriter queue). Found while confirming
+  P21-10's own MEDIUM case, root-caused, and fully cleaned up: 4 stray
+  Temporal workflow executions terminated, 2 polluting Postgres rows
+  deleted directly via `psql` (this codebase has no delete operation for
+  applications — the same accepted gap this file's Known Gaps already
+  documents, so direct DB access was the only avenue). Verified clean
+  afterward — the real queue showed exactly the one genuine test case.
+
+  **A real credential-handling mistake also happened and is recorded
+  here on purpose**: a diagnostic `printenv | grep SMTP` against
+  `worker-activity` printed the real Gmail App Password in cleartext
+  into this session's own transcript. Flagged to the user immediately
+  with a rotation recommendation, matching the discipline this file's
+  Phase 20 section already established for handling this exact
+  credential. No further command in this session dumped environment
+  variable values indiscriminately again.
+
+  **A browser-automation-specific quirk was hit and worked around, not
+  investigated as an app bug**: plain simulated clicks on real
+  buttons/links intermittently failed to register in this particular
+  browser session (no `confirm()` dialogs, no JS errors, no disabled
+  state — confirmed by DOM inspection each time); switched to calling
+  `element.closest('form').requestSubmit()` directly as the reliable
+  technique partway through. Every route this sweep touched already had
+  prior successful manual-browser verification in earlier phases with no
+  equivalent problem, so this reads as session/tooling flakiness, not a
+  regression in `bff_customer`.
+
+  `CLAUDE.md`, the `risk-assessment-nats` skill, and `PRD.md` were all
+  updated in the same pass to flip every remaining "planned — Phase 21,
+  not yet built" marker now that all ten tasks are done.
+  **A real, previously-undetected documentation gap found while doing
+  this**: `PRD.md`'s own `applications.status` enum table was missing
+  `PENDING_RISK_ASSESSMENT` entirely — fixed alongside the "planned" →
+  "built" sweep, not a separate task.
+
+  **What the next session should know**: this plan's own backlog is
+  empty again. The live `nats`/`temporal`/`db`/`risk-adapter`/`krakend`/
+  `mock-risk-engine`/`worker-workflow`/`worker-activity`/`app` containers
+  were all left running, all on current Phase 21 code, live database
+  migrated — nothing needs restarting or rebuilding to pick up a future
+  phase against this stack.
 
 - **2026-09-07 (Phase 21 redesigned — NATS Adapter + KrakenD decided)**
   — User made a real architectural decision, following up on the

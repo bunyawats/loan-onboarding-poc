@@ -1,15 +1,16 @@
 ---
 name: risk-assessment-nats
-description: The planned (Phase 21, not yet built) design for loan-onboarding-poc's automated risk assessment -- a standalone NATS Adapter service as the sole owner of NATS connectivity, KrakenD fronting the Risk-Engine HTTP boundary, the mock Risk Engine (HTTP-only, no NATS), the new PENDING_RISK_ASSESSMENT workflow state, and the thin risk/ leaf module. Triggers on "NATS", "risk assessment", "risk/ module", "NATS Adapter", "KrakenD", "PENDING_RISK_ASSESSMENT", "signal_risk_decision", "submit_risk_assessment", "mock-risk-engine", "risk_tier", "Phase 21".
+description: The built and live-verified (Phase 21) design for loan-onboarding-poc's automated risk assessment -- a standalone NATS Adapter service as the sole owner of NATS connectivity, KrakenD fronting the Risk-Engine HTTP boundary, the mock Risk Engine (HTTP-only, no NATS), the PENDING_RISK_ASSESSMENT workflow state, and the thin risk/ leaf module. Triggers on "NATS", "risk assessment", "risk/ module", "NATS Adapter", "KrakenD", "PENDING_RISK_ASSESSMENT", "signal_risk_decision", "submit_risk_assessment", "mock-risk-engine", "risk_tier", "Phase 21".
 ---
 
-### Automated risk assessment via NATS (planned — Phase 21, not yet built)
+### Automated risk assessment via NATS (built and live-verified — Phase 21)
 
-This section describes the target design for `IMPLEMENTATION_PLAN.md`'s
-Phase 21, written first per this project's own convention, before any
-of it is implemented — nothing below is built yet; every "planned"
-marker in this section and in "`risk/` — Risk assessment module" below
-is literal, not a stale leftover. Raised directly by the user as a
+**All of Phase 21 (P21-1 through P21-10) is now built and live-verified
+against the real stack** — every "planned"/"not yet built" marker
+below that hasn't already been corrected in place describes a real
+implementation detail, not a future intention; the design narrative
+below was written first, per this project's own convention, before any
+of it existed. Raised directly by the user as a
 future enhancement, distinct from Phase 18-20's account-closure/
 notification work: simulate a genuinely **external, asynchronous**
 system — a Risk Engine — consulted over a message broker (NATS) rather
@@ -244,7 +245,7 @@ so it never needs NATS awareness even in principle.
   a new unit test.
 
 
-### `risk/` -- Risk assessment module (planned -- Phase 21, not yet built)
+### `risk/` -- Risk assessment module (built and live-verified -- Phase 21)
 
 *(See "Automated risk assessment via NATS" above for the full design
 this module implements — this section covers only its own code shape,

@@ -172,13 +172,13 @@ them:
   no idea what "application" data looks like — see "Breaking the cycle"
   below for how its activities still end up writing application data
   without `workflow/` importing `application/` to do it.
-- **`risk/` (planned — Phase 21, not yet built) never imports anything
-  else in this codebase except `idgen/`, if it ends up needing one.** A
-  leaf module, same shape as `document/`: it knows nothing about loan
-  applications, just a NATS connection and a subject-naming convention.
-  See "Automated risk assessment via NATS" below for the full design.
-- **`application/` imports `document/`, `workflow/`, and (planned,
-  Phase 21) `risk/`, never the reverse.** It calls
+- **`risk/` (built, Phase 21) never imports anything else in this
+  codebase except `idgen/`.** A leaf module, thinner even than
+  `document/`: no NATS connection of its own, just one `httpx.post` to
+  the standalone `risk-adapter` service. See "Automated risk assessment
+  via NATS" below for the full design.
+- **`application/` imports `document/`, `workflow/`, and `risk/` (Phase
+  21), never the reverse.** It calls
   `document.service.check_completeness(...)` directly (an in-process
   function call — no HTTP, no serialization boundary beyond normal
   Python objects) and
@@ -188,8 +188,8 @@ them:
   justified, single-file-scoped exception `account/activities.py`
   already has from Phase 18, not a general "`application/` may import
   `notifications/`" opening (nothing
-  in `application/service.py` needs it). **Planned (Phase 21)**:
-  `application/activities.py` will also call
+  in `application/service.py` needs it). **Built (Phase 21)**:
+  `application/activities.py` also calls
   `risk.service.submit_risk_assessment(...)` from a new
   `submit_risk_assessment` activity — same "activities.py is where
   outbound calls to leaf integration modules happen" pattern
@@ -365,22 +365,28 @@ for the full design and the two real gotchas hit live (Docker stdout
 buffering hiding every `print()`-based delivery confirmation in this
 codebase, and a browser-automation-only `confirm()`-dialog hang).
 
-### Automated risk assessment via NATS (planned — Phase 21, not yet built)
+### Automated risk assessment via NATS (built and live-verified — Phase 21)
 
-Not yet built. The plan: a new `PENDING_RISK_ASSESSMENT` workflow state
-entered right after `persist_application`, a standalone NATS Adapter
-service as the *only* thing anywhere in this system that depends on the
-NATS protocol, KrakenD fronting the Risk-Engine HTTP boundary in both
+A new `PENDING_RISK_ASSESSMENT` workflow state entered right after
+`persist_application`, a standalone NATS Adapter service (`risk-adapter`)
+as the *only* thing anywhere in this system that depends on the NATS
+protocol, KrakenD fronting the Risk-Engine HTTP boundary in both
 directions, and a `risk/` leaf module thinner than
 `document/mayan_client.py` (one `httpx.post` call, no NATS awareness at
 all, no import from `application/`/`workflow/`/`customer/`/`account/`/
 `document/`). `LOW`/`HIGH` risk tiers auto-resolve through the existing
 `persist_decision` APPROVE/REJECT paths, with `underwriter_name` set to
 a fixed `"risk-engine-auto"` marker; `MEDIUM` falls straight through to
-today's human `PENDING_UNDERWRITING` queue, unchanged. **Load the
-`risk-assessment-nats` skill** before starting any Phase 21 work — it
-covers the full design, including why NATS connectivity was moved
-entirely out of this codebase's own process.
+today's human `PENDING_UNDERWRITING` queue, unchanged. **Live-verified
+end to end through the real customer UI**: three real applications (one
+per amount bucket) submitted via a real browser session each resolved
+correctly — `LOW` auto-approved (account/Welcome-Letter/document
+provisioning all fired), `HIGH` auto-rejected, `MEDIUM` landed in the
+Underwriter queue unchanged. **Load the `risk-assessment-nats` skill**
+for the full design, including two real gotchas found while wiring
+KrakenD up (a `depends_on` cycle in the original task wording; KrakenD
+rejecting a `202` response by default) and why NATS connectivity was
+moved entirely out of this codebase's own process.
 
 ## Modules, in detail
 
@@ -1105,12 +1111,12 @@ domain knowledge."
   `temporal` database) is managed by the Temporal server container, not
   by this module's code.
 
-### 8. `risk/` — Risk assessment module (planned — Phase 21, not yet built)
+### 8. `risk/` — Risk assessment module (built and live-verified — Phase 21)
 
-Not yet built. A thin leaf module (one `httpx.post` call to the NATS
-Adapter, no NATS awareness of its own) — see "Automated risk assessment
-via NATS" above and **load the `risk-assessment-nats` skill** for the
-full design, including this module's own code shape.
+A thin leaf module (one `httpx.post` call to the NATS Adapter, no NATS
+awareness of its own) — see "Automated risk assessment via NATS" above
+and **load the `risk-assessment-nats` skill** for the full design,
+including this module's own code shape.
 
 
 
@@ -1417,22 +1423,24 @@ loan-onboarding-poc/
     ├── notifications/           # built, P18-2 -- promoted out of
     │   └── service.py           # bff_customer/notifications.py, see
     │                             # "Account closure"
-    └── risk/                     # planned, Phase 21, not yet built --
+    └── risk/                     # built, Phase 21 --
         └── service.py            # one httpx POST, no NATS client here --
                                    # see "risk/ -- Risk assessment module"
 ```
 
-**Also planned, Phase 21, sitting outside the `loan_onboarding` Python
-package entirely**: `mock_risk_engine/` (the standalone simulated
+**Also sitting outside the `loan_onboarding` Python package entirely,
+built in Phase 21**: `mock_risk_engine/` (the standalone simulated
 external Risk Engine, HTTP-only) and `risk_adapter/` (the NATS Adapter
 — the sole owner of NATS connectivity in this whole system, plus its
 own small Temporal client) — both deliberately not part of this
 package, same "a real external system this codebase doesn't own"
 treatment Mayan and Keycloak already get (see "Automated risk
-assessment via NATS"). No `risk_listener_main.py` — the earlier draft
-of this section planned one, but there's no in-package NATS
-subscription left for a composition root to own once the Adapter took
-over that job entirely.
+assessment via NATS"). No `risk_listener_main.py` — an earlier design
+pass planned one, but there's no in-package NATS subscription left for
+a composition root to own once the Adapter took over that job entirely.
+Also built in Phase 21, at the repo root (sibling to
+`loan_onboarding/`): `krakend/krakend.json`, the plain HTTP↔HTTP gateway
+config fronting the Risk-Engine boundary.
 
 Every module imports every other module it's allowed to by its full
 package path (`from loan_onboarding.workflow import service as
@@ -1487,13 +1495,19 @@ image instead of seven:
 - `app` — the single web process (or `app-customer` + `app-backoffice`
   if the split above is used), `depends_on: [db, temporal, keycloak,
   backoffice-redis, mayan]`.
-- **Planned, Phase 21, not yet built**: `nats` (core pub/sub, no
-  JetStream — see "Automated risk assessment via NATS"), `krakend`
-  (fronting the Risk-Engine boundary, `depends_on: [mock-risk-engine,
-  risk-adapter]`), `mock-risk-engine` (HTTP-only, no NATS —
-  `depends_on: [krakend]`, since it calls the Adapter's webhook
-  *through* KrakenD), `risk-adapter` (the NATS Adapter — sole owner of
-  NATS connectivity, `depends_on: [nats, temporal, krakend]`).
+- **Built, Phase 21**: `nats` (core pub/sub, no JetStream — see
+  "Automated risk assessment via NATS"), `risk-adapter` (the NATS
+  Adapter — sole owner of NATS connectivity, `depends_on: [nats,
+  temporal]`), `krakend` (fronting the Risk-Engine boundary,
+  `depends_on: [risk-adapter]`), `mock-risk-engine` (HTTP-only, no NATS
+  — `depends_on: [krakend]`, since it calls the Adapter's webhook
+  *through* KrakenD). **`depends_on` deliberately doesn't match a
+  literal reading of "each service depends on the other two it talks
+  to"** — `risk-adapter`↔`krakend` and `krakend`↔`mock-risk-engine`
+  would each form a real cycle Docker Compose rejects outright; every
+  cross-service call here is lazy (made well after startup), so neither
+  direction was functionally needed anyway. See the `risk-assessment-nats`
+  skill for the full story.
 
 Every env var pointing at another container uses its Docker-internal
 service name — same discipline the reference project already documents

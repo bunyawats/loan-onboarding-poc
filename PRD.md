@@ -50,12 +50,12 @@ either an undifferentiated app or seven separately-deployed services:
 | Document | the Mayan EDMS integration |
 | Workflow | the Temporal integration |
 
-**Planned, not yet built (§6.7, `IMPLEMENTATION_PLAN.md` Phase 21)**: an
+**Built and live-verified (§6.7, `IMPLEMENTATION_PLAN.md` Phase 21)**: an
 eighth module, Risk, connecting to a simulated external Risk Engine
 over NATS for automated approve/reject decisions on the easy cases.
-Left out of the table above since that table describes today's actual
-architecture, not the target state — see `CLAUDE.md`'s "Automated risk
-assessment via NATS" for the full design.
+Left out of the table above since that table describes the original
+seven-module architecture, not this later addition — see `CLAUDE.md`'s
+"Automated risk assessment via NATS" for the full design.
 
 An earlier draft of this project built these seven as genuine
 microservices (separate processes, network calls, one Postgres database
@@ -340,16 +340,16 @@ real-world loan is paid off.
   automatically re-offers that product type again on the customer's
   next visit — no change needed to the picker itself.
 
-### 6.7 Automated risk assessment via a mock external Risk Engine (planned — `IMPLEMENTATION_PLAN.md` Phase 21, not yet built)
+### 6.7 Automated risk assessment via a mock external Risk Engine (built and live-verified — `IMPLEMENTATION_PLAN.md` Phase 21)
 
 Raised directly by the user as a future enhancement, separate from
 §6.6's account-closure work: simulate a genuinely **external,
 asynchronous** system — a Risk Engine, consulted over a message broker
 (NATS) rather than a synchronous API call — and let it auto-decide the
-easy cases without a human underwriter ever touching them. Nothing in
-this section is built yet; see `CLAUDE.md`'s "Automated risk assessment
-via NATS" for the full technical design this describes the product
-shape of.
+easy cases without a human underwriter ever touching them. Live-verified
+end to end through the real customer UI (one real application per
+amount bucket); see `CLAUDE.md`'s "Automated risk assessment via NATS"
+for the full technical design this describes the product shape of.
 
 - **Starts right after submission**, before today's `PENDING_UNDERWRITING`
   (§6.2). The workflow sends the application's risk criteria (amount,
@@ -701,10 +701,10 @@ balance check) and §11 for the confirmed scoping decisions behind it.
 | `product_type` | `personal_loan` \| `auto_loan` \| `mortgage` |
 | `payload` | JSONB, product-specific fields |
 | `applicant_name`, `applicant_email`, `applicant_phone`, `amount` | captured **as submitted** — a deliberate snapshot, not a live read of the customer's current profile (see `CLAUDE.md`'s "Denormalized applicant fields" note) |
-| `status` | `PENDING_UNDERWRITING` \| `MORE_INFO_REQUESTED` \| `PENDING_MANAGER_APPROVAL` \| `APPROVED` \| `REJECTED` \| `CANCELLED` |
-| `underwriter_name`, `underwriter_comment`, `underwriter_decided_at` | set once the Underwriter acts — `underwriter_name` is the authenticated Keycloak username, not free text. **Planned exception (§6.7, Phase 21, not yet built)**: an automated `LOW`/`HIGH` risk auto-decision will set this to a fixed system marker instead of a Keycloak username — the one deliberate, documented break of "not free text." |
+| `status` | `PENDING_RISK_ASSESSMENT` \| `PENDING_UNDERWRITING` \| `MORE_INFO_REQUESTED` \| `PENDING_MANAGER_APPROVAL` \| `APPROVED` \| `REJECTED` \| `CANCELLED` (`PENDING_RISK_ASSESSMENT` added in Phase 21 — every application's initial status, entered before `PENDING_UNDERWRITING`) |
+| `underwriter_name`, `underwriter_comment`, `underwriter_decided_at` | set once the Underwriter acts — `underwriter_name` is the authenticated Keycloak username, not free text. **Built exception (§6.7, Phase 21)**: an automated `LOW`/`HIGH` risk auto-decision sets this to a fixed system marker (`"risk-engine-auto"`) instead of a Keycloak username — the one deliberate, documented break of "not free text." |
 | `manager_name`, `manager_comment`, `manager_decided_at` | set only for escalated applications |
-| `risk_tier` | **planned (§6.7, Phase 21, not yet built)**, nullable — `LOW` \| `MEDIUM` \| `HIGH`, set once a risk-engine decision arrives. Not surfaced anywhere in the staff UI for this phase (confirmed with the user) — persisted purely as the queryable audit record §9's own framing already commits to, same principle as every other column here. |
+| `risk_tier` | **built (§6.7, Phase 21)**, nullable — `LOW` \| `MEDIUM` \| `HIGH`, set only for an auto-*decided* `LOW`/`HIGH` outcome (never for `MEDIUM`, never for a human decision). Not surfaced anywhere in the staff UI for this phase (confirmed with the user) — persisted purely as the queryable audit record §9's own framing already commits to, same principle as every other column here. |
 | `created_at`, `updated_at` | |
 
 `application_id` (plus `applicant_identifier` and `category`) is
