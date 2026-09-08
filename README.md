@@ -1,10 +1,18 @@
 # loan-onboarding-poc
 
 A loan onboarding proof of concept: a customer applies for a loan
-themself from a mobile-first web app, an Underwriter reviews it, and a
-Manager gives final sign-off on larger loans. Built with Python
-FastAPI, HTMX, Mayan EDMS, Temporal, and PostgreSQL, as a **modular
-monolith** — one deployable, seven strictly-bounded internal modules.
+themself from a mobile-first web app, a standalone mock Risk Engine
+auto-decides the clear-cut cases over NATS, and an Underwriter reviews
+anything left over — with a Manager giving final sign-off on larger
+loans. Built with Python FastAPI, HTMX, Mayan EDMS, Temporal,
+PostgreSQL, and Keycloak (staff auth), plus a NATS/KrakenD-fronted
+mock Risk Engine for the automated assessment step — as a **modular
+monolith**: one deployable Python codebase, organized into seven core
+modules plus a few small supporting leaf modules (see `CLAUDE.md`'s
+module dependency graph), with the standalone Risk Engine/NATS
+Adapter/KrakenD gateway as genuinely separate services it talks to
+over HTTP/NATS, not part of that codebase. Module boundaries are
+enforced by `import-linter` in CI, not just documented.
 
 ## Read these in order
 
@@ -37,9 +45,20 @@ the architecture already decided in `CLAUDE.md`.
 
 ## Status
 
-Build-out is substantially complete (all 16 planned phases done) — see
-`IMPLEMENTATION_PLAN.md`'s **Current Status** for exactly where things
-stand and what, if anything, is next.
+All 22 planned phases (0 through 21) are complete, including several
+added after the original build-out closed at Phase 12: human-readable
+primary keys, returning-customer profile refresh, document/database
+reconciliation, account closure, Welcome Letter email, real Gmail SMTP
+delivery, and — most recently — automated risk assessment via NATS
+(Phase 21), which routes clear-cut low/high-risk applications straight
+to an auto-decision and leaves only the ambiguous middle for human
+underwriting. `IMPLEMENTATION_PLAN.md`'s own backlog is empty again;
+remaining work is limited to the accepted, documented limitations in
+`CLAUDE.md`'s Known Gaps section (e.g. Phase 21's risk-tier thresholds
+currently make the Manager-escalation path practically unreachable —
+a known, not-yet-fixed interaction between two independently-tuned
+thresholds). See `IMPLEMENTATION_PLAN.md`'s **Current Status** for the
+full phase-by-phase history and session log.
 
 ## Reference projects
 
