@@ -89,6 +89,16 @@ Produces, across 3 applicant identities ("customers"):
     real uploaded Consent document.
   - 1 application deliberately left at PENDING_UNDERWRITING, untouched
     -- for you to decide yourself in the back-office UI.
+  - 3 account closure scenarios (new -- see CLAUDE.md's "Account
+    closure" / the account-closure skill), run against three of the
+    accounts above after every application above is created: a customer
+    closure request approved by an Underwriter (account ends CLOSED --
+    also confirms the product type reappears in the customer's own
+    product picker afterward, the actual payoff the whole feature exists
+    for), one rejected by a Manager (account reverts to ACTIVE), and one
+    the customer cancels themselves before staff ever decides it
+    (account reverts to ACTIVE). Covers both staff roles' closure-review
+    permission and all three ways a CLOSURE_REQUESTED account resolves.
 All documents are real, valid, single-page PDFs (a tiny dependency-free
 PDF writer below) -- never the malformed placeholder bytes that showed
 up broken in Mayan during manual testing.
@@ -265,6 +275,41 @@ CUSTOMER_B_SCENARIOS = [
 # ($50,000), the overlap band the 2026-09-08 threshold fix opened up.
 CUSTOMER_C_SCENARIOS = [
     Scenario("C1", "personal_loan", "60000", "escalate_approve"),
+]
+
+
+@dataclass
+class ClosureScenario:
+    label: str
+    source_label: str          # which Scenario above's resulting APPROVED account this acts on
+    decision_path: str          # "close_approve" | "close_reject" | "close_cancel"
+    role: str = "underwriter"    # staff role deciding -- "underwriter" | "manager"; ignored for close_cancel
+    comment: str = "balance confirmed zero"  # the staff attestation text; ignored for close_cancel
+
+
+# Runs after every application above is created (so each source
+# application is already a real ACTIVE account) and sequentially, one
+# closure at a time -- decide_closure() below finds the pending request
+# by reading it back off the single-row /ui/{role}/closures queue, which
+# only works cleanly with exactly one request in flight at once. Each
+# entry below picks a distinct customer/product-type account, so none
+# of these three closures ever race or interact with each other.
+CLOSURE_SCENARIOS = [
+    # A1 (personal_loan) closed for real -- also the one that verifies
+    # the actual payoff (CLAUDE.md's "Account closure": once CLOSED,
+    # the product type reappears in Customer A's own picker).
+    ClosureScenario("CLOSE-A1", "A1", "close_approve", role="underwriter", comment="balance confirmed zero"),
+    # A2 (auto_loan) -- a Manager rejects it (both closure-eligible
+    # roles get exercised across these three scenarios, not just
+    # Underwriter); account reverts to ACTIVE, stays eliminated from
+    # the picker exactly as before.
+    ClosureScenario(
+        "CLOSE-A2", "A2", "close_reject", role="manager", comment="balance not yet settled -- staying open"
+    ),
+    # B3 (auto_loan, Customer B) -- the customer changes their mind
+    # before any staff member ever sees it; account reverts to ACTIVE,
+    # no staff role/comment involved at all.
+    ClosureScenario("CLOSE-B3", "B3", "close_cancel"),
 ]
 
 
@@ -529,6 +574,38 @@ class BackofficeSession:
             200,
         )
 
+    def decide_closure(self, role: str, decision: str, comment: str) -> str:
+        """Account closure (CLAUDE.md's "Account closure" / the
+        account-closure skill) is a plain POST-redirect-GET (303), not
+        an htmx fragment swap like `decision()` above -- and its route
+        is keyed by `account_id`, which never appears anywhere on the
+        customer-facing page this script otherwise scrapes ids from. The
+        only place to learn it is this same `/ui/{role}/closures` queue
+        page the decision itself posts to, so read it back from there.
+        Asserts exactly one pending row: `CLOSURE_SCENARIOS` runs one
+        closure at a time, request-then-decide, before starting the
+        next, so more or fewer than one pending request here is a real
+        bug (a leftover from a previous run, or two closures racing),
+        not something to silently pick around."""
+        resp = expect(self.client.get(f"{BASE_URL}/ui/{role}/closures"), 200)
+        matches = re.findall(rf"/ui/{role}/closures/([A-Za-z0-9\-]+)/decision", resp.text)
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected exactly one pending closure request in the {role!r} queue, "
+                f"found {len(matches)}: {matches}"
+            )
+        account_id = matches[0]
+        expect(
+            request_retry(
+                self.client.post,
+                f"{BASE_URL}/ui/{role}/closures/{account_id}/decision",
+                data={"decision": decision, "comment": comment},
+                ok_codes=(303,),
+            ),
+            303,
+        )
+        return account_id
+
 
 def wait_past_risk_assessment(client: httpx.Client, application_id: str, label: str) -> None:
     """Phase 21: every application starts at PENDING_RISK_ASSESSMENT, not
@@ -555,6 +632,110 @@ def wait_past_risk_assessment(client: httpx.Client, application_id: str, label: 
             f"(a MEDIUM-tier amount), but landed on {status!r} instead -- check this scenario's amount "
             f"is inside mock_risk_engine/main.py's MEDIUM band ($15,000-$99,999.99)"
         )
+
+
+def poll_account_status(client: httpx.Client, application_id: str, expected: set[str], timeout: float = 45.0) -> str:
+    """Account closure (CLAUDE.md's "Account closure" / the
+    account-closure skill) changes `accounts.status`, not
+    `applications.status` -- `poll_final_status` above can't see it at
+    all. Reads it instead off the same customer application-detail
+    page's own closure-section markup: the "Request account closure"
+    form (action `.../closure/request`) only renders when ACTIVE, the
+    "Cancel closure request" form (action `.../closure/cancel`) only
+    when CLOSURE_REQUESTED, and the whole section is hidden once CLOSED
+    -- see `application_detail.html`'s own comment on this. Every caller
+    here only ever polls this for an application it already knows is
+    APPROVED with a real account, so "neither marker present" is read as
+    CLOSED, never mistaken for "no account exists yet." Same transient
+    500/disconnect tolerance as `poll_final_status`, for the same reason
+    (this page also renders `document.service` calls that reach Mayan,
+    for the Consent section)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            resp = client.get(f"{BASE_URL}/apply/applications/{application_id}")
+        except httpx.TransportError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+            continue
+        if resp.status_code in (500, 502, 503, 504):
+            if time.monotonic() >= deadline:
+                expect(resp, 200)
+            time.sleep(0.5)
+            continue
+        expect(resp, 200)
+        if "/closure/request\"" in resp.text:
+            status = "ACTIVE"
+        elif "/closure/cancel\"" in resp.text:
+            status = "CLOSURE_REQUESTED"
+        else:
+            status = "CLOSED"
+        if status in expected:
+            return status
+        if time.monotonic() >= deadline:
+            return status
+        time.sleep(0.5)
+
+
+def request_account_closure(client: httpx.Client, application_id: str) -> None:
+    expect(client.post(f"{BASE_URL}/apply/applications/{application_id}/closure/request"), 303)
+
+
+def cancel_account_closure(client: httpx.Client, application_id: str) -> None:
+    expect(client.post(f"{BASE_URL}/apply/applications/{application_id}/closure/cancel"), 303)
+
+
+def run_closure_scenario(
+    scenario: ClosureScenario, source: AppResult, underwriter: BackofficeSession, manager: BackofficeSession
+) -> None:
+    """Acts on `source`'s already-provisioned, ACTIVE account -- not a
+    new application, so there's no `document.service.upload(...)`/risk-
+    assessment wait here at all, just the closure request/decision
+    round trip. Re-identifies as `source.email` on a fresh client rather
+    than reusing whatever client `run_scenario` used for that
+    application -- `run_scenario` doesn't return its client, and
+    re-running the (fast, no-OTP-provider) identify/verify flow is
+    cheaper than threading one through."""
+    client = httpx.Client(follow_redirects=False, timeout=30.0)
+    customer_identify_and_verify(client, source.email)
+    application_id = source.application_id
+
+    request_account_closure(client, application_id)
+    status = poll_account_status(client, application_id, {"CLOSURE_REQUESTED"})
+    log(f"  [{scenario.label}] {application_id} closure requested -> {status}")
+
+    if scenario.decision_path == "close_approve":
+        staff = underwriter if scenario.role == "underwriter" else manager
+        account_id = staff.decide_closure(scenario.role, "APPROVE", scenario.comment)
+        status = poll_account_status(client, application_id, {"CLOSED"})
+        log(f"  [{scenario.label}] {account_id} -> {status} (approved by {scenario.role})")
+
+        # The actual payoff (CLAUDE.md's "Account closure"): once CLOSED,
+        # has_active_account_of_type stops counting this account, so the
+        # product picker should offer this product type again.
+        resp = expect(client.get(f"{BASE_URL}/apply/new"), 200)
+        marker = f'value="{source.product_type}"'
+        if marker not in resp.text:
+            raise RuntimeError(
+                f"[{scenario.label}] expected {source.product_type!r} to reappear in the product picker "
+                f"after closure, but it didn't -- has_active_account_of_type may not be excluding CLOSED"
+            )
+        log(f"  [{scenario.label}] confirmed {source.product_type!r} reappears in the product picker")
+
+    elif scenario.decision_path == "close_reject":
+        staff = underwriter if scenario.role == "underwriter" else manager
+        account_id = staff.decide_closure(scenario.role, "REJECT", scenario.comment)
+        status = poll_account_status(client, application_id, {"ACTIVE"})
+        log(f"  [{scenario.label}] {account_id} -> {status} (rejected by {scenario.role}, reverted to ACTIVE)")
+
+    elif scenario.decision_path == "close_cancel":
+        cancel_account_closure(client, application_id)
+        status = poll_account_status(client, application_id, {"ACTIVE"})
+        log(f"  [{scenario.label}] {application_id} -> {status} (customer cancelled, reverted to ACTIVE)")
+
+    else:
+        raise RuntimeError(f"unknown closure decision_path {scenario.decision_path!r}")
 
 
 def run_scenario(
@@ -668,6 +849,11 @@ def main() -> None:
     for scenario in CUSTOMER_C_SCENARIOS:
         results.append(run_scenario(scenario, email_c, underwriter, manager))
 
+    log("=== Account closure scenarios ===")
+    results_by_label = {r.label: r for r in results}
+    for closure_scenario in CLOSURE_SCENARIOS:
+        run_closure_scenario(closure_scenario, results_by_label[closure_scenario.source_label], underwriter, manager)
+
     approved = [r for r in results if r.target_status == "APPROVED"]
     pending = [r for r in results if r.target_status == "PENDING_UNDERWRITING"]
 
@@ -680,6 +866,10 @@ def main() -> None:
     print("Includes one PENDING_MANAGER_APPROVAL escalation scenario (Customer C) -- this")
     print("path was unreachable prior to the 2026-09-08 threshold fix (see CLAUDE.md's")
     print("Known Gaps / the known-gaps-and-gotchas skill).")
+    print(f"Also ran {len(CLOSURE_SCENARIOS)} account closure scenarios on top of accounts above:")
+    print("  CLOSE-A1 -> CLOSED (Underwriter-approved; product type reappeared in the picker)")
+    print("  CLOSE-A2 -> ACTIVE (Manager-rejected)")
+    print("  CLOSE-B3 -> ACTIVE (customer cancelled their own request)")
     print("=" * 72)
     for r in results:
         print(f"  [{r.label}] {r.application_id}  {r.product_type:14s}  ${r.amount:>8s}  -> {r.target_status}")
