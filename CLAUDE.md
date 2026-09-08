@@ -1526,10 +1526,14 @@ apply to an already-running `db` volume — this bit for real after Phase
 if both are left running against different databases; the
 active-account-per-product-type rule doesn't count `CLOSURE_REQUESTED`
 as active, which sets up a real, unhandled `UniqueViolationError` crash
-on a specific reject-after-second-approval sequence; a Temporal
-*terminate* (vs. *cancel*) still can't be recovered from inside the
-workflow, structurally; no timeout on "wait for Underwriter/Manager
-decision"; and module boundaries are enforced only by import-linter
+on a specific reject-after-second-approval sequence; Phase 21's
+risk-tier thresholds overlap PRD §6.3's pre-existing manager-escalation
+threshold exactly, making `PENDING_MANAGER_APPROVAL` practically
+unreachable in the current build (found live post-Phase-21, not yet
+fixed); a Temporal *terminate* (vs. *cancel*) still can't be recovered
+from inside the workflow, structurally; no timeout on "wait for
+Underwriter/Manager decision"; and module boundaries are enforced only
+by import-linter
 config, not by a process/network boundary, so don't treat "we organized
 it into folders" as equivalent to "the boundary is enforced" until the
 lint step exists and is required in CI.

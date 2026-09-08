@@ -5195,6 +5195,49 @@ what the next session should know. Keep entries factual and specific —
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
 
+- **2026-09-08 (post-Phase-21 environment setup + live browser E2E sweep,
+  not a numbered phase)** — Picked up after a fresh `git pull` left the
+  running Docker stack stale relative to Phase 21 (containers built
+  hours before Phase 21's commits landed — no `nats`/`risk-adapter`/
+  `krakend`/`mock-risk-engine` containers existed yet, and both
+  `loan_onboarding` and `loan_onboarding_test` were missing
+  `applications.risk_tier` and the `PENDING_RISK_ASSESSMENT` status
+  value). Applied both as additive `ALTER TABLE`s (no data loss, per
+  this file's own documented recovery playbook for this exact gap),
+  rebuilt `app`/`worker-workflow`/`worker-activity`/`risk-adapter`/
+  `mock-risk-engine`, and brought up the full stack including the four
+  new Phase 21 services. Then ran a real, live browser sweep (not curl)
+  through `bff_customer` for all three risk buckets: personal_loan
+  $8,000 (LOW) auto-approved with account/Welcome-Letter provisioning
+  confirmed in Postgres; auto_loan $30,000 (MEDIUM, using Phase 14's ID
+  reuse) correctly fell through to human `PENDING_UNDERWRITING`, then
+  approved for real through the Underwriter queue as `underwriter1`
+  (real Keycloak login), provisioning a second `ACTIVE` account for the
+  same customer under a different product type; mortgage $75,000 (HIGH)
+  auto-rejected with the customer UI correctly showing "Rejected —
+  Automated decision by risk assessment." Hit the documented
+  `TooManyConnectionsError` gap live once during the LOW run (recovered
+  via the existing playbook: restart `db`, then `app`/`worker-activity`/
+  `worker-workflow` — zero data loss). **One new, real gap found while
+  attempting to reject the HIGH application through the manager
+  queue on request**: it's not possible, on two counts. First, the HIGH
+  application was already terminal (`REJECTED`, auto-decided) and this
+  codebase has no "reopen a REJECTED application" action. Second, and
+  more generally: Phase 21's risk-tier thresholds
+  (`mock_risk_engine/main.py`'s MEDIUM band, `$15,000 <= amount <
+  $50,000`) and PRD §6.3's pre-existing manager-escalation threshold
+  (`workflows.py`'s `MANAGER_ESCALATION_THRESHOLD_USD = 50_000`) now
+  overlap exactly — no application can both survive risk assessment
+  into human `PENDING_UNDERWRITING` (MEDIUM only) and also meet the
+  escalation condition (`>= $50,000`), since MEDIUM's own upper bound
+  sits strictly below it. `PENDING_MANAGER_APPROVAL` is therefore
+  practically dead code in the current build. Confirmed with the user as
+  "just document it" rather than a same-session fix — see `CLAUDE.md`'s
+  Known Gaps / the `known-gaps-and-gotchas` skill for the full writeup
+  and the two candidate fixes (move the thresholds apart, and decide
+  whether escalation should apply before or after risk assessment
+  resolves at all).
+
 - **2026-09-07 (Phase 21 completed — P21-1 through P21-10, all ten
   tasks, done in one session)** —
   Picked up at the documented resume point (P21-1) and implemented the

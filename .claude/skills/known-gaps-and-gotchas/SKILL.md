@@ -1,6 +1,6 @@
 ---
 name: known-gaps-and-gotchas
-description: Accepted limitations and real operational gotchas hit while building loan-onboarding-poc -- no schema migration tooling (db/schema.sql changes don't apply to an existing volume), local-vs-dockerized worker races, the active-account-per-product-type race window, Temporal terminate-vs-cancel, stale image/config drift, and two live-hit testing hazards (wrong DATABASE_URL wiping the live stack, asyncpg connection-pool exhaustion from one-off docker exec scripts). Read before touching schema, workers, or running ad hoc scripts against the local stack. Triggers on "known gaps", "schema migration", "ALTER TABLE accounts", "worker race", "TooManyConnectionsError", "asyncpg pool exhaustion", "docker exec asyncio.run", "temporal workflow terminate", "loan_onboarding_test", "stuck workflow", "KeyError closure_workflow_id".
+description: Accepted limitations and real operational gotchas hit while building loan-onboarding-poc -- no schema migration tooling (db/schema.sql changes don't apply to an existing volume), local-vs-dockerized worker races, the active-account-per-product-type race window, Temporal terminate-vs-cancel, stale image/config drift, two live-hit testing hazards (wrong DATABASE_URL wiping the live stack, asyncpg connection-pool exhaustion from one-off docker exec scripts), and Phase 21's risk-tier thresholds making PENDING_MANAGER_APPROVAL practically unreachable. Read before touching schema, workers, or running ad hoc scripts against the local stack. Triggers on "known gaps", "schema migration", "ALTER TABLE accounts", "worker race", "TooManyConnectionsError", "asyncpg pool exhaustion", "docker exec asyncio.run", "temporal workflow terminate", "loan_onboarding_test", "stuck workflow", "KeyError closure_workflow_id", "manager escalation", "PENDING_MANAGER_APPROVAL", "MANAGER_ESCALATION_THRESHOLD_USD".
 ---
 
 ## Known gaps to state explicitly once built
@@ -183,6 +183,35 @@ entry, unless a more specific pointer is given.)*
 - Same Keycloak-side gaps the reference project has and hasn't closed:
   `verify_aud=False` until a real audience is configured; no caching on
   permission checks (every mutating action is a live UMA exchange).
+- **Phase 21's risk-tier thresholds and PRD §6.3's pre-existing manager-escalation
+  threshold now overlap exactly, making the manager-approval path
+  practically unreachable — found live while walking a HIGH-risk
+  application through the manager queue on request.** The mock Risk
+  Engine's MEDIUM bucket is `$15,000 <= amount < $50,000`
+  (`mock_risk_engine/main.py`'s `LOW_THRESHOLD`/`HIGH_THRESHOLD`);
+  `workflows.py`'s manager-escalation check fires at `amount >= 50_000`
+  (`MANAGER_ESCALATION_THRESHOLD_USD`). Since Phase 21, only a
+  MEDIUM-tier application ever reaches human `PENDING_UNDERWRITING` at
+  all (LOW auto-approves, HIGH auto-rejects, both before a human ever
+  sees them) — and MEDIUM's own upper bound sits strictly below the
+  escalation threshold, so no application that survives risk assessment
+  into underwriting can ever also meet the escalation condition. A
+  genuinely HIGH-risk application (`>= $50,000`) is auto-rejected by the
+  risk engine before either an Underwriter or a Manager ever sees it,
+  and there's no "reopen a REJECTED application" action anywhere in
+  this codebase to route it to the manager queue after the fact either.
+  **Net effect: `PENDING_MANAGER_APPROVAL` is currently dead code in
+  practice** — reachable only by an application that was already
+  `PENDING_UNDERWRITING` before Phase 21 shipped, or by manually editing
+  `MANAGER_ESCALATION_THRESHOLD_USD`/the mock engine's `HIGH_THRESHOLD`
+  apart from each other. Not fixed here (confirmed with the user as
+  "just document it," not a same-session fix) — a future session should
+  either lower `MANAGER_ESCALATION_THRESHOLD_USD` below $15,000 (so it
+  can fire within the LOW/MEDIUM boundary before risk tier is even
+  known) or raise the mock engine's `HIGH_THRESHOLD` well above
+  `MANAGER_ESCALATION_THRESHOLD_USD` (so a real MEDIUM/escalation
+  overlap band exists), and decide whether escalation should apply
+  before or after risk assessment resolves at all.
 - No timeout on "wait for Underwriter/Manager decision."
 - **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to
