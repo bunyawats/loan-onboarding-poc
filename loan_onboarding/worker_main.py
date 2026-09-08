@@ -32,11 +32,11 @@ from loan_onboarding.application.activities import (
     persist_risk_assessment_cleared,
     submit_risk_assessment,
 )
-from loan_onboarding.workflow.worker import run_account_closure_worker, run_worker
+from loan_onboarding.workflow.worker import DEFAULT_WORKER_MODE, run_account_closure_worker, run_worker
 
 
 async def main() -> None:
-    worker_mode = os.environ.get("WORKER_MODE", "both")
+    worker_mode = os.environ.get("WORKER_MODE", DEFAULT_WORKER_MODE)
     product_type = os.environ.get("LOAN_PRODUCT_TYPE") or None
     await asyncio.gather(
         run_worker(

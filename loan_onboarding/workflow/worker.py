@@ -55,6 +55,7 @@ from loan_onboarding.workflow.task_queues import (
 from loan_onboarding.workflow.workflows import CloseAccountWorkflow, LoanApplicationWorkflow
 
 VALID_MODES = ("both", "workflow", "activity")
+DEFAULT_WORKER_MODE = VALID_MODES[0]
 
 
 def _build_workers(
@@ -88,7 +89,7 @@ def _build_workers(
 
 async def run_worker(
     activities: Sequence[Callable],
-    worker_mode: str = "both",
+    worker_mode: str = DEFAULT_WORKER_MODE,
     product_type: Optional[str] = None,
     client: Optional[Client] = None,
 ) -> None:
@@ -146,7 +147,7 @@ def _build_account_closure_worker(
 
 async def run_account_closure_worker(
     activities: Sequence[Callable],
-    worker_mode: str = "both",
+    worker_mode: str = DEFAULT_WORKER_MODE,
     client: Optional[Client] = None,
 ) -> None:
     """Runs forever, until cancelled -- worker_main.py gathers this

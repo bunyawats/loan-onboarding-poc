@@ -46,6 +46,8 @@ from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_
 from loan_onboarding.workflow.workflows import (
     DECISION_CANCELLED,
     ROLE_CUSTOMER,
+    STATUS_ACCOUNT_ACTIVE,
+    STATUS_ACCOUNT_CLOSURE_REQUESTED,
     STATUS_APPROVED,
     STATUS_CANCELLED,
     STATUS_MORE_INFO_REQUESTED,
@@ -520,7 +522,7 @@ async def request_account_closure(
     request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     _, account = await _owned_account(application_id, applicant_identifier)
-    if account.status != "ACTIVE":
+    if account.status != STATUS_ACCOUNT_ACTIVE:
         raise HTTPException(status_code=400, detail="account is not ACTIVE, cannot request closure")
     await account_service.request_closure(account.account_id, applicant_identifier)
     return RedirectResponse(url=f"/apply/applications/{application_id}", status_code=303)
@@ -531,7 +533,7 @@ async def cancel_account_closure(
     request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     _, account = await _owned_account(application_id, applicant_identifier)
-    if account.status != "CLOSURE_REQUESTED" or account.closure_workflow_id is None:
+    if account.status != STATUS_ACCOUNT_CLOSURE_REQUESTED or account.closure_workflow_id is None:
         raise HTTPException(status_code=400, detail="account has no pending closure request")
     client = await _get_temporal_client()
     await workflow_service.signal_close_account_cancel(client, account.closure_workflow_id)

@@ -54,6 +54,7 @@ from loan_onboarding.workflow.workflows import (
     DECISION_REQUEST_MORE_INFO,
     ROLE_MANAGER,
     ROLE_UNDERWRITER,
+    STATUS_ACCOUNT_CLOSURE_REQUESTED,
     STATUS_APPROVED,
     STATUS_PENDING_MANAGER_APPROVAL,
     STATUS_PENDING_UNDERWRITING,
@@ -828,7 +829,7 @@ async def _staff_closure_decision(
         account = await account_service.get(account_id)
     except AccountNotFound:
         raise HTTPException(status_code=404)
-    if account.status != "CLOSURE_REQUESTED" or account.closure_workflow_id is None:
+    if account.status != STATUS_ACCOUNT_CLOSURE_REQUESTED or account.closure_workflow_id is None:
         # Stale page (someone else already decided it, or it was
         # cancelled) -- re-render the queue with an explanation rather
         # than a raw error, same "the UI hides it, the route still

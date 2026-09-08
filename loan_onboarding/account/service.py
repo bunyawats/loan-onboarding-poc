@@ -12,6 +12,7 @@ from loan_onboarding.account import db
 from loan_onboarding.account.models import Account, AccountNotActive, AccountNotFound
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
+from loan_onboarding.workflow.workflows import STATUS_ACCOUNT_ACTIVE, STATUS_ACCOUNT_CLOSURE_REQUESTED
 
 # Same "accepted != applied" polling pattern application/service.py's
 # own _wait_until() already uses (see that module's docstring) --
@@ -112,7 +113,7 @@ async def request_closure(account_id: str, applicant_identifier: str) -> str:
     persist_closure_decision (account/activities.py) can eventually pass
     it to notifications.service.send_account_closure_decision."""
     account = await get(account_id)
-    if account.status != "ACTIVE":
+    if account.status != STATUS_ACCOUNT_ACTIVE:
         raise AccountNotActive(
             f"account {account_id} is not ACTIVE (status={account.status!r}), cannot request closure"
         )
@@ -125,7 +126,7 @@ async def request_closure(account_id: str, applicant_identifier: str) -> str:
     # start_close_account_workflow only confirms Temporal accepted the
     # start -- wait for persist_closure_request (the workflow's first
     # activity) to actually commit before returning.
-    await _wait_until(account_id, lambda r: r["status"] == "CLOSURE_REQUESTED")
+    await _wait_until(account_id, lambda r: r["status"] == STATUS_ACCOUNT_CLOSURE_REQUESTED)
     return workflow_id
 
 
@@ -134,7 +135,7 @@ async def list_pending_closure_requests() -> list[Account]:
     (P18-6) — see `account/db.py`'s `list_by_status` for why this is
     deliberately unpaginated, unlike `application.service.list_by_status`'s
     own count-cache-backed queues."""
-    records = await db.list_by_status("CLOSURE_REQUESTED")
+    records = await db.list_by_status(STATUS_ACCOUNT_CLOSURE_REQUESTED)
     return [Account.from_record(r) for r in records]
 
 
