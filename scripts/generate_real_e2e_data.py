@@ -65,30 +65,29 @@ broken network attachment -- confirmed to happen at least once on a
 6GB-RAM Docker VM) resolves it; a much smaller Docker VM allocation may
 need bumping (e.g. Colima: `colima stop && colima start --memory 8`).
 
-Produces, across 2 applicant identities ("customers"):
-  - 9 applications total, spanning every decision path currently
-    REACHABLE through the real system as of Phase 21 (automated risk
-    assessment): LOW-tier risk-engine auto-approve, HIGH-tier
-    risk-engine auto-reject, and -- for MEDIUM-tier amounts, the only
-    band that ever reaches a human -- underwriter approve, underwriter
-    reject, customer cancel, and request-more-info -> resubmit ->
-    approve. (Capped at 9, not a rounder 10 -- PRD's one-active-account-
-    per-product-type rule means a customer that's approved all three
-    product types has no type left to submit a fourth/fifth application
-    under; see the scenario lists' own comment below.)
-  - Deliberately does NOT attempt an escalation (PENDING_MANAGER_APPROVAL)
-    scenario -- CLAUDE.md's Known Gaps / the known-gaps-and-gotchas
-    skill document that this path is currently unreachable through the
-    real system: MEDIUM's own upper bound ($50,000) sits exactly at
-    HIGH's lower bound, so no application that survives risk assessment
-    into human underwriting can ever also meet the escalation
-    threshold. `run_scenario`'s "escalate_approve"/"escalate_reject"
-    branches are kept (unused by either scenario list below) rather
-    than deleted, in case a future session revisits the threshold gap.
-  - >=4 accounts (one per terminal APPROVED application, auto- or
-    human-decided), each with a real generated Welcome Letter and a
+Produces, across 3 applicant identities ("customers"):
+  - 10 applications total, spanning every decision path currently
+    REACHABLE through the real system as of the 2026-09-08
+    PENDING_MANAGER_APPROVAL threshold fix (mock_risk_engine's
+    HIGH_THRESHOLD moved from $50,000 to $100,000, see CLAUDE.md's Known
+    Gaps / the known-gaps-and-gotchas skill): LOW-tier risk-engine
+    auto-approve, HIGH-tier risk-engine auto-reject, and -- for
+    MEDIUM-tier amounts, the band that reaches a human -- underwriter
+    approve, underwriter reject, customer cancel,
+    request-more-info -> resubmit -> approve, and (new) an
+    escalation -- underwriter approve on a MEDIUM-tier, also
+    escalation-eligible ($50,000-$99,999.99) amount -> manager approve.
+    (Capped at 10, not more -- PRD's one-active-account-per-product-type
+    rule means a customer that's approved all three product types has no
+    type left to submit a further application under; see the scenario
+    lists' own comments below. A dedicated third customer carries the
+    escalation scenario alone, rather than folding it into Customer A or
+    B's own lists, specifically so it doesn't have to reason about
+    either customer's existing per-product-type account state.)
+  - 6 accounts (one per terminal APPROVED application, auto-, human-, or
+    manager-decided), each with a real generated Welcome Letter and a
     real uploaded Consent document.
-  - 2 applications deliberately left at PENDING_UNDERWRITING, untouched
+  - 1 application deliberately left at PENDING_UNDERWRITING, untouched
     -- for you to decide yourself in the back-office UI.
 All documents are real, valid, single-page PDFs (a tiny dependency-free
 PDF writer below) -- never the malformed placeholder bytes that showed
@@ -218,12 +217,14 @@ class Scenario:
     amount: str
     # "risk_auto_approve" | "risk_auto_reject" (no human decision -- the
     # risk engine alone resolves it) | "approve" | "reject" | "cancel" |
-    # "more_info_approve" | "leave_pending" (all four of these need a
-    # MEDIUM-tier amount, $15,000-$49,999, to actually reach a human --
+    # "more_info_approve" | "leave_pending" (all five of these need a
+    # MEDIUM-tier amount, $15,000-$99,999.99, to actually reach a human --
     # see mock_risk_engine/main.py's LOW_THRESHOLD/HIGH_THRESHOLD) |
-    # "escalate_approve" | "escalate_reject" (kept in run_scenario below,
-    # unused here -- see this file's module docstring on why no amount
-    # can currently reach PENDING_MANAGER_APPROVAL for real)
+    # "escalate_approve" | "escalate_reject" (need a MEDIUM-tier amount
+    # that's ALSO escalation-eligible, i.e. $50,000-$99,999.99 -- see
+    # workflows.py's MANAGER_ESCALATION_THRESHOLD_USD. "escalate_approve"
+    # is used by CUSTOMER_C_SCENARIOS below; "escalate_reject" is kept,
+    # still unused, as an easy addition for a future session)
     decision_path: str
 
 
@@ -249,10 +250,21 @@ CUSTOMER_A_SCENARIOS = [
 ]
 CUSTOMER_B_SCENARIOS = [
     Scenario("B1", "personal_loan", "25000", "cancel"),  # personal_loan stays available -- CANCELLED, not active
-    Scenario("B2", "mortgage", "75000", "risk_auto_reject"),  # HIGH tier; mortgage stays available -- REJECTED
+    Scenario("B2", "mortgage", "150000", "risk_auto_reject"),  # HIGH tier (>= $100,000); mortgage stays available
     Scenario("B3", "auto_loan", "30000", "approve"),
     Scenario("B4", "personal_loan", "5000", "risk_auto_approve"),  # LOW tier
     Scenario("B5", "mortgage", "40000", "leave_pending"),
+]
+# A dedicated third customer for the escalation path (PENDING_MANAGER_
+# APPROVAL) rather than folding it into Customer A or B's own lists --
+# both of those already end each product type at ACTIVE or a deliberate
+# non-terminal state, so a fresh identity keeps this scenario's own
+# product-type bookkeeping trivial (one customer, one application,
+# nothing else to reason about). $60,000 is inside the MEDIUM band
+# ($15,000-$99,999.99) AND >= MANAGER_ESCALATION_THRESHOLD_USD
+# ($50,000), the overlap band the 2026-09-08 threshold fix opened up.
+CUSTOMER_C_SCENARIOS = [
+    Scenario("C1", "personal_loan", "60000", "escalate_approve"),
 ]
 
 
@@ -343,10 +355,28 @@ def poll_final_status(client: httpx.Client, application_id: str, expected: set[s
     Welcome Letter) has actually committed, especially under the Mayan
     load described in `request_retry`'s docstring -- polling this page
     independently, after every step of a scenario is done, is what
-    actually confirms the terminal state landed."""
+    actually confirms the terminal state landed. Tolerates a transient
+    500/disconnect from this GET itself (it renders documents.list_documents,
+    which calls out to Mayan) the same way -- Mayan's own memory/Celery
+    pressure can surface here too, not just on the mutating calls
+    `request_retry` already covers; confirmed live during a real
+    generate_real_e2e_data.py run that an un-retried 500 here crashes the
+    whole script rather than just costing one poll iteration."""
     deadline = time.monotonic() + timeout
     while True:
-        resp = expect(client.get(f"{BASE_URL}/apply/applications/{application_id}"), 200)
+        try:
+            resp = client.get(f"{BASE_URL}/apply/applications/{application_id}")
+        except httpx.TransportError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+            continue
+        if resp.status_code in (500, 502, 503, 504):
+            if time.monotonic() >= deadline:
+                expect(resp, 200)  # raise the real error, not a bare timeout
+            time.sleep(0.5)
+            continue
+        expect(resp, 200)  # any other unexpected code is a real bug -- fail fast, don't retry through it
         # base.html's shared nav brand ("Loan Onboarding") also renders
         # with a bare `font-semibold` class -- confirmed live it's an
         # exact false-positive match for the same regex. Slice from the
@@ -523,7 +553,7 @@ def wait_past_risk_assessment(client: httpx.Client, application_id: str, label: 
         raise RuntimeError(
             f"[{label}] {application_id}: expected risk assessment to resolve to PENDING_UNDERWRITING "
             f"(a MEDIUM-tier amount), but landed on {status!r} instead -- check this scenario's amount "
-            f"is inside mock_risk_engine/main.py's MEDIUM band ($15,000-$49,999)"
+            f"is inside mock_risk_engine/main.py's MEDIUM band ($15,000-$99,999.99)"
         )
 
 
@@ -625,6 +655,7 @@ def main() -> None:
     run_id = str(int(time.time()))
     email_a = f"e2e-data-a-{run_id}@example.com"
     email_b = f"e2e-data-b-{run_id}@example.com"
+    email_c = f"e2e-data-c-{run_id}@example.com"
 
     results: list[AppResult] = []
     log(f"=== Customer A ({email_a}) ===")
@@ -633,20 +664,22 @@ def main() -> None:
     log(f"=== Customer B ({email_b}) ===")
     for scenario in CUSTOMER_B_SCENARIOS:
         results.append(run_scenario(scenario, email_b, underwriter, manager))
+    log(f"=== Customer C ({email_c}) ===")
+    for scenario in CUSTOMER_C_SCENARIOS:
+        results.append(run_scenario(scenario, email_c, underwriter, manager))
 
     approved = [r for r in results if r.target_status == "APPROVED"]
     pending = [r for r in results if r.target_status == "PENDING_UNDERWRITING"]
 
     print("\n" + "=" * 72)
-    print(f"Done. {len(results)} applications created across 2 customers ({email_a}, {email_b}).")
+    print(f"Done. {len(results)} applications created across 3 customers ({email_a}, {email_b}, {email_c}).")
     print(f"  {len(approved)} approved (each with an account + Welcome Letter + Consent in Mayan)")
     print(f"  {len(pending)} left PENDING_UNDERWRITING for your manual review")
     print("Nothing was deleted -- this data (and its Temporal workflow executions and")
     print("Mayan documents) stays until you clear it yourself.")
-    print("No PENDING_MANAGER_APPROVAL scenario was attempted -- CLAUDE.md's Known Gaps")
-    print("documents this path as currently unreachable (MEDIUM's upper bound sits exactly")
-    print("at HIGH's lower threshold, so no application that reaches human underwriting can")
-    print("also meet the manager-escalation condition).")
+    print("Includes one PENDING_MANAGER_APPROVAL escalation scenario (Customer C) -- this")
+    print("path was unreachable prior to the 2026-09-08 threshold fix (see CLAUDE.md's")
+    print("Known Gaps / the known-gaps-and-gotchas skill).")
     print("=" * 72)
     for r in results:
         print(f"  [{r.label}] {r.application_id}  {r.product_type:14s}  ${r.amount:>8s}  -> {r.target_status}")
