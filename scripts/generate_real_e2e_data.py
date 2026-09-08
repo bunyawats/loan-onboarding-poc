@@ -66,12 +66,28 @@ broken network attachment -- confirmed to happen at least once on a
 need bumping (e.g. Colima: `colima stop && colima start --memory 8`).
 
 Produces, across 2 applicant identities ("customers"):
-  - 10 applications total, spanning every decision path the workflow
-    supports: below-threshold approve, escalation+manager-approve,
-    escalation+manager-reject, plain reject, cancel, and
-    request-more-info -> resubmit -> approve.
-  - >=4 accounts (one per terminal APPROVED application), each with a
-    real generated Welcome Letter and a real uploaded Consent document.
+  - 9 applications total, spanning every decision path currently
+    REACHABLE through the real system as of Phase 21 (automated risk
+    assessment): LOW-tier risk-engine auto-approve, HIGH-tier
+    risk-engine auto-reject, and -- for MEDIUM-tier amounts, the only
+    band that ever reaches a human -- underwriter approve, underwriter
+    reject, customer cancel, and request-more-info -> resubmit ->
+    approve. (Capped at 9, not a rounder 10 -- PRD's one-active-account-
+    per-product-type rule means a customer that's approved all three
+    product types has no type left to submit a fourth/fifth application
+    under; see the scenario lists' own comment below.)
+  - Deliberately does NOT attempt an escalation (PENDING_MANAGER_APPROVAL)
+    scenario -- CLAUDE.md's Known Gaps / the known-gaps-and-gotchas
+    skill document that this path is currently unreachable through the
+    real system: MEDIUM's own upper bound ($50,000) sits exactly at
+    HIGH's lower bound, so no application that survives risk assessment
+    into human underwriting can ever also meet the escalation
+    threshold. `run_scenario`'s "escalate_approve"/"escalate_reject"
+    branches are kept (unused by either scenario list below) rather
+    than deleted, in case a future session revisits the threshold gap.
+  - >=4 accounts (one per terminal APPROVED application, auto- or
+    human-decided), each with a real generated Welcome Letter and a
+    real uploaded Consent document.
   - 2 applications deliberately left at PENDING_UNDERWRITING, untouched
     -- for you to decide yourself in the back-office UI.
 All documents are real, valid, single-page PDFs (a tiny dependency-free
@@ -200,22 +216,43 @@ class Scenario:
     label: str
     product_type: str
     amount: str
-    decision_path: str  # "approve" | "reject" | "cancel" | "escalate_approve" | "escalate_reject" | "more_info_approve" | "leave_pending"
+    # "risk_auto_approve" | "risk_auto_reject" (no human decision -- the
+    # risk engine alone resolves it) | "approve" | "reject" | "cancel" |
+    # "more_info_approve" | "leave_pending" (all four of these need a
+    # MEDIUM-tier amount, $15,000-$49,999, to actually reach a human --
+    # see mock_risk_engine/main.py's LOW_THRESHOLD/HIGH_THRESHOLD) |
+    # "escalate_approve" | "escalate_reject" (kept in run_scenario below,
+    # unused here -- see this file's module docstring on why no amount
+    # can currently reach PENDING_MANAGER_APPROVAL for real)
+    decision_path: str
 
 
+# PRD's one-active-account-per-product-type rule (get_available_product_
+# types' hard elimination) means each customer below may hold AT MOST
+# ONE eventually-APPROVED application per product type -- there are only
+# three product types, so a customer that approves all three has no
+# product type left to submit a fourth application under, regardless of
+# that next scenario's own intended outcome (confirmed live: an earlier
+# draft of this list had "reject"/"leave_pending" scenarios scheduled
+# *after* their own product type had already been approved for the same
+# customer, and every one 400'd at /apply/new/start with "you already
+# have an active <type> account"). A REJECTED/CANCELLED application
+# never creates an account, so a product type used by one of those stays
+# reusable later in the same customer's list -- that's what lets mortgage
+# appear twice for Customer A (reject, then a real approve) and twice for
+# Customer B (an auto-reject, then left pending) below.
 CUSTOMER_A_SCENARIOS = [
-    Scenario("A1", "personal_loan", "8000", "approve"),
-    Scenario("A2", "auto_loan", "9500", "approve"),
-    Scenario("A3", "mortgage", "65000", "escalate_approve"),
-    Scenario("A4", "personal_loan", "6000", "reject"),
-    Scenario("A5", "auto_loan", "4200", "leave_pending"),
+    Scenario("A1", "personal_loan", "8000", "risk_auto_approve"),  # LOW tier
+    Scenario("A2", "auto_loan", "20000", "approve"),
+    Scenario("A3", "mortgage", "30000", "reject"),  # mortgage stays available -- REJECTED, not active
+    Scenario("A4", "mortgage", "45000", "more_info_approve"),
 ]
 CUSTOMER_B_SCENARIOS = [
-    Scenario("B1", "personal_loan", "7200", "approve"),
-    Scenario("B2", "mortgage", "55000", "escalate_reject"),
-    Scenario("B3", "auto_loan", "8800", "more_info_approve"),
-    Scenario("B4", "mortgage", "9000", "cancel"),
-    Scenario("B5", "personal_loan", "5500", "leave_pending"),
+    Scenario("B1", "personal_loan", "25000", "cancel"),  # personal_loan stays available -- CANCELLED, not active
+    Scenario("B2", "mortgage", "75000", "risk_auto_reject"),  # HIGH tier; mortgage stays available -- REJECTED
+    Scenario("B3", "auto_loan", "30000", "approve"),
+    Scenario("B4", "personal_loan", "5000", "risk_auto_approve"),  # LOW tier
+    Scenario("B5", "mortgage", "40000", "leave_pending"),
 ]
 
 
@@ -463,6 +500,33 @@ class BackofficeSession:
         )
 
 
+def wait_past_risk_assessment(client: httpx.Client, application_id: str, label: str) -> None:
+    """Phase 21: every application starts at PENDING_RISK_ASSESSMENT, not
+    PENDING_UNDERWRITING -- a decision signal fired before risk
+    assessment resolves arrives while the workflow is in a status
+    submit_decision doesn't accept for any actor_role, and is silently
+    rejected (raises inside the signal handler, no state change, no
+    error surfaced to this script's own HTTP call, since signaling is
+    fire-and-forget). Confirmed live: firing 'approve' immediately after
+    submit_application() left the application stuck, and the following
+    upload_consent() call then 400'd forever. Every scenario below that
+    needs a human decision (or a customer cancel) must wait for this
+    first. A MEDIUM-tier amount (this script's own convention for any
+    such scenario) always resolves to PENDING_UNDERWRITING -- APPROVED/
+    REJECTED here would mean a scenario's amount drifted out of the
+    MEDIUM band by mistake, so treat either as a hard error rather than
+    silently continuing into a decision call that can no longer apply."""
+    status = poll_final_status(
+        client, application_id, {"PENDING_UNDERWRITING", "APPROVED", "REJECTED"}, timeout=60.0
+    )
+    if status != "PENDING_UNDERWRITING":
+        raise RuntimeError(
+            f"[{label}] {application_id}: expected risk assessment to resolve to PENDING_UNDERWRITING "
+            f"(a MEDIUM-tier amount), but landed on {status!r} instead -- check this scenario's amount "
+            f"is inside mock_risk_engine/main.py's MEDIUM band ($15,000-$49,999)"
+        )
+
+
 def run_scenario(
     scenario: Scenario, email: str, underwriter: BackofficeSession, manager: BackofficeSession
 ) -> AppResult:
@@ -470,7 +534,26 @@ def run_scenario(
     customer_identify_and_verify(client, email)
     application_id = submit_application(client, scenario.label, email, scenario.product_type, scenario.amount)
 
-    if scenario.decision_path == "approve":
+    if scenario.decision_path not in ("risk_auto_approve", "risk_auto_reject"):
+        wait_past_risk_assessment(client, application_id, scenario.label)
+
+    if scenario.decision_path == "risk_auto_approve":
+        # No decision() call at all -- the risk engine alone resolves
+        # this within seconds of submission (mock_risk_engine's
+        # simulated delay is ~1s), via signal_risk_decision, the same
+        # persist_decision code path a human APPROVE uses (underwriter_
+        # name="risk-engine-auto"). Poll timeout is generous for the
+        # real NATS round trip (submit -> risk-adapter -> mock engine ->
+        # risk-adapter -> Temporal signal), not just Mayan/DB lag.
+        status = poll_final_status(client, application_id, {"APPROVED"}, timeout=60.0)
+        upload_consent(client, application_id)
+        log(f"  [{scenario.label}] {application_id} -> {status} (risk-engine auto-approve, consent uploaded)")
+
+    elif scenario.decision_path == "risk_auto_reject":
+        status = poll_final_status(client, application_id, {"REJECTED"}, timeout=60.0)
+        log(f"  [{scenario.label}] {application_id} -> {status} (risk-engine auto-reject)")
+
+    elif scenario.decision_path == "approve":
         underwriter.decision("underwriter", application_id, "APPROVE", f"{scenario.label}: approved")
         status = poll_final_status(client, application_id, {"APPROVED"})
         upload_consent(client, application_id)
@@ -560,6 +643,10 @@ def main() -> None:
     print(f"  {len(pending)} left PENDING_UNDERWRITING for your manual review")
     print("Nothing was deleted -- this data (and its Temporal workflow executions and")
     print("Mayan documents) stays until you clear it yourself.")
+    print("No PENDING_MANAGER_APPROVAL scenario was attempted -- CLAUDE.md's Known Gaps")
+    print("documents this path as currently unreachable (MEDIUM's upper bound sits exactly")
+    print("at HIGH's lower threshold, so no application that reaches human underwriting can")
+    print("also meet the manager-escalation condition).")
     print("=" * 72)
     for r in results:
         print(f"  [{r.label}] {r.application_id}  {r.product_type:14s}  ${r.amount:>8s}  -> {r.target_status}")
