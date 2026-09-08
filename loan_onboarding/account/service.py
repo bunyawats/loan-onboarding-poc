@@ -3,16 +3,35 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, get_args
 
 import asyncpg
 from temporalio.client import Client
 
 from loan_onboarding.account import db
-from loan_onboarding.account.models import Account, AccountNotActive, AccountNotFound
+from loan_onboarding.account.models import Account, AccountNotActive, AccountNotFound, AccountStatus
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
-from loan_onboarding.workflow.workflows import STATUS_ACCOUNT_ACTIVE, STATUS_ACCOUNT_CLOSURE_REQUESTED
+from loan_onboarding.workflow.workflows import (
+    STATUS_ACCOUNT_ACTIVE,
+    STATUS_ACCOUNT_CLOSED,
+    STATUS_ACCOUNT_CLOSURE_REQUESTED,
+)
+
+# typing.Literal[...] can't reference a name directly (PEP 586 requires
+# literal values there), so this import-time assert is the closest
+# equivalent to application/schemas.py's own check against
+# workflow.task_queues.KNOWN_PRODUCT_TYPES -- it catches account/models.py's
+# AccountStatus Literal drifting from workflow.workflows's own
+# STATUS_ACCOUNT_* constants instead of leaving two independently hand-typed
+# copies to silently diverge. Lives here rather than in models.py itself so
+# models.py keeps zero cross-module imports -- this file already imports
+# workflow/ for other reasons.
+assert set(get_args(AccountStatus)) == {
+    STATUS_ACCOUNT_ACTIVE,
+    STATUS_ACCOUNT_CLOSURE_REQUESTED,
+    STATUS_ACCOUNT_CLOSED,
+}, "Account.status's Literal values have drifted from workflow.workflows's STATUS_ACCOUNT_* constants"
 
 # Same "accepted != applied" polling pattern application/service.py's
 # own _wait_until() already uses (see that module's docstring) --
