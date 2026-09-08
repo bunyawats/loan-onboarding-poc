@@ -1518,117 +1518,26 @@ for `KEYCLOAK_ISSUER`.
 **Load the `known-gaps-and-gotchas` skill before touching schema,
 workers, or running ad hoc scripts against the local stack** — it's the
 single source of truth for every accepted limitation and every real
-operational gotcha hit while building this project, including: this
-project has no schema migration tooling (`db/schema.sql` changes never
-apply to an already-running `db` volume — this bit for real after Phase
-18); a local `worker_main.py` process and the dockerized
-`worker-workflow`/`worker-activity` containers silently race each other
-if both are left running against different databases; the
-active-account-per-product-type rule doesn't count `CLOSURE_REQUESTED`
-as active, which sets up a real, unhandled `UniqueViolationError` crash
-on a specific reject-after-second-approval sequence; Phase 21's
-risk-tier thresholds used to overlap PRD §6.3's pre-existing
-manager-escalation threshold exactly, making `PENDING_MANAGER_APPROVAL`
-practically unreachable (found live post-Phase-21) — **fixed and
-live-verified 2026-09-08** by moving the mock Risk Engine's
-`HIGH_THRESHOLD` to $100,000, well above `MANAGER_ESCALATION_THRESHOLD_USD`,
-opening a real `$50,000–$99,999.99` overlap band; confirmed against the
-real running stack (rebuilt `mock-risk-engine`, a real `$60,000`
-application: risk assessment → `PENDING_UNDERWRITING` → real Underwriter
-Approve → `PENDING_MANAGER_APPROVAL` → real Manager Approve → `APPROVED`,
-with real account/customer/Welcome-Letter/Consent provisioning
-confirmed via `psql` and the Mayan REST API); a Temporal *terminate* (vs. *cancel*) still can't be recovered
-from inside the workflow, structurally; no timeout on "wait for
-Underwriter/Manager decision"; and module boundaries are enforced only
-by import-linter
-config, not by a process/network boundary, so don't treat "we organized
-it into folders" as equivalent to "the boundary is enforced" until the
-lint step exists and is required in CI.
+operational gotcha hit while building this project (schema migration,
+worker races, the active-account/`CLOSURE_REQUESTED` gap, the
+now-fixed `PENDING_MANAGER_APPROVAL` threshold overlap, Temporal
+terminate-vs-cancel, decision-wait timeouts, and import-linter-only
+boundary enforcement, among others). Don't restate its contents here —
+read it directly, since this section used to drift out of sync with
+the skill it was meant to summarize.
 
 ## Testing
 
-`tests/unit/` (mirrors module structure, no live services — mock
-`document.service`/`workflow.service` calls at the function-call level
-for a module under test, the in-process equivalent of the reference
-project's `respx`-mocked HTTP calls) and `tests/integration/` (needs the
-real local stack, marked `@pytest.mark.integration`).
-
-**One deliberate exception**: a module's own `db.py` tests (e.g.
-`customer/db.py`'s `get_or_create`) run against a **real Postgres**, not
-a mock — "no live services" is about not needing to fake *other*
-modules' HTTP/service calls, not about a module faking its own
-database. Idempotency and uniqueness guarantees (e.g. "two concurrent
-`get_or_create` calls for the same identifier create exactly one row")
-are statements about database state; a mock recording call order can't
-verify them, only assert that `service.py` called `db.py` in some
-order. These still live under `tests/unit/<module>/` (mirrors module
-structure, matches each such task's own DoD, which isn't tagged
-"integration-verify") — they just need `DATABASE_URL` pointing at a
-database with `db/schema.sql` applied, not the *full* local stack
-`tests/integration/` needs (Temporal, Keycloak, Mayan). CI provisions a
-real Postgres service container for exactly this reason (see
-`.github/workflows/ci.yml`) — these tests are not integration tests in
-the "needs the whole stack" sense, but they were never really "unit"
-tests in the "no I/O at all" sense either; call them what they are
-rather than mislabeling either way.
-
-**Two real, live-hit testing hazards to know about before running these
-against a local `docker compose` stack you're also using for manual
-verification**: pointing `DATABASE_URL` at the compose stack's own
-`loan_onboarding` (instead of a separate `loan_onboarding_test`) lets
-these tests' cleanup fixtures silently wipe the live stack's data, and
-stacking up ad hoc `docker exec <container> python3 -c
-"asyncio.run(...)"` one-off scripts can exhaust Postgres's
-`max_connections` via `asyncpg`'s default `min_size=10` pool. **Load
-the `known-gaps-and-gotchas` skill** for the full mechanism and recovery
-steps for both.
-
-Prefer `temporalio.testing.WorkflowEnvironment` (time-skipping) over a
-real Temporal server for `workflow/`'s workflow/activity tests — inject
-a fake/in-memory version of `application/activities.py`'s functions
-here rather than hitting the real `applications` table, same "test the
-orchestration, not the downstream write" split
-`review-approval-temporal`'s own bulk-decision tests use
-(`monkeypatching submit_decision() rather than faking Temporal`).
-
-No `tests/contract/` needed anymore (see "Breaking the cycle") — the
-`application/schemas.py` assert against
-`workflow.task_queues.KNOWN_PRODUCT_TYPES` does that job at import time,
-in every test run, for free.
-
-**`tests/integration/test_document_service.py` (new) is this project's
-first integration test to touch real Mayan** — every prior Mayan
-verification (Phases 5, 14, 15, 16, the index redesigns) was a
-documented manual sweep instead, and `test_end_to_end_workflow.py`
-(the only other file in `tests/integration/`) deliberately stubs
-`document_service` out to avoid needing Mayan at all. Added
-specifically because `FakeMayanClient` can't catch what only real Mayan
-enforces — a document type rejecting a metadata attach it was never
-associated with (P16-4's real bug) and Mayan's own
-reject-on-duplicate-attach behavior are exactly the two bugs this
-project already hit for real that no unit test caught. Covers
-`upload_consent`/`preview_account_document` (the account-level document
-support the consent-upload feature added): a real create, a real
-same-document re-version (not a duplicate, confirmed via
-`list_account_documents` staying at one document), and a real streamed
-download returning the latest version's actual bytes. Uses synthetic,
-uuid4-based `account_id`/`customer_id` values with no real Postgres row
-behind them — `document/` never imports `application/`/`account/`/
-`customer/`, so it doesn't care whether they resolve to anything, only
-that they're stable strings to tag and filter on; a `cleanup_documents`
-fixture trashes every document a test creates afterward, same
-soft-delete this codebase uses everywhere else. Needs
-`docker compose up -d mayan` plus
-`MAYAN_BASE_URL`/`MAYAN_SERVICE_ACCOUNT_USERNAME`/
-`MAYAN_SERVICE_ACCOUNT_PASSWORD` set (same values `.env` already
-carries) — run it on its own
-(`pytest tests/integration/test_document_service.py -m integration`),
-not mixed into one invocation with `tests/unit`: doing that once in the
-same session produced an unrelated flake in
-`tests/workflow/test_workflows.py`'s embedded time-skipping Temporal
-test server that didn't reproduce running either suite alone,
-consistent with CI's own separation (`.github/workflows/ci.yml` only
-ever runs `pytest tests/unit`, never `tests/integration`).
+**Load the `testing-conventions` skill** for the full test-suite
+design: the `tests/unit/` vs. `tests/integration/` split, the
+deliberate exception where a module's own `db.py` tests run against a
+real Postgres rather than a mock, why `tests/contract/` was never
+needed, and `tests/integration/test_document_service.py` (the first
+test in this project to touch real Mayan). For the two live-hit
+testing hazards (a wrong `DATABASE_URL` wiping the live stack; ad hoc
+`docker exec` scripts exhausting Postgres's `max_connections`), see the
+`known-gaps-and-gotchas` skill instead — they're operating-environment
+gotchas, not test-design decisions.
 
 ## Build order and session-to-session progress
 

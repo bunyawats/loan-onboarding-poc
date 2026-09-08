@@ -1,6 +1,6 @@
 ---
 name: known-gaps-and-gotchas
-description: Accepted limitations and real operational gotchas hit while building loan-onboarding-poc -- no schema migration tooling (db/schema.sql changes don't apply to an existing volume), local-vs-dockerized worker races, the active-account-per-product-type race window, Temporal terminate-vs-cancel, stale image/config drift, two live-hit testing hazards (wrong DATABASE_URL wiping the live stack, asyncpg connection-pool exhaustion from one-off docker exec scripts), and Phase 21's risk-tier thresholds making PENDING_MANAGER_APPROVAL practically unreachable. Read before touching schema, workers, or running ad hoc scripts against the local stack. Triggers on "known gaps", "schema migration", "ALTER TABLE accounts", "worker race", "TooManyConnectionsError", "asyncpg pool exhaustion", "docker exec asyncio.run", "temporal workflow terminate", "loan_onboarding_test", "stuck workflow", "KeyError closure_workflow_id", "manager escalation", "PENDING_MANAGER_APPROVAL", "MANAGER_ESCALATION_THRESHOLD_USD".
+description: Accepted limitations and real operational gotchas hit while building loan-onboarding-poc -- no schema migration tooling (db/schema.sql changes don't apply to an existing volume), local-vs-dockerized worker races, the active-account-per-product-type race window, Temporal terminate-vs-cancel, stale image/config drift, two live-hit testing hazards (wrong DATABASE_URL wiping the live stack, asyncpg connection-pool exhaustion from one-off docker exec scripts), and the now-fixed Phase 21 risk-tier/manager-escalation threshold overlap that used to make PENDING_MANAGER_APPROVAL unreachable. Read before touching schema, workers, or running ad hoc scripts against the local stack. Triggers on "known gaps", "schema migration", "ALTER TABLE accounts", "worker race", "TooManyConnectionsError", "asyncpg pool exhaustion", "docker exec asyncio.run", "temporal workflow terminate", "loan_onboarding_test", "stuck workflow", "KeyError closure_workflow_id", "manager escalation", "PENDING_MANAGER_APPROVAL", "MANAGER_ESCALATION_THRESHOLD_USD".
 ---
 
 ## Known gaps to state explicitly once built
@@ -275,7 +275,7 @@ entry, unless a more specific pointer is given.)*
   where the seams should be.
 
 
-## Testing hazards found live (not general testing policy -- see CLAUDE.md Testing section for that)
+## Testing hazards found live (not general testing policy -- see the `testing-conventions` skill for that)
 
 **When running these against a local `docker compose` stack you're also
 using for live/manual verification, point `DATABASE_URL` at a separate
