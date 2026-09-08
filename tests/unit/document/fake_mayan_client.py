@@ -11,6 +11,14 @@ from typing import Any
 
 import httpx
 
+from loan_onboarding.document.mayan_client import (
+    METADATA_FIELD_ACCOUNT_ID,
+    METADATA_FIELD_APPLICANT_IDENTIFIER,
+    METADATA_FIELD_APPLICATION_ID,
+    METADATA_FIELD_CATEGORY,
+    METADATA_FIELD_CUSTOMER_ID,
+)
+
 
 @dataclass
 class _StoredDocument:
@@ -28,11 +36,11 @@ class FakeMayanClient:
         self.rebuild_count = 0
         self._document_type_ids = {"Application Document": 1, "Account Document": 2}
         self._metadata_type_ids = {
-            "applicant_identifier": 1,
-            "application_id": 2,
-            "account_id": 3,
-            "customer_id": 4,
-            "category": 5,
+            METADATA_FIELD_APPLICANT_IDENTIFIER: 1,
+            METADATA_FIELD_APPLICATION_ID: 2,
+            METADATA_FIELD_ACCOUNT_ID: 3,
+            METADATA_FIELD_CUSTOMER_ID: 4,
+            METADATA_FIELD_CATEGORY: 5,
         }
         self._metadata_id_to_name = {v: k for k, v in self._metadata_type_ids.items()}
 

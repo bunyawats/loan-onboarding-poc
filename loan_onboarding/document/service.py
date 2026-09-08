@@ -28,6 +28,11 @@ import httpx
 from .mayan_client import (
     DOCUMENT_TYPE_ACCOUNT,
     DOCUMENT_TYPE_APPLICATION,
+    METADATA_FIELD_ACCOUNT_ID,
+    METADATA_FIELD_APPLICANT_IDENTIFIER,
+    METADATA_FIELD_APPLICATION_ID,
+    METADATA_FIELD_CATEGORY,
+    METADATA_FIELD_CUSTOMER_ID,
     mayan_client,
 )
 from .models import DocumentRef, DocumentStream, UploadedFile
@@ -184,12 +189,12 @@ async def upload(
     # index evaluation server-side (gotcha #2) -- firing them
     # concurrently would make the race worse, not better.
     fields = [
-        ("applicant_identifier", applicant_identifier),
-        ("application_id", application_id),
-        ("category", category),
+        (METADATA_FIELD_APPLICANT_IDENTIFIER, applicant_identifier),
+        (METADATA_FIELD_APPLICATION_ID, application_id),
+        (METADATA_FIELD_CATEGORY, category),
     ]
     if customer_id is not None:
-        fields.append(("customer_id", customer_id))
+        fields.append((METADATA_FIELD_CUSTOMER_ID, customer_id))
     for field, value in fields:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
@@ -206,7 +211,7 @@ async def upload(
 
 
 async def list_documents(application_id: str) -> list[DocumentRef]:
-    return await _documents_matching({"application_id": application_id})
+    return await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id})
 
 
 async def list_all_documents() -> list[DocumentRef]:
@@ -236,7 +241,7 @@ async def check_completeness(
     returning-customer reuse path excludes today (CLAUDE.md's
     "Returning-customer profile refresh and ID reuse")."""
     required = [c for c in REQUIRED_CATEGORIES[product_type] if c not in (exclude_categories or [])]
-    documents = await _documents_matching({"application_id": application_id})
+    documents = await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id})
     present = {doc.category for doc in documents}
     return [category for category in required if category not in present]
 
@@ -265,7 +270,7 @@ async def preview(application_id: str, document_id: int) -> DocumentStream:
     real metadata, not trust in the caller's URL) so neither BFF needs
     its own Mayan credentials nor exposes an arbitrary document by id."""
     metadata = await _metadata_map_for_id(document_id)
-    if metadata is None or metadata.get("application_id") != application_id:
+    if metadata is None or metadata.get(METADATA_FIELD_APPLICATION_ID) != application_id:
         raise DocumentNotFound(f"document {document_id} not found for application {application_id}")
     return await _stream_document(document_id)
 
@@ -276,7 +281,7 @@ async def preview_account_document(account_id: str, document_id: int) -> Documen
     Welcome Letter) that carry no `application_id` at all, so `preview`
     itself can never authorize them."""
     metadata = await _metadata_map_for_id(document_id)
-    if metadata is None or metadata.get("account_id") != account_id:
+    if metadata is None or metadata.get(METADATA_FIELD_ACCOUNT_ID) != account_id:
         raise DocumentNotFound(f"document {document_id} not found for account {account_id}")
     return await _stream_document(document_id)
 
@@ -298,14 +303,14 @@ async def tag_application_documents(application_id: str, account_id: str, custom
     earlier draft of this docstring that assumed otherwise without
     testing it), so both attaches here go through `_set_metadata`
     (update-in-place if already present)."""
-    matches = await _documents_matching({"application_id": application_id})
+    matches = await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id})
     if not matches:
         return
 
     metadata_type_ids = await mayan_client.metadata_type_ids()
     for doc in matches:
-        await _set_metadata(doc.document_id, "account_id", account_id, metadata_type_ids["account_id"])
-        await _set_metadata(doc.document_id, "customer_id", customer_id, metadata_type_ids["customer_id"])
+        await _set_metadata(doc.document_id, METADATA_FIELD_ACCOUNT_ID, account_id, metadata_type_ids[METADATA_FIELD_ACCOUNT_ID])
+        await _set_metadata(doc.document_id, METADATA_FIELD_CUSTOMER_ID, customer_id, metadata_type_ids[METADATA_FIELD_CUSTOMER_ID])
     await mayan_client.rebuild_index()
 
 
@@ -335,7 +340,7 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     own soft-delete -- reversible, same convention this project already
     uses elsewhere) before the new copy is created, so there's still
     never more than one at a time."""
-    matches = await _documents_matching({"application_id": application_id, "category": CATEGORY_GOVERNMENT_ID})
+    matches = await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id, METADATA_FIELD_CATEGORY: CATEGORY_GOVERNMENT_ID})
     if not matches:
         return
 
@@ -349,7 +354,7 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     # category=Government ID too, though that's redundant in practice
     # (a copy is never created under any other category) -- cheap and
     # matches this function's own creation logic below.
-    existing_copies = await _documents_matching({"customer_id": customer_id, "category": CATEGORY_GOVERNMENT_ID})
+    existing_copies = await _documents_matching({METADATA_FIELD_CUSTOMER_ID: customer_id, METADATA_FIELD_CATEGORY: CATEGORY_GOVERNMENT_ID})
     for doc in existing_copies:
         if doc.application_id is None and doc.account_id is None:
             response = await mayan_client.delete(f"/documents/{doc.document_id}/")
@@ -363,9 +368,9 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     await mayan_client.upload_file(copy_document_id, source.filename, content, action_name="replace")
 
     for field, value in [
-        ("applicant_identifier", source.applicant_identifier),
-        ("category", CATEGORY_GOVERNMENT_ID),
-        ("customer_id", customer_id),
+        (METADATA_FIELD_APPLICANT_IDENTIFIER, source.applicant_identifier),
+        (METADATA_FIELD_CATEGORY, CATEGORY_GOVERNMENT_ID),
+        (METADATA_FIELD_CUSTOMER_ID, customer_id),
     ]:
         await mayan_client.attach_metadata(copy_document_id, metadata_type_ids[field], value)
 
@@ -418,10 +423,10 @@ async def generate_welcome_letter(
     await mayan_client.upload_file(document_id, filename, content, action_name="replace")
 
     for field, value in [
-        ("applicant_identifier", applicant_identifier),
-        ("account_id", account_id),
-        ("category", "Welcome Letter"),
-        ("customer_id", customer_id),
+        (METADATA_FIELD_APPLICANT_IDENTIFIER, applicant_identifier),
+        (METADATA_FIELD_ACCOUNT_ID, account_id),
+        (METADATA_FIELD_CATEGORY, "Welcome Letter"),
+        (METADATA_FIELD_CUSTOMER_ID, customer_id),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
@@ -502,7 +507,7 @@ async def upload_consent(
     what `upload_consent` needs). CLAUDE.md's original placeholder
     (`action_name="new"*`, flagged "confirm during this task") was
     wrong and has been corrected in place."""
-    existing = await _documents_matching({"account_id": account_id, "category": CATEGORY_CONSENT})
+    existing = await _documents_matching({METADATA_FIELD_ACCOUNT_ID: account_id, METADATA_FIELD_CATEGORY: CATEGORY_CONSENT})
 
     if existing:
         document_id = existing[0].document_id
@@ -518,10 +523,10 @@ async def upload_consent(
     await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
 
     for field, value in [
-        ("applicant_identifier", applicant_identifier),
-        ("account_id", account_id),
-        ("category", CATEGORY_CONSENT),
-        ("customer_id", customer_id),
+        (METADATA_FIELD_APPLICANT_IDENTIFIER, applicant_identifier),
+        (METADATA_FIELD_ACCOUNT_ID, account_id),
+        (METADATA_FIELD_CATEGORY, CATEGORY_CONSENT),
+        (METADATA_FIELD_CUSTOMER_ID, customer_id),
     ]:
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
@@ -548,9 +553,9 @@ async def list_customer_documents(customer_id: str) -> list[DocumentRef]:
     which is "the customer's photo". At most one match at any time
     (`promote_government_id_to_customer_photo` enforces this by trashing
     the old copy before creating a new one)."""
-    matches = await _documents_matching({"customer_id": customer_id})
+    matches = await _documents_matching({METADATA_FIELD_CUSTOMER_ID: customer_id})
     return [doc for doc in matches if doc.application_id is None and doc.account_id is None]
 
 
 async def list_account_documents(account_id: str) -> list[DocumentRef]:
-    return await _documents_matching({"account_id": account_id})
+    return await _documents_matching({METADATA_FIELD_ACCOUNT_ID: account_id})

@@ -18,6 +18,7 @@ multi-category upload screen.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from decimal import Decimal, InvalidOperation
@@ -864,17 +865,24 @@ async def new_application_submit(request: Request, applicant_identifier: str = D
 # ---------------------------------------------------------- Temporal client ----
 
 _temporal_client: Optional[Client] = None
+_temporal_client_lock = asyncio.Lock()
 
 
 async def _get_temporal_client() -> Client:
     # Same lazy-singleton-per-process pattern application/service.py and
     # bff_backoffice/routes.py both already use -- workflow.service's
     # functions take `client` as a plain parameter, so every entry point
-    # that calls them owns its own connection.
+    # that calls them owns its own connection. Locked, same as those two --
+    # without it, two concurrent first requests can each observe
+    # _temporal_client as None and open a second, orphaned connection (a
+    # real gap this copy had until it was found during a duplicate-literal
+    # audit -- the other three copies always had the lock).
     global _temporal_client
     if _temporal_client is None:
-        _temporal_client = await Client.connect(
-            os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
-            namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
-        )
+        async with _temporal_client_lock:
+            if _temporal_client is None:
+                _temporal_client = await Client.connect(
+                    os.environ.get("TEMPORAL_HOST", DEFAULT_TEMPORAL_HOST),
+                    namespace=os.environ.get("TEMPORAL_NAMESPACE", DEFAULT_TEMPORAL_NAMESPACE),
+                )
     return _temporal_client

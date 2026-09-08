@@ -19,7 +19,19 @@ from typing import Any
 
 import httpx
 
-METADATA_FIELDS = ("applicant_identifier", "application_id", "account_id", "customer_id", "category")
+METADATA_FIELD_APPLICANT_IDENTIFIER = "applicant_identifier"
+METADATA_FIELD_APPLICATION_ID = "application_id"
+METADATA_FIELD_ACCOUNT_ID = "account_id"
+METADATA_FIELD_CUSTOMER_ID = "customer_id"
+METADATA_FIELD_CATEGORY = "category"
+
+METADATA_FIELDS = (
+    METADATA_FIELD_APPLICANT_IDENTIFIER,
+    METADATA_FIELD_APPLICATION_ID,
+    METADATA_FIELD_ACCOUNT_ID,
+    METADATA_FIELD_CUSTOMER_ID,
+    METADATA_FIELD_CATEGORY,
+)
 
 DOCUMENT_TYPE_APPLICATION = "Application Document"
 DOCUMENT_TYPE_ACCOUNT = "Account Document"
