@@ -21,18 +21,20 @@ from temporalio import activity
 from loan_onboarding.account import db as account_db
 from loan_onboarding.notifications import service as notifications_service
 from loan_onboarding.workflow.workflows import (
+    ACTIVITY_PERSIST_CLOSURE_DECISION,
+    ACTIVITY_PERSIST_CLOSURE_REQUEST,
     PersistClosureDecisionInput,
     PersistClosureRequestInput,
     STATUS_ACCOUNT_CLOSURE_REQUESTED,
 )
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_PERSIST_CLOSURE_REQUEST)
 async def persist_closure_request(inp: PersistClosureRequestInput) -> None:
     await account_db.update_closure_request(inp.account_id, inp.workflow_id)
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_PERSIST_CLOSURE_DECISION)
 async def persist_closure_decision(inp: PersistClosureDecisionInput) -> str:
     """Returns the status actually written -- normally
     `inp.resulting_status` verbatim. `workflows.py`'s

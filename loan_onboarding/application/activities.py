@@ -38,6 +38,11 @@ from loan_onboarding.document import service as document_service
 from loan_onboarding.notifications import service as notifications_service
 from loan_onboarding.risk import service as risk_service
 from loan_onboarding.workflow.workflows import (
+    ACTIVITY_PERSIST_APPLICATION,
+    ACTIVITY_PERSIST_DECISION,
+    ACTIVITY_PERSIST_RESUBMIT,
+    ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+    ACTIVITY_SUBMIT_RISK_ASSESSMENT,
     ROLE_MANAGER,
     ROLE_UNDERWRITER,
     STATUS_APPROVED,
@@ -59,7 +64,7 @@ from loan_onboarding.workflow.workflows import (
 _ACTIVE_ACCOUNT_CONFLICT_CONSTRAINT = "ux_accounts_customer_active_product_type"
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_PERSIST_APPLICATION)
 async def persist_application(inp: PersistApplicationInput) -> None:
     await application_db.insert(
         application_id=inp.application_id,
@@ -80,7 +85,7 @@ async def persist_application(inp: PersistApplicationInput) -> None:
     )
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
 async def submit_risk_assessment(inp: SubmitRiskAssessmentInput) -> None:
     """Phase 21 -- the one call site for `risk.service.submit_risk_assessment`
     in this codebase. `inp.amount` is a plain float over the wire, same
@@ -100,7 +105,7 @@ async def submit_risk_assessment(inp: SubmitRiskAssessmentInput) -> None:
     )
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED)
 async def persist_risk_assessment_cleared(inp: PersistRiskAssessmentClearedInput) -> None:
     """Phase 21's MEDIUM-tier outcome -- see `application/db.py`'s
     `clear_risk_assessment` for why this is a dedicated, minimal
@@ -108,7 +113,7 @@ async def persist_risk_assessment_cleared(inp: PersistRiskAssessmentClearedInput
     await application_db.clear_risk_assessment(inp.application_id)
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_PERSIST_DECISION)
 async def persist_decision(inp: PersistDecisionInput) -> str:
     """Returns the status actually written -- normally `inp.resulting_status`
     verbatim, but see the active-account-conflict handling below, where
@@ -259,6 +264,6 @@ async def persist_decision(inp: PersistDecisionInput) -> str:
     return final_status
 
 
-@activity.defn
+@activity.defn(name=ACTIVITY_PERSIST_RESUBMIT)
 async def persist_resubmit(inp: PersistResubmitInput) -> None:
     await application_db.update_resubmission(inp.application_id, inp.payload, STATUS_PENDING_UNDERWRITING)

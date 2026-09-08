@@ -64,10 +64,11 @@ from urllib.parse import urlencode
 import httpx
 
 from loan_onboarding.bff_backoffice import keycloak_auth, session_store
+from loan_onboarding.workflow.workflows import ROLE_MANAGER, ROLE_UNDERWRITER
 
 SESSION_KEY = "user"
 
-VALID_ROLES = ("underwriter", "manager")
+VALID_ROLES = (ROLE_UNDERWRITER, ROLE_MANAGER)
 
 
 class RequireLoginRedirect(Exception):
@@ -188,9 +189,9 @@ async def complete_login(code: str, state: str, expected_state: str | None, redi
 
     roles = set(claims.get("realm_access", {}).get("roles", []))
     if "Underwriter" in roles:
-        role = "underwriter"
+        role = ROLE_UNDERWRITER
     elif "Manager" in roles:
-        role = "manager"
+        role = ROLE_MANAGER
     else:
         raise ValueError("This account has neither the Underwriter nor Manager role -- contact an admin.")
 

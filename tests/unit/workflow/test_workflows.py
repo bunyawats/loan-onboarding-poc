@@ -30,6 +30,13 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from loan_onboarding.workflow.workflows import (
+    ACTIVITY_PERSIST_APPLICATION,
+    ACTIVITY_PERSIST_CLOSURE_DECISION,
+    ACTIVITY_PERSIST_CLOSURE_REQUEST,
+    ACTIVITY_PERSIST_DECISION,
+    ACTIVITY_PERSIST_RESUBMIT,
+    ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+    ACTIVITY_SUBMIT_RISK_ASSESSMENT,
     MANAGER_ESCALATION_THRESHOLD_USD,
     ApplicationStatus,
     ApplicationWorkflowInput,
@@ -63,36 +70,36 @@ def _make_fake_activities(calls: list[_RecordedCall]):
     # Typed `inp` params, deliberately -- Temporal's default data converter
     # needs the activity function's own type hint to decode the payload
     # back into PersistApplicationInput/etc rather than a plain dict.
-    @activity.defn(name="persist_application")
+    @activity.defn(name=ACTIVITY_PERSIST_APPLICATION)
     async def persist_application(inp: PersistApplicationInput) -> None:
-        calls.append(_RecordedCall("persist_application", inp))
+        calls.append(_RecordedCall(ACTIVITY_PERSIST_APPLICATION, inp))
 
-    @activity.defn(name="persist_decision")
+    @activity.defn(name=ACTIVITY_PERSIST_DECISION)
     async def persist_decision(inp: PersistDecisionInput) -> str:
         # Mirrors the real activity's normal-path return (the status it
         # actually wrote) -- application/activities.py's own tests cover
         # the active-account-conflict path where this can differ from
         # inp.resulting_status; that's an application/ concern, not a
         # workflow-orchestration one, so it isn't faked here.
-        calls.append(_RecordedCall("persist_decision", inp))
+        calls.append(_RecordedCall(ACTIVITY_PERSIST_DECISION, inp))
         return inp.resulting_status
 
-    @activity.defn(name="persist_resubmit")
+    @activity.defn(name=ACTIVITY_PERSIST_RESUBMIT)
     async def persist_resubmit(inp: PersistResubmitInput) -> None:
-        calls.append(_RecordedCall("persist_resubmit", inp))
+        calls.append(_RecordedCall(ACTIVITY_PERSIST_RESUBMIT, inp))
 
     # Phase 21 -- fakes for the two new risk-assessment activities.
     # submit_risk_assessment's real implementation calls out to
     # risk.service (an httpx POST) -- faked here as a no-op, same "test
     # the orchestration, not the downstream call" split every other
     # activity fake in this file already follows.
-    @activity.defn(name="submit_risk_assessment")
+    @activity.defn(name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
     async def submit_risk_assessment(inp: SubmitRiskAssessmentInput) -> None:
-        calls.append(_RecordedCall("submit_risk_assessment", inp))
+        calls.append(_RecordedCall(ACTIVITY_SUBMIT_RISK_ASSESSMENT, inp))
 
-    @activity.defn(name="persist_risk_assessment_cleared")
+    @activity.defn(name=ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED)
     async def persist_risk_assessment_cleared(inp: PersistRiskAssessmentClearedInput) -> None:
-        calls.append(_RecordedCall("persist_risk_assessment_cleared", inp))
+        calls.append(_RecordedCall(ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED, inp))
 
     return [
         persist_application,
@@ -194,7 +201,7 @@ async def _advance_past_risk_assessment(handle: WorkflowHandle, calls: list[_Rec
     happen after submit_risk_assessment's own submission was made) --
     this wait reproduces that same real causal ordering here instead of
     racing it."""
-    await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+    await _wait_for_call_count(calls, 1, activity_name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
     await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "MEDIUM")
     await _wait_for_status(handle, "PENDING_UNDERWRITING")
 
@@ -219,10 +226,10 @@ async def test_happy_path_below_threshold(env: WorkflowEnvironment):
     assert result.status == "APPROVED"
     assert result.closed_by == "u1"
     assert _names(calls) == [
-        "persist_application",
-        "submit_risk_assessment",
-        "persist_risk_assessment_cleared",
-        "persist_decision",
+        ACTIVITY_PERSIST_APPLICATION,
+        ACTIVITY_SUBMIT_RISK_ASSESSMENT,
+        ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+        ACTIVITY_PERSIST_DECISION,
     ]
     assert calls[3].inp.resulting_status == "APPROVED"
     assert calls[3].inp.actor_role == "underwriter"
@@ -254,11 +261,11 @@ async def test_happy_path_escalates_then_manager_approves(env: WorkflowEnvironme
     assert result.status == "APPROVED"
     assert result.closed_by == "m1"
     assert _names(calls) == [
-        "persist_application",
-        "submit_risk_assessment",
-        "persist_risk_assessment_cleared",
-        "persist_decision",
-        "persist_decision",
+        ACTIVITY_PERSIST_APPLICATION,
+        ACTIVITY_SUBMIT_RISK_ASSESSMENT,
+        ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+        ACTIVITY_PERSIST_DECISION,
+        ACTIVITY_PERSIST_DECISION,
     ]
     assert calls[3].inp.resulting_status == "PENDING_MANAGER_APPROVAL"
     assert calls[4].inp.resulting_status == "APPROVED"
@@ -330,12 +337,12 @@ async def test_request_more_info_then_resubmit_then_approve(env: WorkflowEnviron
 
     assert result.status == "APPROVED"
     assert _names(calls) == [
-        "persist_application",
-        "submit_risk_assessment",
-        "persist_risk_assessment_cleared",
-        "persist_decision",
-        "persist_resubmit",
-        "persist_decision",
+        ACTIVITY_PERSIST_APPLICATION,
+        ACTIVITY_SUBMIT_RISK_ASSESSMENT,
+        ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+        ACTIVITY_PERSIST_DECISION,
+        ACTIVITY_PERSIST_RESUBMIT,
+        ACTIVITY_PERSIST_DECISION,
     ]
     assert calls[4].inp.payload == {"purpose": "home_improvement"}
 
@@ -385,7 +392,7 @@ async def test_cancel_from_each_non_terminal_state(
     # call (a real, harmless race -- CLAUDE.md's "no timeout" gaps
     # already accept a comparable class of benign concurrent-activity
     # ordering elsewhere) and land persist_decision before it in `calls`.
-    decision_calls = [c for c in calls if c.name == "persist_decision"]
+    decision_calls = [c for c in calls if c.name == ACTIVITY_PERSIST_DECISION]
     assert decision_calls[-1].inp.resulting_status == "CANCELLED"
 
 
@@ -411,9 +418,9 @@ async def test_wrong_actor_role_for_current_state_is_rejected(env: WorkflowEnvir
     assert isinstance(exc_info.value.cause, ApplicationError)
     # The rejected attempt never reached persist_decision.
     assert _names(calls) == [
-        "persist_application",
-        "submit_risk_assessment",
-        "persist_risk_assessment_cleared",
+        ACTIVITY_PERSIST_APPLICATION,
+        ACTIVITY_SUBMIT_RISK_ASSESSMENT,
+        ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
     ]
 
 
@@ -443,7 +450,7 @@ async def test_native_cancel_lands_on_cancelled_via_fake_persist_decision(
 
     assert result.status == "CANCELLED"
     assert result.closed_by == "temporal-admin"
-    assert _names(calls) == ["persist_application", "submit_risk_assessment", "persist_decision"]
+    assert _names(calls) == [ACTIVITY_PERSIST_APPLICATION, ACTIVITY_SUBMIT_RISK_ASSESSMENT, ACTIVITY_PERSIST_DECISION]
     assert calls[2].inp.decision == "CANCELLED"
     assert calls[2].inp.decided_at is not None
 
@@ -480,7 +487,7 @@ async def test_two_concurrent_terminal_signals_only_write_once(env: WorkflowEnvi
         )
         result = await handle.result()
 
-    decision_calls = [c for c in calls if c.name == "persist_decision"]
+    decision_calls = [c for c in calls if c.name == ACTIVITY_PERSIST_DECISION]
     assert len(decision_calls) == 1
     assert result.status == decision_calls[0].inp.resulting_status
     assert result.status in ("APPROVED", "REJECTED")
@@ -506,13 +513,13 @@ async def test_risk_low_auto_approves(env: WorkflowEnvironment):
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
-        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await _wait_for_call_count(calls, 1, activity_name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
         await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "LOW")
         result = await handle.result()
 
     assert result.status == "APPROVED"
     assert result.closed_by == "risk-engine-auto"
-    assert _names(calls) == ["persist_application", "submit_risk_assessment", "persist_decision"]
+    assert _names(calls) == [ACTIVITY_PERSIST_APPLICATION, ACTIVITY_SUBMIT_RISK_ASSESSMENT, ACTIVITY_PERSIST_DECISION]
     decision_call = calls[2]
     assert decision_call.inp.resulting_status == "APPROVED"
     assert decision_call.inp.actor_role == "underwriter"
@@ -530,7 +537,7 @@ async def test_risk_high_auto_rejects(env: WorkflowEnvironment):
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
-        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await _wait_for_call_count(calls, 1, activity_name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
         await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "HIGH")
         result = await handle.result()
 
@@ -567,10 +574,10 @@ async def test_risk_medium_falls_through_to_unchanged_underwriting(env: Workflow
     assert result.status == "APPROVED"
     assert result.closed_by == "u1"
     assert _names(calls) == [
-        "persist_application",
-        "submit_risk_assessment",
-        "persist_risk_assessment_cleared",
-        "persist_decision",
+        ACTIVITY_PERSIST_APPLICATION,
+        ACTIVITY_SUBMIT_RISK_ASSESSMENT,
+        ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+        ACTIVITY_PERSIST_DECISION,
     ]
     # MEDIUM itself never touches risk_tier (CLAUDE.md: only an
     # auto-*decided* LOW/HIGH outcome does) -- the eventual human
@@ -588,13 +595,13 @@ async def test_signal_risk_decision_invalid_tier_is_rejected(env: WorkflowEnviro
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
-        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await _wait_for_call_count(calls, 1, activity_name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
         await handle.signal(LoanApplicationWorkflow.signal_risk_decision, "BOGUS")
         with pytest.raises(WorkflowFailureError) as exc_info:
             await handle.result()
 
     assert isinstance(exc_info.value.cause, ApplicationError)
-    assert _names(calls) == ["persist_application", "submit_risk_assessment"]
+    assert _names(calls) == [ACTIVITY_PERSIST_APPLICATION, ACTIVITY_SUBMIT_RISK_ASSESSMENT]
 
 
 async def test_duplicate_signal_risk_decision_after_medium_is_ignored(env: WorkflowEnvironment):
@@ -634,10 +641,10 @@ async def test_duplicate_signal_risk_decision_after_medium_is_ignored(env: Workf
 
     assert result.status == "APPROVED"
     assert _names(calls) == [
-        "persist_application",
-        "submit_risk_assessment",
-        "persist_risk_assessment_cleared",
-        "persist_decision",
+        ACTIVITY_PERSIST_APPLICATION,
+        ACTIVITY_SUBMIT_RISK_ASSESSMENT,
+        ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
+        ACTIVITY_PERSIST_DECISION,
     ]
 
 
@@ -663,14 +670,14 @@ async def test_two_concurrent_risk_decisions_only_write_once(env: WorkflowEnviro
         activities=_make_fake_activities(calls),
     ):
         handle = await _start(env, task_queue, amount=BELOW_THRESHOLD)
-        await _wait_for_call_count(calls, 1, activity_name="submit_risk_assessment")
+        await _wait_for_call_count(calls, 1, activity_name=ACTIVITY_SUBMIT_RISK_ASSESSMENT)
         await asyncio.gather(
             handle.signal(LoanApplicationWorkflow.signal_risk_decision, "LOW"),
             handle.signal(LoanApplicationWorkflow.signal_risk_decision, "HIGH"),
         )
         result = await handle.result()
 
-    decision_calls = [c for c in calls if c.name == "persist_decision"]
+    decision_calls = [c for c in calls if c.name == ACTIVITY_PERSIST_DECISION]
     assert len(decision_calls) == 1
     assert result.status == decision_calls[0].inp.resulting_status
     assert result.status in ("APPROVED", "REJECTED")
@@ -687,13 +694,13 @@ async def test_two_concurrent_risk_decisions_only_write_once(env: WorkflowEnviro
 
 
 def _make_fake_closure_activities(calls: list[_RecordedCall]):
-    @activity.defn(name="persist_closure_request")
+    @activity.defn(name=ACTIVITY_PERSIST_CLOSURE_REQUEST)
     async def persist_closure_request(inp: PersistClosureRequestInput) -> None:
-        calls.append(_RecordedCall("persist_closure_request", inp))
+        calls.append(_RecordedCall(ACTIVITY_PERSIST_CLOSURE_REQUEST, inp))
 
-    @activity.defn(name="persist_closure_decision")
+    @activity.defn(name=ACTIVITY_PERSIST_CLOSURE_DECISION)
     async def persist_closure_decision(inp: PersistClosureDecisionInput) -> str:
-        calls.append(_RecordedCall("persist_closure_decision", inp))
+        calls.append(_RecordedCall(ACTIVITY_PERSIST_CLOSURE_DECISION, inp))
         return inp.resulting_status
 
     return [persist_closure_request, persist_closure_decision]
@@ -749,7 +756,7 @@ async def test_close_account_approve_path(env: WorkflowEnvironment):
 
     assert result.status == "CLOSED"
     assert result.closed_by == "u1"
-    assert _names(calls) == ["persist_closure_request", "persist_closure_decision"]
+    assert _names(calls) == [ACTIVITY_PERSIST_CLOSURE_REQUEST, ACTIVITY_PERSIST_CLOSURE_DECISION]
     assert calls[1].inp.resulting_status == "CLOSED"
     assert calls[1].inp.account_id == "ACC-000000001"
     assert calls[1].inp.applicant_identifier == "alice@example.com"
@@ -825,7 +832,7 @@ async def test_close_account_concurrent_decision_and_cancel_only_write_once(
         )
         result = await handle.result()
 
-    decision_calls = [c for c in calls if c.name == "persist_closure_decision"]
+    decision_calls = [c for c in calls if c.name == ACTIVITY_PERSIST_CLOSURE_DECISION]
     assert len(decision_calls) == 1
     assert result.status == decision_calls[0].inp.resulting_status
     assert result.status in ("CLOSED", "ACTIVE")
@@ -850,4 +857,4 @@ async def test_close_account_wrong_actor_role_is_rejected(env: WorkflowEnvironme
             await handle.result()
 
     assert isinstance(exc_info.value.cause, ApplicationError)
-    assert _names(calls) == ["persist_closure_request"]
+    assert _names(calls) == [ACTIVITY_PERSIST_CLOSURE_REQUEST]

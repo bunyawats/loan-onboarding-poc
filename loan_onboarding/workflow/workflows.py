@@ -74,6 +74,20 @@ RISK_ENGINE_AUTO_COMMENT = "Automated decision by risk assessment"
 DEFAULT_RETRY_POLICY = RetryPolicy(maximum_attempts=5)
 DEFAULT_ACTIVITY_TIMEOUT = timedelta(seconds=30)
 
+# The string names activities are dispatched by (CLAUDE.md's "Breaking the
+# cycle") -- this module's own execute_activity() calls below, and
+# application/activities.py's + account/activities.py's @activity.defn(name=...)
+# registrations, both import these rather than each hand-typing the same
+# string, so a rename can't silently desync the caller from the registered
+# activity (previously two independent literals had to happen to agree).
+ACTIVITY_PERSIST_APPLICATION = "persist_application"
+ACTIVITY_SUBMIT_RISK_ASSESSMENT = "submit_risk_assessment"
+ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED = "persist_risk_assessment_cleared"
+ACTIVITY_PERSIST_DECISION = "persist_decision"
+ACTIVITY_PERSIST_RESUBMIT = "persist_resubmit"
+ACTIVITY_PERSIST_CLOSURE_REQUEST = "persist_closure_request"
+ACTIVITY_PERSIST_CLOSURE_DECISION = "persist_closure_decision"
+
 
 @dataclass
 class ApplicationWorkflowInput:
@@ -272,7 +286,7 @@ class LoanApplicationWorkflow:
         self._amount = req.amount
 
         await workflow.execute_activity(
-            "persist_application",
+            ACTIVITY_PERSIST_APPLICATION,
             PersistApplicationInput(
                 application_id=req.application_id,
                 workflow_id=workflow.info().workflow_id,
@@ -299,7 +313,7 @@ class LoanApplicationWorkflow:
         # -- nothing else will ever move this application out of
         # PENDING_RISK_ASSESSMENT if the submission itself never lands.
         await workflow.execute_activity(
-            "submit_risk_assessment",
+            ACTIVITY_SUBMIT_RISK_ASSESSMENT,
             SubmitRiskAssessmentInput(
                 application_id=req.application_id,
                 applicant_identifier=req.applicant_identifier,
@@ -332,7 +346,7 @@ class LoanApplicationWorkflow:
         except asyncio.CancelledError:
             if self._claim_transition():
                 await workflow.execute_activity(
-                    "persist_decision",
+                    ACTIVITY_PERSIST_DECISION,
                     PersistDecisionInput(
                         application_id=self._application_id,
                         actor_role=ROLE_CUSTOMER,
@@ -378,7 +392,7 @@ class LoanApplicationWorkflow:
         # whatever actually landed in Postgres, not the status this
         # workflow *intended* before the activity ran.
         actual_status = await workflow.execute_activity(
-            "persist_decision",
+            ACTIVITY_PERSIST_DECISION,
             PersistDecisionInput(
                 application_id=self._application_id,
                 actor_role=actor_role,
@@ -425,7 +439,7 @@ class LoanApplicationWorkflow:
 
         if is_terminal:
             actual_status = await workflow.execute_activity(
-                "persist_decision",
+                ACTIVITY_PERSIST_DECISION,
                 PersistDecisionInput(
                     application_id=self._application_id,
                     actor_role=ROLE_UNDERWRITER,
@@ -445,7 +459,7 @@ class LoanApplicationWorkflow:
             self._closed_comment = RISK_ENGINE_AUTO_COMMENT
         else:
             await workflow.execute_activity(
-                "persist_risk_assessment_cleared",
+                ACTIVITY_PERSIST_RISK_ASSESSMENT_CLEARED,
                 PersistRiskAssessmentClearedInput(application_id=self._application_id),
                 start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
@@ -461,7 +475,7 @@ class LoanApplicationWorkflow:
             return
 
         await workflow.execute_activity(
-            "persist_resubmit",
+            ACTIVITY_PERSIST_RESUBMIT,
             PersistResubmitInput(application_id=self._application_id, payload=payload),
             start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -590,7 +604,7 @@ class CloseAccountWorkflow:
         self._applicant_identifier = req.applicant_identifier
 
         await workflow.execute_activity(
-            "persist_closure_request",
+            ACTIVITY_PERSIST_CLOSURE_REQUEST,
             PersistClosureRequestInput(
                 account_id=req.account_id,
                 workflow_id=workflow.info().workflow_id,
@@ -621,7 +635,7 @@ class CloseAccountWorkflow:
             raise ApplicationError(str(e))
 
         actual_status = await workflow.execute_activity(
-            "persist_closure_decision",
+            ACTIVITY_PERSIST_CLOSURE_DECISION,
             PersistClosureDecisionInput(
                 account_id=self._account_id,
                 applicant_identifier=self._applicant_identifier,
@@ -656,7 +670,7 @@ class CloseAccountWorkflow:
             return
 
         actual_status = await workflow.execute_activity(
-            "persist_closure_decision",
+            ACTIVITY_PERSIST_CLOSURE_DECISION,
             PersistClosureDecisionInput(
                 account_id=self._account_id,
                 applicant_identifier=self._applicant_identifier,
