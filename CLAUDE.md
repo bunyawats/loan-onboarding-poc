@@ -1527,10 +1527,17 @@ if both are left running against different databases; the
 active-account-per-product-type rule doesn't count `CLOSURE_REQUESTED`
 as active, which sets up a real, unhandled `UniqueViolationError` crash
 on a specific reject-after-second-approval sequence; Phase 21's
-risk-tier thresholds overlap PRD §6.3's pre-existing manager-escalation
-threshold exactly, making `PENDING_MANAGER_APPROVAL` practically
-unreachable in the current build (found live post-Phase-21, not yet
-fixed); a Temporal *terminate* (vs. *cancel*) still can't be recovered
+risk-tier thresholds used to overlap PRD §6.3's pre-existing
+manager-escalation threshold exactly, making `PENDING_MANAGER_APPROVAL`
+practically unreachable (found live post-Phase-21) — **fixed and
+live-verified 2026-09-08** by moving the mock Risk Engine's
+`HIGH_THRESHOLD` to $100,000, well above `MANAGER_ESCALATION_THRESHOLD_USD`,
+opening a real `$50,000–$99,999.99` overlap band; confirmed against the
+real running stack (rebuilt `mock-risk-engine`, a real `$60,000`
+application: risk assessment → `PENDING_UNDERWRITING` → real Underwriter
+Approve → `PENDING_MANAGER_APPROVAL` → real Manager Approve → `APPROVED`,
+with real account/customer/Welcome-Letter/Consent provisioning
+confirmed via `psql` and the Mayan REST API); a Temporal *terminate* (vs. *cancel*) still can't be recovered
 from inside the workflow, structurally; no timeout on "wait for
 Underwriter/Manager decision"; and module boundaries are enforced only
 by import-linter

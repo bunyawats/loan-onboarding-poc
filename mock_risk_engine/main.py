@@ -18,7 +18,13 @@ Phase 21 topology). One endpoint:
   product_type, amount as a string, payload). After a short simulated
   delay, applies the amount-bucketing decision rule (Decisions Needed,
   assumed default, not yet confirmed by a human: < $15,000 -> LOW,
-  $15,000-$50,000 -> MEDIUM, >= $50,000 -> HIGH) and calls
+  $15,000-$100,000 -> MEDIUM, >= $100,000 -> HIGH -- HIGH_THRESHOLD
+  deliberately set well above workflows.py's
+  MANAGER_ESCALATION_THRESHOLD_USD ($50,000), not equal to it, so a real
+  $50,000-$99,999.99 band exists where an application both survives risk
+  assessment into human PENDING_UNDERWRITING and meets the escalation
+  condition -- see CLAUDE.md's Known Gaps for the exact-overlap bug this
+  corrects) and calls
   risk-adapter's `POST /decisions` webhook **through KrakenD**
   (KRAKEND_URL, not risk-adapter directly -- this service has no idea
   risk-adapter's real address is, by design, same as a genuine external
@@ -52,9 +58,14 @@ _DEFAULT_SIMULATED_DELAY_SECONDS = "1"
 # Decisions Needed (IMPLEMENTATION_PLAN.md), assumed default, not yet
 # confirmed by a human -- picked so the mock is trivially testable (a
 # known amount always produces a known tier), not to simulate a real
-# scoring model.
+# scoring model. HIGH_THRESHOLD is set well above (not equal to)
+# workflows.py's MANAGER_ESCALATION_THRESHOLD_USD (50_000) on purpose --
+# an equal value made PENDING_MANAGER_APPROVAL unreachable, since no
+# amount could ever both stay MEDIUM (reach human underwriting at all)
+# and meet the escalation threshold. See CLAUDE.md's Known Gaps /
+# known-gaps-and-gotchas skill for the full history.
 LOW_THRESHOLD = Decimal("15000")
-HIGH_THRESHOLD = Decimal("50000")
+HIGH_THRESHOLD = Decimal("100000")
 
 RISK_TIER_LOW = "LOW"
 RISK_TIER_MEDIUM = "MEDIUM"

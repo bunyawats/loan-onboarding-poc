@@ -183,35 +183,63 @@ entry, unless a more specific pointer is given.)*
 - Same Keycloak-side gaps the reference project has and hasn't closed:
   `verify_aud=False` until a real audience is configured; no caching on
   permission checks (every mutating action is a live UMA exchange).
-- **Phase 21's risk-tier thresholds and PRD §6.3's pre-existing manager-escalation
-  threshold now overlap exactly, making the manager-approval path
-  practically unreachable — found live while walking a HIGH-risk
-  application through the manager queue on request.** The mock Risk
-  Engine's MEDIUM bucket is `$15,000 <= amount < $50,000`
-  (`mock_risk_engine/main.py`'s `LOW_THRESHOLD`/`HIGH_THRESHOLD`);
-  `workflows.py`'s manager-escalation check fires at `amount >= 50_000`
-  (`MANAGER_ESCALATION_THRESHOLD_USD`). Since Phase 21, only a
-  MEDIUM-tier application ever reaches human `PENDING_UNDERWRITING` at
-  all (LOW auto-approves, HIGH auto-rejects, both before a human ever
-  sees them) — and MEDIUM's own upper bound sits strictly below the
-  escalation threshold, so no application that survives risk assessment
-  into underwriting can ever also meet the escalation condition. A
-  genuinely HIGH-risk application (`>= $50,000`) is auto-rejected by the
-  risk engine before either an Underwriter or a Manager ever sees it,
-  and there's no "reopen a REJECTED application" action anywhere in
-  this codebase to route it to the manager queue after the fact either.
-  **Net effect: `PENDING_MANAGER_APPROVAL` is currently dead code in
-  practice** — reachable only by an application that was already
-  `PENDING_UNDERWRITING` before Phase 21 shipped, or by manually editing
-  `MANAGER_ESCALATION_THRESHOLD_USD`/the mock engine's `HIGH_THRESHOLD`
-  apart from each other. Not fixed here (confirmed with the user as
-  "just document it," not a same-session fix) — a future session should
-  either lower `MANAGER_ESCALATION_THRESHOLD_USD` below $15,000 (so it
-  can fire within the LOW/MEDIUM boundary before risk tier is even
-  known) or raise the mock engine's `HIGH_THRESHOLD` well above
-  `MANAGER_ESCALATION_THRESHOLD_USD` (so a real MEDIUM/escalation
-  overlap band exists), and decide whether escalation should apply
-  before or after risk assessment resolves at all.
+- **Resolved (2026-09-08).** Phase 21's risk-tier thresholds and PRD
+  §6.3's pre-existing manager-escalation threshold used to overlap
+  exactly, making the manager-approval path practically unreachable —
+  found live while walking a HIGH-risk application through the manager
+  queue on request. The mock Risk Engine's MEDIUM bucket was
+  `$15,000 <= amount < $50,000` (`mock_risk_engine/main.py`'s
+  `LOW_THRESHOLD`/`HIGH_THRESHOLD`), exactly matching
+  `workflows.py`'s manager-escalation check (`amount >= 50_000`,
+  `MANAGER_ESCALATION_THRESHOLD_USD`) — so no amount could ever be both
+  MEDIUM (to reach human `PENDING_UNDERWRITING` at all) and
+  escalation-eligible. **Fixed** by moving `mock_risk_engine/main.py`'s
+  `HIGH_THRESHOLD` from $50,000 to $100,000 (`MANAGER_ESCALATION_THRESHOLD_USD`
+  itself left unchanged, since it's the more established, PRD-§6.3-named
+  default vs. the risk-tier thresholds' own still-"proposed, not
+  confirmed" status) — this opens a real `$50,000–$99,999.99` band where
+  an application is both MEDIUM (reaches Underwriter) and
+  escalation-eligible (`>= $50,000`), so an Underwriter's Approve on an
+  application in that band now genuinely reaches
+  `PENDING_MANAGER_APPROVAL`. `mock_risk_engine/tests/test_main.py`'s
+  boundary table extended to cover the new band. **Live-verified
+  against the real running stack, same day**: rebuilt the
+  `mock-risk-engine` container (`docker compose build mock-risk-engine
+  && docker compose up -d mock-risk-engine` — confirmed live in the
+  container via `docker exec ... python3 -c "import main; ..."` that
+  `HIGH_THRESHOLD` actually loaded as `100000`, not just that the source
+  file changed), then drove one real `$60,000` `personal_loan`
+  application through the real stack end to end (a throwaway script,
+  not committed, reusing `scripts/generate_real_e2e_data.py`'s own
+  helpers): risk assessment resolved to `PENDING_UNDERWRITING` (not
+  auto-rejected as `HIGH`, which is what the old $50,000 threshold would
+  have done), a real Underwriter (`underwriter1`) Approve escalated it
+  to `PENDING_MANAGER_APPROVAL`, a real Manager (`manager1`) Approve
+  resolved it to `APPROVED` — confirmed via `psql` (`underwriter_name`/
+  `manager_name` both set to the real staff usernames, not
+  `"risk-engine-auto"`; `risk_tier` correctly `NULL`, since only an
+  auto-LOW/auto-HIGH decision writes that column) and the real Mayan
+  REST API (`welcome_letter_ACC-*.pdf` and `consent.pdf` both present,
+  tagged to the newly-provisioned real account). All test data was
+  cleared first (`scripts/clear_e2e_data.py --yes`), so this was the
+  only application in the system during verification.
+  **One real, minor gap found along the way, in `clear_e2e_data.py`
+  itself, unrelated to this fix**: `rebuild_mayan_indexes`'s polling
+  loop has no retry around Mayan's own transient `RemoteProtocolError`
+  ("Server disconnected without sending a response") — the same real,
+  memory-pressure-driven flakiness `generate_real_e2e_data.py`'s
+  `request_retry` already works around elsewhere. Hit twice in a row
+  this session; worked around with a manual retry loop, not the
+  script's own code. Not fixed here (out of scope for this bug) — a
+  future session should give `rebuild_mayan_indexes` the same
+  retry-with-backoff treatment `request_retry` already gives this exact
+  failure mode.
+  `scripts/generate_real_e2e_data.py`'s own docstring/comments and its
+  unused `escalate_approve`/`escalate_reject` scenario branches still
+  describe the old unreachable-path behavior — deliberately still not
+  updated, since wiring a real escalation scenario into that script's
+  own committed scenario lists is a separate scope decision, not
+  required to close or verify the threshold-overlap bug itself.
 - No timeout on "wait for Underwriter/Manager decision."
 - **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to

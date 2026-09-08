@@ -379,7 +379,12 @@ for the full technical design this describes the product shape of.
   integrates with but doesn't own. Its decision rule for this phase is
   a simple, deterministic bucketing on requested amount — **proposed
   default, not yet confirmed** (see §11): under $15,000 is `LOW`,
-  $15,000 to $50,000 is `MEDIUM`, $50,000 and above is `HIGH`.
+  $15,000 to $100,000 is `MEDIUM`, $100,000 and above is `HIGH`. The
+  `MEDIUM` upper bound is set deliberately above (not equal to) §6.3's
+  `MANAGER_ESCALATION_THRESHOLD_USD` ($50,000) — an earlier draft had
+  both at $50,000, which made a manager-escalated application
+  unreachable in practice (see §11's own note and `CLAUDE.md`'s Known
+  Gaps for the full history of that bug).
 - **Decided: KrakenD is the gateway, and NATS connectivity moves out of
   this codebase's own process entirely** — a real architectural
   decision, not just a product picked off a shortlist. A new standalone
@@ -835,9 +840,16 @@ gets attached.
   up exposed beyond the local dev machine.
 - **§6.7's exact risk-tier amount thresholds — proposed, not yet
   confirmed.** Current proposal: `< $15,000 → LOW`,
-  `$15,000–$50,000 → MEDIUM`, `≥ $50,000 → HIGH`, chosen only so the
-  mock Risk Engine is trivially, deterministically testable. Also
-  logged in `IMPLEMENTATION_PLAN.md`'s Decisions Needed.
+  `$15,000–$100,000 → MEDIUM`, `≥ $100,000 → HIGH`, chosen only so the
+  mock Risk Engine is trivially, deterministically testable. **Revised
+  post-Phase-21** (`HIGH_THRESHOLD` moved from $50,000 to $100,000) —
+  the original proposal set this exactly equal to §6.3's
+  `MANAGER_ESCALATION_THRESHOLD_USD`, which made `PENDING_MANAGER_APPROVAL`
+  unreachable (no amount could be both `MEDIUM`, to reach human
+  underwriting at all, and `>= $50,000`, to escalate). Moving
+  `HIGH_THRESHOLD` well above the escalation threshold opens a real
+  `$50,000–$99,999.99` overlap band where that path is reachable again.
+  Also logged in `IMPLEMENTATION_PLAN.md`'s Decisions Needed.
 - **§6.7's auto-approve depth — assumed, not yet confirmed.** Current
   assumption: a `LOW`-risk auto-approve reuses the *entire* existing
   approval-provisioning path (real account/customer creation, Welcome

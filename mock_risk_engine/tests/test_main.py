@@ -24,8 +24,10 @@ KRAKEND_URL = "http://krakend-test:8080"
         (Decimal("14999.99"), "LOW"),
         (Decimal("15000"), "MEDIUM"),
         (Decimal("49999.99"), "MEDIUM"),
-        (Decimal("50000"), "HIGH"),
+        (Decimal("50000"), "MEDIUM"),  # escalation-eligible, still MEDIUM -- the overlap band
+        (Decimal("99999.99"), "MEDIUM"),
         (Decimal("100000"), "HIGH"),
+        (Decimal("150000"), "HIGH"),
     ],
 )
 def test_decide_risk_tier_thresholds(amount, expected_tier):

@@ -842,13 +842,26 @@ conflated.)*
 
 - **Question**: What are the exact risk-tier amount thresholds for the
   mock Risk Engine's decision rule (`PRD.md` §6.7)?
-  **Assumed default**: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
-  `≥ $50,000 → HIGH`. **Date**: 2026-09-07. **Raised in**: Phase 21
-  planning (pre-P21-1). **Implemented as the assumed default** (P21-7,
-  `mock_risk_engine/main.py`'s `decide_risk_tier`) — live-verified
-  against these exact thresholds (P21-6/P21-7's combined live sweep);
-  still awaiting an actual human confirmation that these are the right
-  numbers, not just that the code does what was assumed.
+  **Assumed default**: `< $15,000 → LOW`, `$15,000–$100,000 → MEDIUM`,
+  `≥ $100,000 → HIGH`. **Date**: 2026-09-07, **revised 2026-09-08**.
+  **Raised in**: Phase 21 planning (pre-P21-1). **Implemented as the
+  assumed default** (P21-7, `mock_risk_engine/main.py`'s
+  `decide_risk_tier`) — live-verified against the original `$50,000`
+  `HIGH_THRESHOLD` (P21-6/P21-7's combined live sweep); still awaiting
+  an actual human confirmation that these are the right numbers, not
+  just that the code does what was assumed. **`HIGH_THRESHOLD` moved
+  from $50,000 to $100,000 on 2026-09-08** — the original value was
+  exactly equal to `MANAGER_ESCALATION_THRESHOLD_USD`, which made
+  `PENDING_MANAGER_APPROVAL` unreachable (found live post-Phase-21, see
+  the 2026-09-08 Session Log entry below and the
+  `known-gaps-and-gotchas` skill). Unit-tested against the new
+  boundary and **live-verified against the running stack same day** — a
+  real `$60,000` application (rebuilt `mock-risk-engine` container)
+  correctly resolved `MEDIUM` → `PENDING_UNDERWRITING` → real
+  Underwriter Approve → `PENDING_MANAGER_APPROVAL` → real Manager
+  Approve → `APPROVED`, confirmed via `psql` and the Mayan REST API. See
+  the live-verification Session Log entry directly below this file's
+  Phase 21 fix entry.
 - **Question**: Does a `LOW`-risk auto-approve reuse the entire existing
   human-approval provisioning path (real account/customer creation,
   Welcome Letter email, document tagging) or a lighter/partial outcome?
@@ -5194,6 +5207,75 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-08 (live verification of the PENDING_MANAGER_APPROVAL fix,
+  not a numbered phase)** — Follow-up to the entry just below (same
+  day): cleared all test data (`scripts/clear_e2e_data.py --yes` —
+  hit and worked around a real, pre-existing gap in that script along
+  the way, see the `known-gaps-and-gotchas` skill's own note on
+  `rebuild_mayan_indexes` lacking a retry around Mayan's transient
+  `RemoteProtocolError`), rebuilt the `mock-risk-engine` image
+  (`docker compose build mock-risk-engine && docker compose up -d
+  mock-risk-engine`), and confirmed via `docker exec` that the running
+  container's own `main.HIGH_THRESHOLD` actually loaded as `100000`
+  before trusting any result from it. Drove one real `$60,000`
+  `personal_loan` application through the real stack end to end, via a
+  throwaway script (not committed) reusing
+  `scripts/generate_real_e2e_data.py`'s own helpers (Keycloak login,
+  customer identify/verify, document upload, status polling):
+  `PENDING_RISK_ASSESSMENT` → `PENDING_UNDERWRITING` (confirming the new
+  $60,000 amount lands `MEDIUM`, not auto-rejected `HIGH` the way the
+  old $50,000 threshold would have done) → real Underwriter
+  (`underwriter1`) Approve → `PENDING_MANAGER_APPROVAL` (the path this
+  fix exists to reopen) → real Manager (`manager1`) Approve →
+  `APPROVED`. Confirmed via direct `psql` against `loan_onboarding`
+  (`underwriter_name='underwriter1'`, `manager_name='manager1'`,
+  `risk_tier IS NULL` — correctly unset, since only an auto-LOW/auto-HIGH
+  decision writes that column) and the real Mayan REST API
+  (`welcome_letter_ACC-228623298.pdf` and `consent.pdf` both present,
+  correctly tagged to the newly-provisioned `ACC-228623298`). `pytest
+  mock_risk_engine/tests`: 11/11 still passing. `CLAUDE.md`, the
+  `known-gaps-and-gotchas` skill, and this section's own entry below
+  updated from "not yet live-verified" to reflect this pass. Left
+  `scripts/generate_real_e2e_data.py`'s own docstring/scenario lists
+  untouched, same "separate scope decision" reasoning as the entry
+  below — this was a one-off verification script, not a change to that
+  committed script's own behavior.
+
+- **2026-09-08 (fix: PENDING_MANAGER_APPROVAL unreachability, not a
+  numbered phase)** — Closed the threshold-overlap gap documented in
+  the entry just below (same day) and in `CLAUDE.md`'s Known Gaps /
+  the `known-gaps-and-gotchas` skill. `mock_risk_engine/main.py`'s
+  `HIGH_THRESHOLD` moved from `Decimal("50000")` to `Decimal("100000")`
+  — chosen over the alternative (lowering
+  `MANAGER_ESCALATION_THRESHOLD_USD` below $15,000) because it keeps
+  the escalation threshold at its PRD-§6.3-documented $50,000 default
+  and only adjusts the risk-tier thresholds, which `PRD.md` §11 already
+  flags as "proposed, not yet confirmed." This opens a real
+  `$50,000–$99,999.99` band where an application is both `MEDIUM`
+  (reaches human `PENDING_UNDERWRITING`) and escalation-eligible
+  (`amount >= 50_000`), so an Underwriter's Approve on an application in
+  that band now genuinely reaches `PENDING_MANAGER_APPROVAL` again.
+  Updated `mock_risk_engine/tests/test_main.py`'s boundary-threshold
+  parametrization to cover the new band (`$50,000`/`$99,999.99` →
+  `MEDIUM`, `$100,000`/`$150,000` → `HIGH`); `pytest mock_risk_engine/tests`:
+  11/11 passed. Also updated `PRD.md` (§6.7's bucketing description and
+  §11's Decisions Needed entry), `CLAUDE.md`'s Known Gaps summary, the
+  `known-gaps-and-gotchas` skill (marked resolved), the
+  `risk-assessment-nats` skill, and this file's own Decisions Needed
+  entry above. **Not yet live-verified against the running stack** —
+  this session only ran the unit suite; a future session should drive
+  one real application through the new overlap band (e.g. a `$60,000`
+  application: risk assessment → `PENDING_UNDERWRITING` → Underwriter
+  Approve → confirm it actually lands at `PENDING_MANAGER_APPROVAL` →
+  Manager decides) via the real browser/Keycloak flow, and rebuild the
+  `mock-risk-engine` container first (this is a code change, not just
+  docs — the currently-running container still has the old threshold
+  baked in). `scripts/generate_real_e2e_data.py`'s docstring/comments
+  and its unused `escalate_approve`/`escalate_reject` scenario branches
+  still describe/assume the old unreachable-path behavior — deliberately
+  not touched here; enabling a real escalation scenario in that script
+  is a separate, future scope decision.
 
 - **2026-09-08 (post-Phase-21 environment setup + live browser E2E sweep,
   not a numbered phase)** — Picked up after a fresh `git pull` left the

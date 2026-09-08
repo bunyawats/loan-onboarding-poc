@@ -132,10 +132,16 @@ so it never needs NATS awareness even in principle.
   systems this codebase doesn't own. Its decision rule for this phase is
   a deliberately simple, deterministic bucketing on `amount` — **assumed
   default, not yet confirmed, see `IMPLEMENTATION_PLAN.md`'s Decisions
-  Needed**: `< $15,000 → LOW`, `$15,000–$50,000 → MEDIUM`,
-  `≥ $50,000 → HIGH`. Picked so the mock is trivially testable (a
+  Needed**: `< $15,000 → LOW`, `$15,000–$100,000 → MEDIUM`,
+  `≥ $100,000 → HIGH`. Picked so the mock is trivially testable (a
   known amount always produces a known tier) rather than trying to
-  simulate a real scoring model.
+  simulate a real scoring model. `HIGH_THRESHOLD` ($100,000) is
+  deliberately set well above `workflows.py`'s
+  `MANAGER_ESCALATION_THRESHOLD_USD` ($50,000), not equal to it — an
+  earlier version had both at $50,000, which made
+  `PENDING_MANAGER_APPROVAL` unreachable (no amount could be both
+  MEDIUM and escalation-eligible). See the `known-gaps-and-gotchas`
+  skill for the full history of that bug and its fix.
 - **At-least-once delivery means the Adapter's own signal-sending needs
   a duplicate guard, and so does the workflow's signal handler.** NATS
   core pub/sub (no JetStream needed for this phase) doesn't promise
