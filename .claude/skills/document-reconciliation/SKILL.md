@@ -1,6 +1,6 @@
 ---
 name: document-reconciliation
-description: loan-onboarding-poc's reconcile.py composition root -- detecting Mayan documents whose Postgres owner row (customer/account/application) no longer exists, the orphaned-vs-stale-tag distinction, and --report/--fix modes. Also covers why cascade-on-delete is deliberately not built. Triggers on "reconcile.py", "reconciliation", "orphaned document", "stale customer_id tag", "list_all_documents", "cascade on delete", "--report --fix", "drift detection".
+description: loan-onboarding-poc's reconcile.py composition root -- detecting Mayan documents whose Postgres owner row (customer/account/application) no longer exists, the orphaned-vs-stale-tag distinction, the Phase 26 ghost-row/hidden-document checks against document/'s own tables, and --report/--fix modes. Also covers why cascade-on-delete is deliberately not built. Triggers on "reconcile.py", "reconciliation", "orphaned document", "stale customer_id tag", "ghost row", "hidden document", "list_all_documents", "cascade on delete", "--report --fix", "drift detection", "ReconcileReport".
 ---
 
 ## Document/database reconciliation
@@ -96,4 +96,86 @@ case; `--report` correctly separated the two categories, `--fix`
 correctly cleaned up both) — full sweep moved to
 `IMPLEMENTATION_PLAN.md`'s Session Log, 2026-09-04 docs-consolidation
 entry.
+
+## Ghost mirror rows and hidden documents (Phase 26, built)
+
+**A third system entered the picture that the design above never
+accounted for**: Phase 24 gave `document/` its own Postgres tables
+(`application_document`/`account_document`/`customer_document`) as the
+*primary* source of truth for "what documents exist," not just Mayan
+metadata anymore. That introduced a second, genuinely separate
+dual-write drift risk — Mayan and this new mirror can each be written
+independently of the other, exactly the same class of problem the
+original design above already solved for Mayan-vs-`customer`/`account`/
+`application`, just one layer over. Until this phase, `reconcile.py` had
+no idea these three tables existed at all.
+
+**Two new categories, both keyed on `mayan_id` (Phase 25's own column,
+not the uuid — `document/db.py`'s rows and Mayan's real document set are
+compared by the plain integer id both sides actually have)**:
+
+- **Ghost mirror row** — a `document/db.py` row whose `mayan_id` has no
+  matching real Mayan document. Computed by walking all three tables
+  (`document_db.list_all_application_documents()`/
+  `list_all_account_documents()`/`list_all_customer_documents()`, all
+  three built in P26-1 for exactly this) and checking each row's
+  `mayan_id` against the same Mayan document set `document.service.list_all_documents()`
+  already returned for the orphaned/stale-tag scan above — one Mayan
+  scan total, not one per table. `--fix` deletes it via the matching
+  table's `delete_*_by_mayan_id` — the same kind of cleanup this tool
+  has always done (removing something that shouldn't exist), not a new
+  class of mutation.
+- **Hidden document** — a real Mayan document with no matching
+  `document/db.py` row at all — the dual-write-ordering risk
+  `CLAUDE.md`'s `document/` module section already names (a Postgres
+  write failing *after* its Mayan write succeeded). Computed the
+  reverse direction: for each real Mayan document, classify which
+  table it belongs in (by its own `application_id`/`account_id`/
+  `customer_id` shape — the same three-way split the P24-5 live
+  backfill script and `list_customer_documents`'s own pre-Phase-24
+  heuristic both already use), then check that table's own
+  `get_*_document_by_mayan_id`. **A document already flagged
+  `orphaned` is deliberately excluded from this check** — its owner is
+  already gone, so of course it has no mirror row either; flagging it
+  `hidden` too would just be report noise, not a second real problem,
+  since it's getting trashed from Mayan regardless. **`--fix`
+  deliberately never touches a hidden document** — confirmed directly
+  with the user: this tool only ever deletes (orphans, stale tags,
+  ghost rows), never performs a new class of mutation (a Postgres
+  `INSERT`) — a hidden document just keeps showing up in the report
+  until a human resolves it by hand.
+
+**`scan()` now returns a `ReconcileReport` dataclass**
+(`orphaned`/`stale_tags`/`ghost_rows`/`hidden`), replacing the old
+2-tuple. `fix()` takes all four as separate parameters (`orphaned,
+stale_tags, ghost_rows, hidden`) — `hidden` is accepted purely for
+signature symmetry with the report and is never acted on inside `fix()`.
+
+**A real, found-and-fixed bug closed alongside the new checks, not
+deferred as a separate task**: `--fix`'s existing orphan cleanup had
+always trashed the Mayan document via `mayan_client.delete(...)`
+without ever deleting the document's own `document/db.py` mirror
+row — since Phase 24 made that table primary, every orphan cleanup
+this tool has ever run has silently left a ghost row behind. Fixed in
+the same change: trashing an orphan now also deletes its mirror row
+(classified by the same `application_id`/`account_id`/`customer_id`
+shape check), so the very next scan never finds a ghost row where an
+orphan used to be.
+
+**Two more real bugs caught while writing this phase's own unit
+tests, not assumed safe from reading the code**: (1) the internal
+table-name → function dispatch dicts (`_LIST_ALL_BY_TABLE`/
+`_GET_BY_MAYAN_ID_BY_TABLE`/`_DELETE_BY_MAYAN_ID_BY_TABLE`) originally
+stored the `document_db.*` function objects directly — which binds the
+*current* function reference into the dict at import time, so
+`monkeypatch.setattr(reconcile.document_db, "list_all_application_documents",
+...)` (this test file's own established mocking convention) couldn't
+reach it after the fact; every test using the dicts would have
+silently exercised the real, un-mocked function instead of the fake.
+Fixed by wrapping each dict entry in a small lambda that looks the
+attribute up on the `document_db` module fresh on every call, exactly
+like every other `document_service.<name>(...)`/`mayan_client.<name>(...)`
+call in this file already does. (2) See the exclusion note above —
+found the same way, by writing the test and watching it fail
+unexpectedly, not by reasoning about it in the abstract.
 

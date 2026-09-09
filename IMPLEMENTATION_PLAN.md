@@ -939,10 +939,18 @@ own `monkeypatch.setattr(reconcile.document_db, ...)` convention
 couldn't reach — fixed with a lambda-wrapper indirection; and an
 orphaned document was also getting flagged `hidden` (pure noise, since
 it's getting trashed regardless) — fixed with an explicit exemption,
-locked in by a dedicated regression test. Full unit suite (352 tests,
-up from 340) and `lint-imports` (10/10) both green. **Next: P26-3**
-(`CLAUDE.md` + the `document-reconciliation` skill — document the
-actually-built two new drift categories).
+locked in by a dedicated regression test. **P26-3 is now done too** —
+`CLAUDE.md`'s "Document/database reconciliation" section and the
+`document-reconciliation` skill both describe the actually-built
+shape; found and fixed a second, matching stale "deliberately
+deferred" claim sitting in the `document/` module section itself
+(added back in P24-4, now corrected to point at the real Phase 26
+section instead of describing a future that already happened). Full
+unit suite (352 tests) and `lint-imports` (10/10) green throughout.
+**Next: P26-4** — the live verification, this phase's last task:
+confirm zero drift on the clean live stack, then deliberately construct
+one ghost row and one hidden document against real data and confirm
+`--report`/`--fix` handle both correctly.
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open still
@@ -6838,7 +6846,7 @@ not a new gap this phase introduces.
       suite (352 tests, up from 340) and `lint-imports` (10/10) both
       green.
 
-- [ ] **P26-3** — `CLAUDE.md`'s "Document/database reconciliation"
+- [x] **P26-3** — `CLAUDE.md`'s "Document/database reconciliation"
       section and the `document-reconciliation` skill: remove the "not
       extended for Phase 24" flag (both currently say this), describe
       the two new drift categories, the classification rule, and the
@@ -6850,6 +6858,29 @@ not a new gap this phase introduces.
       this phase's own direct `document_db` import is the same
       leaf-reaching pattern `reconcile.py` already uses for every other
       domain module).
+      DONE: `CLAUDE.md`'s "Document/database reconciliation" section
+      rewritten — the "Not extended for Phase 24" flag replaced with a
+      full paragraph describing both new drift categories, the
+      classification rule, the report-only-for-hidden-documents choice
+      (with the actual `--fix`-never-inserts reasoning), and the
+      orphan-fix regression fix. Found and fixed a second, matching
+      stale claim in the `document/` module section itself (added in
+      P24-4, said "detection built in Phase 26" was still "a
+      deliberately deferred follow-up, not part of this phase" —
+      corrected to point at the now-real Phase 26 section instead of
+      describing a future that already happened). The
+      `document-reconciliation` skill got the fuller rewrite — its
+      frontmatter `description` gained the new trigger phrases (`ghost
+      row`, `hidden document`, `ReconcileReport`), and a new "Ghost
+      mirror rows and hidden documents (Phase 26, built)" section
+      covers the full design: both new categories, the `ReconcileReport`
+      dataclass shape, the orphan-fix regression fix, and — matching
+      this skill file's own established habit of recording real bugs
+      found while building, not just the final design — the two extra
+      bugs P26-2 caught while writing its own tests (the lambda-wrapper
+      fix for the table-dispatch dicts, the orphaned-not-also-hidden
+      exclusion). `lint-imports` reconfirmed green (10/10, no code
+      changed this task).
 
 - [ ] **P26-4** — Live-verify against the real stack. First, run
       `python -m loan_onboarding.reconcile` (report mode) and confirm
@@ -6885,6 +6916,27 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P26-3 done)** — Documentation-only task, no code
+  changed. `CLAUDE.md`'s "Document/database reconciliation" section
+  rewritten: the "Not extended for Phase 24" flag replaced with a full
+  paragraph describing both new drift categories (ghost mirror row,
+  hidden document), the classification rule, the
+  report-only-for-hidden-documents design choice with its actual
+  reasoning, and the orphan-fix regression fix. **Found and fixed a
+  second, matching stale claim while doing this, not part of the
+  original task scope**: the `document/` module section (added in
+  P24-4) still said extending `reconcile.py` was "a deliberately
+  deferred follow-up, not part of this phase" — technically true when
+  written, false now; corrected to point at the real, built Phase 26
+  section instead. The `document-reconciliation` skill got the fuller
+  rewrite: frontmatter `description` gained the new trigger phrases,
+  and a new "Ghost mirror rows and hidden documents (Phase 26, built)"
+  section covers the full design plus — matching this skill's own
+  established habit — the two extra bugs P26-2's own tests caught
+  (the lambda-wrapper fix, the orphaned-not-also-hidden exclusion).
+  `lint-imports` reconfirmed green. Next session: P26-4, this phase's
+  last task — live verification.
 
 - **2026-09-09 (P26-2 done)** — `reconcile.py` rewritten:
   `scan()` now returns a `ReconcileReport` dataclass

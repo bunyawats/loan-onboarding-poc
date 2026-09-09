@@ -953,13 +953,15 @@ Index Template tree staff browse), *then* mirrors into Postgres — this
 ordering is deliberate: a Postgres write failing after Mayan succeeds
 leaves a document "hidden" (invisible to every read until reconciled)
 rather than Postgres claiming a file that doesn't exist, the safer of
-the two failure modes. This is a genuinely new dual-write consistency
-risk (Mayan and Postgres still have no shared transaction, no cascade)
-— **not closed**, same "flag it, don't silently absorb it" treatment
-this file's Known Gaps already gives `reconcile.py`'s existing scope;
-extending `reconcile.py` to cross-check these three tables against
-Mayan too (not just the customer/account/application tables it checks
-today) is a deliberately deferred follow-up, not part of this phase.
+the two failure modes. This was a genuinely new dual-write consistency
+risk when this phase shipped (Mayan and Postgres still have no shared
+transaction, no cascade) — **detection built in Phase 26**:
+`reconcile.py` now cross-checks these three tables against Mayan too,
+alongside its original `customers`/`accounts`/`applications` checks —
+see "Document/database reconciliation" below and the
+`document-reconciliation` skill for the full design (a "hidden
+document," in that phase's own terms, is exactly this risk manifesting
+for real — detected, but deliberately never auto-fixed).
 `account_document`/`customer_document` are unique on `(reference_id,
 category)` — a re-upload updates the row in place, matching Mayan's own
 document-versioning semantics for Consent/Welcome Letter/the
@@ -1540,16 +1542,34 @@ tags). Cascade-on-delete (deleting an app-owned document when *this
 app itself* deletes a customer/account/application) is deliberately not
 built — there is no delete operation for any of these three entities in
 this codebase today, and whether one should ever exist is an open
-product question, not a build gap. **Not extended for Phase 24**:
-`reconcile.py` still only cross-checks Mayan documents against
-`customers`/`accounts`/`applications`, not against the three new
-`document/`-owned tables (`application_document`/`account_document`/
-`customer_document`) — those introduce their own, separate dual-write
-drift risk (see `document/`'s own module section above), which this
-tool doesn't detect yet. A deliberately deferred follow-up, not an
-oversight. **Load the `document-reconciliation`
-skill** for the full orphaned-vs-stale-tag distinction and the live
-27-document verification sweep.
+product question, not a build gap.
+
+**Extended to cross-check `document/`'s own tables too (Phase 26,
+built)**: `application_document`/`account_document`/`customer_document`
+(Phase 24) introduced their own, separate dual-write drift risk —
+Mayan and Postgres can each be written independently there too — which
+`reconcile.py` didn't detect until this phase. Two new drift
+categories, both keyed on `mayan_id` (Phase 25): a **ghost mirror
+row** (a `document/db.py` row whose `mayan_id` no longer has a matching
+real Mayan document — either Mayan's own document was deleted directly,
+or `reconcile.py`'s own orphan cleanup left it behind), fixed by
+`--fix` the same way every other cleanup in this tool already works
+(a plain delete of something that shouldn't exist); and a **hidden
+document** (a real Mayan document with no matching `document/db.py`
+row at all — the dual-write-ordering risk `document/`'s own module
+section already names as an accepted, previously *undetected* gap).
+**`--fix` deliberately never touches a hidden document** — confirmed
+directly with the user: this tool only ever deletes, it never performs
+a new class of mutation (a Postgres `INSERT`), so a hidden document
+just keeps showing up in the report until a human resolves it by hand.
+**A real, found-and-fixed bug closed alongside the new checks, not a
+separate later task**: `--fix`'s existing orphan cleanup had always
+trashed the Mayan document without deleting its `document/db.py`
+mirror row — since Phase 24 made that table primary, every orphan
+cleanup this tool has ever run left a ghost row behind; `--fix` now
+deletes both together. **Load the `document-reconciliation`
+skill** for the full orphaned-vs-stale-tag distinction, the two new
+drift categories, and the live 27-document verification sweep.
 
 ## Enforcing the boundaries
 
