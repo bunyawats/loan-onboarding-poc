@@ -376,3 +376,187 @@ async def test_get_customer_document_by_category():
 
     assert await db.get_customer_document_by_category(customer_id, "Government ID") is not None
     assert await db.get_customer_document_by_category(customer_id, "Something Else") is None
+
+
+# ---------------------------------------------------------------
+# Phase 26 -- the new unfiltered list functions, the missing
+# get_customer_document_by_mayan_id sibling, and the three
+# delete-by-mayan-id functions reconcile.py's new ghost-row cleanup and
+# orphan-fix regression fix both rely on.
+# ---------------------------------------------------------------
+
+
+async def test_list_all_application_documents_returns_every_row_regardless_of_application_id():
+    await db.insert_application_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        application_id=_fake_application_id(),
+        applicant_identifier="alice@example.com",
+        category="Government ID",
+        filename="a.pdf",
+    )
+    await db.insert_application_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        application_id=_fake_application_id(),
+        applicant_identifier="bob@example.com",
+        category="Government ID",
+        filename="b.pdf",
+    )
+
+    records = await db.list_all_application_documents()
+    assert len(records) == 2
+    assert {r["filename"] for r in records} == {"a.pdf", "b.pdf"}
+
+
+async def test_delete_application_document_by_mayan_id_removes_only_that_row():
+    application_id = _fake_application_id()
+    mayan_id_to_delete = _next_mayan_id()
+    await db.insert_application_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=mayan_id_to_delete,
+        application_id=application_id,
+        applicant_identifier="alice@example.com",
+        category="Government ID",
+        filename="delete-me.pdf",
+    )
+    await db.insert_application_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        application_id=application_id,
+        applicant_identifier="alice@example.com",
+        category="Proof of Income",
+        filename="keep-me.pdf",
+    )
+
+    await db.delete_application_document_by_mayan_id(mayan_id_to_delete)
+
+    remaining = await db.get_application_documents(application_id)
+    assert len(remaining) == 1
+    assert remaining[0]["filename"] == "keep-me.pdf"
+
+
+async def test_list_all_account_documents_returns_every_row_regardless_of_account_id():
+    await db.upsert_account_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        account_id=_fake_account_id(),
+        applicant_identifier="alice@example.com",
+        customer_id=_fake_customer_id(),
+        category="Welcome Letter",
+        filename="a.pdf",
+    )
+    await db.upsert_account_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        account_id=_fake_account_id(),
+        applicant_identifier="bob@example.com",
+        customer_id=_fake_customer_id(),
+        category="Welcome Letter",
+        filename="b.pdf",
+    )
+
+    records = await db.list_all_account_documents()
+    assert len(records) == 2
+    assert {r["filename"] for r in records} == {"a.pdf", "b.pdf"}
+
+
+async def test_delete_account_document_by_mayan_id_removes_only_that_row():
+    account_id = _fake_account_id()
+    other_account_id = _fake_account_id()
+    mayan_id_to_delete = _next_mayan_id()
+    await db.upsert_account_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=mayan_id_to_delete,
+        account_id=account_id,
+        applicant_identifier="alice@example.com",
+        customer_id=_fake_customer_id(),
+        category="Welcome Letter",
+        filename="delete-me.pdf",
+    )
+    await db.upsert_account_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        account_id=other_account_id,
+        applicant_identifier="bob@example.com",
+        customer_id=_fake_customer_id(),
+        category="Welcome Letter",
+        filename="keep-me.pdf",
+    )
+
+    await db.delete_account_document_by_mayan_id(mayan_id_to_delete)
+
+    assert await db.get_account_documents(account_id) == []
+    remaining = await db.get_account_documents(other_account_id)
+    assert len(remaining) == 1
+    assert remaining[0]["filename"] == "keep-me.pdf"
+
+
+async def test_get_customer_document_by_mayan_id():
+    customer_id = _fake_customer_id()
+    mayan_id = _next_mayan_id()
+    await db.upsert_customer_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=mayan_id,
+        customer_id=customer_id,
+        applicant_identifier="alice@example.com",
+        category="Government ID",
+        filename="id.pdf",
+    )
+
+    record = await db.get_customer_document_by_mayan_id(mayan_id)
+    assert record["customer_id"] == customer_id
+
+    assert await db.get_customer_document_by_mayan_id(_next_mayan_id()) is None
+
+
+async def test_list_all_customer_documents_returns_every_row_regardless_of_customer_id():
+    await db.upsert_customer_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        customer_id=_fake_customer_id(),
+        applicant_identifier="alice@example.com",
+        category="Government ID",
+        filename="a.pdf",
+    )
+    await db.upsert_customer_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        customer_id=_fake_customer_id(),
+        applicant_identifier="bob@example.com",
+        category="Government ID",
+        filename="b.pdf",
+    )
+
+    records = await db.list_all_customer_documents()
+    assert len(records) == 2
+    assert {r["filename"] for r in records} == {"a.pdf", "b.pdf"}
+
+
+async def test_delete_customer_document_by_mayan_id_removes_only_that_row():
+    customer_id = _fake_customer_id()
+    other_customer_id = _fake_customer_id()
+    mayan_id_to_delete = _next_mayan_id()
+    await db.upsert_customer_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=mayan_id_to_delete,
+        customer_id=customer_id,
+        applicant_identifier="alice@example.com",
+        category="Government ID",
+        filename="delete-me.pdf",
+    )
+    await db.upsert_customer_document(
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
+        customer_id=other_customer_id,
+        applicant_identifier="bob@example.com",
+        category="Government ID",
+        filename="keep-me.pdf",
+    )
+
+    await db.delete_customer_document_by_mayan_id(mayan_id_to_delete)
+
+    assert await db.get_customer_documents(customer_id) == []
+    remaining = await db.get_customer_documents(other_customer_id)
+    assert len(remaining) == 1
+    assert remaining[0]["filename"] == "keep-me.pdf"

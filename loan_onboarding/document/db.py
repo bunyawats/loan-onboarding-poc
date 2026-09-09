@@ -31,7 +31,17 @@ CLAUDE.md / IMPLEMENTATION_PLAN.md): every document row carries both
 entirely id-addressed for actual operations (file streaming, metadata,
 uploads), so `mayan_id` can't be dropped in favor of the uuid; this
 app's own row is the only place the uuid-to-id mapping lives. Both
-columns are independently `UNIQUE` per table."""
+columns are independently `UNIQUE` per table.
+
+**Phase 26, "Extend reconcile.py to cross-check the three document
+tables"** (see CLAUDE.md / IMPLEMENTATION_PLAN.md): each table also
+gets an unfiltered `list_all_*` scan and a `delete_*_by_mayan_id`,
+used only by `reconcile.py` -- the former backs its new ghost-row
+detection (a row here whose `mayan_id` no longer has a matching real
+Mayan document), the latter both removes a confirmed ghost row and
+cleans up the mirror row whenever `reconcile.py` trashes an orphaned
+Mayan document, so that trashing never itself creates a new ghost row
+on the next scan."""
 
 from __future__ import annotations
 
@@ -175,6 +185,29 @@ async def get_application_document_by_mayan_id(mayan_id: int) -> asyncpg.Record 
     )
 
 
+async def list_all_application_documents() -> list[asyncpg.Record]:
+    """Read-only, unfiltered -- every row regardless of `application_id`
+    (Phase 26). Mirrors `document.service.list_all_documents()`'s role
+    on the Mayan side; used only by `reconcile.py`'s ghost-row scan (a
+    row whose `mayan_id` no longer has a matching real Mayan document)
+    -- no other caller needs an unfiltered listing."""
+    pool = await _get_pool()
+    return await pool.fetch("SELECT * FROM application_document")
+
+
+async def delete_application_document_by_mayan_id(mayan_id: int) -> None:
+    """Called only from `reconcile.py`'s `fix()` (Phase 26) -- either to
+    remove a ghost row (Mayan document already gone) or, as of this
+    phase, alongside every orphan trash-via-Mayan-metadata cleanup, so
+    the mirror row doesn't itself become a ghost row on the very next
+    scan."""
+    pool = await _get_pool()
+    await pool.execute(
+        "DELETE FROM application_document WHERE mayan_id = $1",
+        mayan_id,
+    )
+
+
 # ---------------------------------------------------------------
 # account_document / customer_document -- unique on
 # (reference_id, category): a re-upload updates the existing row in
@@ -278,6 +311,24 @@ async def get_account_document_by_mayan_id(mayan_id: int) -> asyncpg.Record | No
     )
 
 
+async def list_all_account_documents() -> list[asyncpg.Record]:
+    """Read-only, unfiltered -- every row regardless of `account_id`
+    (Phase 26). Same role as `list_all_application_documents()`, used
+    only by `reconcile.py`'s ghost-row scan."""
+    pool = await _get_pool()
+    return await pool.fetch("SELECT * FROM account_document")
+
+
+async def delete_account_document_by_mayan_id(mayan_id: int) -> None:
+    """Called only from `reconcile.py`'s `fix()` (Phase 26) -- same role
+    as `delete_application_document_by_mayan_id`."""
+    pool = await _get_pool()
+    await pool.execute(
+        "DELETE FROM account_document WHERE mayan_id = $1",
+        mayan_id,
+    )
+
+
 async def upsert_customer_document(
     mayan_document_uuid: str,
     mayan_id: int,
@@ -347,4 +398,36 @@ async def get_customer_document_by_category(customer_id: str, category: str) -> 
         "SELECT * FROM customer_document WHERE customer_id = $1 AND category = $2",
         customer_id,
         category,
+    )
+
+
+async def get_customer_document_by_mayan_id(mayan_id: int) -> asyncpg.Record | None:
+    """Read-only (Phase 26) -- the sibling `get_application_document_by_mayan_id`/
+    `get_account_document_by_mayan_id` already had from Phase 24;
+    `customer_document` never needed a by-`mayan_id` lookup until
+    `reconcile.py`'s new hidden-document check (no `preview`-style route
+    exists for the customer-level copy, which is why this was missing
+    until now)."""
+    pool = await _get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM customer_document WHERE mayan_id = $1",
+        mayan_id,
+    )
+
+
+async def list_all_customer_documents() -> list[asyncpg.Record]:
+    """Read-only, unfiltered -- every row regardless of `customer_id`
+    (Phase 26). Same role as `list_all_application_documents()`, used
+    only by `reconcile.py`'s ghost-row scan."""
+    pool = await _get_pool()
+    return await pool.fetch("SELECT * FROM customer_document")
+
+
+async def delete_customer_document_by_mayan_id(mayan_id: int) -> None:
+    """Called only from `reconcile.py`'s `fix()` (Phase 26) -- same role
+    as `delete_application_document_by_mayan_id`."""
+    pool = await _get_pool()
+    await pool.execute(
+        "DELETE FROM customer_document WHERE mayan_id = $1",
+        mayan_id,
     )

@@ -928,7 +928,14 @@ blast radius to deletions only, the same as it's always been. Four-task
 breakdown (P26-1 `document/db.py`'s new list/delete functions, P26-2
 `reconcile.py`'s new `ReconcileReport`/ghost-row detection/orphan-fix
 bug fix, P26-3 docs, P26-4 live verification against real drift)
-written into this file. **Next: P26-1.**
+written into this file. **P26-1 is now done** — `document/db.py` has
+all seven new functions (three unfiltered list scans, the missing
+`get_customer_document_by_mayan_id`, three delete-by-`mayan_id`
+functions), 7 new tests (20 total in that file). Full unit suite (340
+tests) and `lint-imports` (10/10) both green. **Next: P26-2**
+(`reconcile.py`'s own rewrite — the new `ReconcileReport`
+dataclass/ghost-row/hidden-document detection, and the orphan-fix
+regression fix this phase exists to close).
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open still
@@ -6723,7 +6730,7 @@ the three ids is untouched by this phase's new checks, same as it
 already was invisible to the *existing* orphan/stale-tag checks —
 not a new gap this phase introduces.
 
-- [ ] **P26-1** — `document/db.py`: add the read/delete functions
+- [x] **P26-1** — `document/db.py`: add the read/delete functions
       `reconcile.py` needs that don't exist yet — three unfiltered scans
       (`list_all_application_documents()`, `list_all_account_documents()`,
       `list_all_customer_documents()`, mirroring `document.service.list_all_documents()`'s
@@ -6741,6 +6748,22 @@ not a new gap this phase introduces.
       siblings already do, and each delete function actually removes
       the row (confirmed via a follow-up `get_*_documents` call
       returning empty) without touching an unrelated row.
+      DONE: all seven functions added exactly as designed —
+      `list_all_application_documents`/`list_all_account_documents`/
+      `list_all_customer_documents` (plain unfiltered `SELECT *`),
+      `get_customer_document_by_mayan_id` (the missing sibling),
+      `delete_application_document_by_mayan_id`/
+      `delete_account_document_by_mayan_id`/
+      `delete_customer_document_by_mayan_id`. Module docstring gained a
+      short Phase 26 paragraph explaining their `reconcile.py`-only
+      role. 7 new tests in `tests/unit/document/test_db.py` (20 total
+      in that file, up from 13): each list function proven to return
+      every row across multiple owner ids, not just one; each delete
+      function proven to remove exactly the targeted row (by
+      `mayan_id`) while leaving a second, unrelated row (different
+      owner id) untouched — confirmed via a follow-up `get_*_documents`
+      call. Full unit suite (340 tests, up from 333) and `lint-imports`
+      (10/10) both green.
 
 - [ ] **P26-2** — `reconcile.py`: `scan()` returns a new
       `ReconcileReport` dataclass (`orphaned`, `stale_tags`, `ghost_rows`,
@@ -6818,6 +6841,20 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P26-1 done)** — Added seven functions to
+  `document/db.py`: `list_all_application_documents`/
+  `list_all_account_documents`/`list_all_customer_documents`
+  (unfiltered `SELECT *`, mirroring `document.service.list_all_documents()`'s
+  role on the Mayan side), `get_customer_document_by_mayan_id` (the
+  missing sibling `application_document`/`account_document` already
+  had from Phase 24), and `delete_application_document_by_mayan_id`/
+  `delete_account_document_by_mayan_id`/`delete_customer_document_by_mayan_id`.
+  7 new tests prove each list function returns rows across multiple
+  owners (not just one) and each delete function removes exactly the
+  targeted row while leaving an unrelated one untouched. Full unit
+  suite (340 tests, up from 333) and `lint-imports` (10/10) both green.
+  Next session: P26-2 (`reconcile.py`'s own rewrite).
 
 - **2026-09-09 (Phase 26 added, design-only, no code written)** —
   Requested directly by the user: extend `reconcile.py` to cross-check
