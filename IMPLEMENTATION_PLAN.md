@@ -912,55 +912,55 @@ references to the old `mayan_document_id` name anywhere in the
 codebase or docs.
 
 **Phase 26 (Extend reconcile.py to cross-check the three document
-tables) added after Phase 25 closed — design-only, no code written
-yet.** Requested directly by the user, closing the exact follow-up
-Phase 24/25 both flagged as deliberately deferred. **A second, real gap
-found while designing this, confirmed with the user before proceeding
-(not a separate ask)**: `reconcile.py`'s existing `fix()` has always
-trashed an orphaned Mayan document without deleting its matching
-`document/db.py` mirror row — since Phase 24 made those tables
-primary, every past orphan cleanup has left a "ghost" row behind; this
-phase fixes that alongside the new cross-check. Confirmed the fix
-behavior for the new "hidden document" case (a real Mayan document
-with no Postgres mirror row) via `AskUserQuestion`: report-only, `--fix`
-never auto-recreates it — the recommended option, keeping `--fix`'s
-blast radius to deletions only, the same as it's always been. Four-task
-breakdown (P26-1 `document/db.py`'s new list/delete functions, P26-2
-`reconcile.py`'s new `ReconcileReport`/ghost-row detection/orphan-fix
-bug fix, P26-3 docs, P26-4 live verification against real drift)
-written into this file. **P26-1 and P26-2 are now done** —
-`document/db.py` has all seven new functions, and `reconcile.py`
-itself now has the `ReconcileReport` dataclass, ghost-row/hidden-document
-detection, and the orphan-fix regression fix this phase exists to
-close. **Two more real bugs caught while writing `reconcile.py`'s own
-tests, not assumed safe**: the table-dispatch dicts originally bound
-`document_db.*` function references at import time, which this file's
-own `monkeypatch.setattr(reconcile.document_db, ...)` convention
-couldn't reach — fixed with a lambda-wrapper indirection; and an
-orphaned document was also getting flagged `hidden` (pure noise, since
-it's getting trashed regardless) — fixed with an explicit exemption,
-locked in by a dedicated regression test. **P26-3 is now done too** —
-`CLAUDE.md`'s "Document/database reconciliation" section and the
-`document-reconciliation` skill both describe the actually-built
-shape; found and fixed a second, matching stale "deliberately
-deferred" claim sitting in the `document/` module section itself
-(added back in P24-4, now corrected to point at the real Phase 26
-section instead of describing a future that already happened). Full
-unit suite (352 tests) and `lint-imports` (10/10) green throughout.
-**Next: P26-4** — the live verification, this phase's last task:
-confirm zero drift on the clean live stack, then deliberately construct
-one ghost row and one hidden document against real data and confirm
-`--report`/`--fix` handle both correctly.
+tables) is now fully complete (P26-1 through P26-4).** Requested
+directly by the user, closing the exact follow-up Phase 24/25 both
+flagged as deliberately deferred. **A second, real gap found while
+designing this, confirmed with the user before proceeding**:
+`reconcile.py`'s existing `fix()` had always trashed an orphaned Mayan
+document without deleting its matching `document/db.py` mirror row —
+since Phase 24 made those tables primary, every past orphan cleanup
+had left a "ghost" row behind; fixed alongside the new cross-check, not
+deferred separately. The new "hidden document" case (a real Mayan
+document with no Postgres mirror row) is deliberately report-only —
+confirmed via `AskUserQuestion` — `--fix` never auto-recreates it,
+keeping its blast radius to deletions only, same as it's always been.
+`document/db.py` gained all seven functions this phase needed;
+`reconcile.py` itself gained the `ReconcileReport` dataclass, both new
+drift checks, and the orphan-fix regression fix. **Three more real
+bugs caught while building this, not assumed safe from reading the
+code**: the table-dispatch dicts originally bound `document_db.*`
+function references at import time, immune to this file's own
+`monkeypatch` convention — fixed with a lambda-wrapper indirection; an
+orphaned document was also getting flagged `hidden` (pure report
+noise) — fixed with an explicit exemption; and while live-verifying,
+a hand-constructed "hidden" test case turned out to also be a genuine
+orphan (tagged to a nonexistent `application_id` by mistake) — caught
+by the report itself correctly routing it to "Orphaned," confirming
+the exemption logic really works, then corrected with a properly
+isolated test case. `CLAUDE.md` and the `document-reconciliation`
+skill both describe the actually-built shape, including a second stale
+"deliberately deferred" claim found and fixed in the `document/`
+module section itself. **Live-verified against the real stack**: zero
+drift confirmed on the clean baseline; one real, disposable document
+constructed per drift category via the real `upload()` path; `--report`
+correctly listed all four; `--fix` correctly cleaned up three of them
+(ghost row, stale tag, and — the actual regression case this phase
+exists to close — the orphan's own mirror row deleted in the same
+`--fix` call, confirmed via `psql`/Mayan calls, not just the printed
+report) while leaving the hidden document untouched; all test
+artifacts manually cleaned up afterward, document table counts
+confirmed back to exactly 96/26/6. Full unit suite (352 tests) and
+`lint-imports` (10/10) green throughout every task.
 
-Two small, non-blocking items remain from earlier phases, neither
-urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open still
-hasn't been added to `CLAUDE.md`'s Known Gaps / the
-`known-gaps-and-gotchas` skill; and Phase 26 itself, just added. The
-live `nats`/`temporal`/`db`/`mayan`/`risk-adapter`/`krakend`/
+**Next: this plan's own backlog is empty again.** One small,
+non-blocking item remains from an earlier phase, not urgent: the
+`WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
+added to `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill.
+The live `nats`/`temporal`/`db`/`mayan`/`risk-adapter`/`krakend`/
 `mock-risk-engine`/`worker-workflow`/`worker-activity`/`app` containers
-were all left running, all on current Phase 25 code, live database
-fully migrated and backfilled — a fresh session can pick up Phase 26
-directly against this already-current stack.
+were all left running, all on current Phase 26 code, live database
+fully migrated and backfilled — a fresh session can pick up any future
+phase directly against this already-current stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -6882,7 +6882,7 @@ not a new gap this phase introduces.
       exclusion). `lint-imports` reconfirmed green (10/10, no code
       changed this task).
 
-- [ ] **P26-4** — Live-verify against the real stack. First, run
+- [x] **P26-4** — Live-verify against the real stack. First, run
       `python -m loan_onboarding.reconcile` (report mode) and confirm
       it reports zero drift of any kind — the live stack's three
       document tables were fully, correctly backfilled in P24-5/P25-5,
@@ -6905,6 +6905,49 @@ not a new gap this phase introduces.
       the real stack, not just unit-tested; the live stack's document
       table counts confirmed back to the clean 96/26/6 baseline
       afterward, no leftover test artifacts.
+      DONE: rebuilt the `worker-activity` image with current code.
+      Ran `--report` against the live stack cold — confirmed zero drift
+      of any kind (0 orphaned, 0 stale tags, 0 ghost rows, 0 hidden),
+      the expected clean baseline. Constructed one real, disposable
+      test document per category via the real `document.service.upload()`
+      path (never hand-crafted rows): a ghost row (uploaded, then its
+      Mayan document trashed directly via `mayan_client.delete(...)`,
+      Postgres row left behind); a stale tag (uploaded tagged to a real,
+      existing `application_id` plus a fake `customer_id`); an orphan
+      with a real mirror row (uploaded tagged to a nonexistent
+      `application_id`); and a hidden document (uploaded tagged to that
+      same real `application_id`, then its Postgres row deleted
+      directly via `psql`, Mayan document left intact). **One real
+      mistake caught and corrected during this task, not silently
+      worked around**: the first hidden-document attempt was
+      accidentally tagged to a nonexistent `application_id` too, which
+      made it also legitimately orphaned — confirming this phase's own
+      orphaned-excludes-hidden rule fired correctly (it showed up under
+      "Orphaned," not "Hidden," exactly as designed), but wasn't the
+      standalone hidden-document case the task needed, so a second,
+      correctly-isolated hidden document (tagged to the real
+      `application_id`) was created instead. `--report` correctly
+      listed all four categories with the exact right document ids and
+      reasons. `--fix` run next, then verified via direct `psql`/Mayan
+      calls, not just trusted from the printed output: the ghost row's
+      Postgres row was deleted; **the orphan-with-a-real-mirror-row's
+      Postgres row was also deleted in the same `--fix` call — the
+      actual regression case this whole phase exists to close, now
+      confirmed live, not just unit-tested**; the stale document's
+      Mayan `customer_id` metadata entry was confirmed actually gone
+      via a direct `get_document_metadata` call (not assumed from the
+      report alone); the hidden document's Postgres row was confirmed
+      still absent afterward — never auto-recreated. A follow-up
+      `--report` showed exactly the expected remainder (everything
+      clean except the one hidden document, which nothing ever
+      auto-fixes). Manually cleaned up the two remaining real artifacts
+      (the hidden document's real Mayan document; the stale-tag
+      document's Mayan document *and* Postgres row, both throwaway test
+      data tied to a real application) — a final `--report` confirmed
+      zero drift again, and `application_document`/`account_document`/
+      `customer_document` counts confirmed back to exactly 96/26/6, no
+      pollution left behind. **Phase 26 (P26-1 through P26-4) is now
+      fully complete.**
 
 ---
 
@@ -6916,6 +6959,40 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P26-4 done — Phase 26 fully complete)** — Rebuilt the
+  `worker-activity` image with current code. Ran `--report` cold
+  against the live stack — confirmed zero drift of any kind, the
+  expected clean baseline. Constructed one real, disposable document
+  per drift category via the real `document.service.upload()` path
+  (never a hand-crafted row): a ghost row (Mayan document trashed
+  directly, Postgres row left behind); a stale tag (tagged to a real
+  application plus a fake `customer_id`); an orphan with a real mirror
+  row (tagged to a nonexistent `application_id`); and a hidden document
+  (tagged to a real application, then its Postgres row deleted
+  directly via `psql`). **One real mistake caught mid-verification, not
+  silently worked around**: the first hidden-document attempt was
+  accidentally also tagged to a nonexistent `application_id`, making it
+  a genuine orphan too — the report correctly routed it to "Orphaned,"
+  not "Hidden," confirming this phase's own orphaned-excludes-hidden
+  exemption fires correctly live, not just in a unit test — then built
+  a properly isolated second case. `--report` correctly listed all four
+  categories with the right document ids and reasons. Ran `--fix`, then
+  verified the actual database/Mayan state directly rather than trusting
+  the printed output: the ghost row's Postgres row was gone; **the
+  orphan-with-a-real-mirror-row's Postgres row was also gone — the
+  actual regression case this whole phase exists to close, now
+  confirmed live**; the stale document's Mayan `customer_id` metadata
+  entry was confirmed stripped via a direct `get_document_metadata`
+  call; the hidden document's Postgres row was confirmed still absent
+  afterward. Manually cleaned up the two remaining real artifacts (the
+  hidden document's Mayan document; the stale-tag document's Mayan
+  document and Postgres row). A final `--report` confirmed zero drift
+  again, and `application_document`/`account_document`/
+  `customer_document` counts confirmed back to exactly 96/26/6.
+  **Phase 26 (P26-1 through P26-4) is now fully complete** — this
+  plan's backlog is empty again, save for the one small, non-blocking
+  item already noted in Current Status.
 
 - **2026-09-09 (P26-3 done)** — Documentation-only task, no code
   changed. `CLAUDE.md`'s "Document/database reconciliation" section
