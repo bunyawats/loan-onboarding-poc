@@ -363,3 +363,116 @@ CREATE TABLE loan_apply_requests (
 CREATE INDEX ix_loan_apply_requests_workflow_id
     ON loan_apply_requests (workflow_id)
     WHERE workflow_id IS NOT NULL;
+
+-- ---------------------------------------------------------------
+-- application_document / account_document / customer_document --
+-- owned exclusively by loan_onboarding.document.db (Phase 24,
+-- "Document metadata persistence in Postgres" -- see CLAUDE.md /
+-- IMPLEMENTATION_PLAN.md). document/ previously had NO Postgres
+-- persistence at all -- Mayan was the only record of what documents
+-- exist, so a Mayan outage meant this app couldn't even list them.
+-- These three tables are now the PRIMARY source of truth for "what
+-- documents exist" (not a fallback cache) -- every document/service.py
+-- read function queries these directly; Mayan stays the system of
+-- record only for actual file bytes and the visual Index Template
+-- tree staff browse. mayan_document_id is Mayan's own plain integer
+-- document id (NOT a real UUID -- nothing in this codebase has ever
+-- captured Mayan's actual uuid field; every existing caller, including
+-- every preview route, is already built around this integer id, so
+-- that's what these tables key on too). Same "no FKs anywhere, opaque
+-- string reference, app-minted idgen primary key" discipline every
+-- other table in this schema follows.
+--
+-- Write ordering (document/service.py's own discipline, not enforced
+-- by anything in this schema): every write calls Mayan first, then
+-- writes the Postgres mirror here -- never the reverse. A Postgres
+-- write failing after Mayan succeeds leaves a real document "hidden"
+-- (invisible to every read until reconciled) rather than Postgres
+-- claiming a file that doesn't exist -- the safer of the two failure
+-- modes, and a genuinely new dual-write consistency risk this phase
+-- accepts rather than closes (see CLAUDE.md's Known Gaps).
+-- ---------------------------------------------------------------
+
+-- application_document -- documents uploaded during the application
+-- flow (Government ID, Proof of Income, Bank Statements, Credit
+-- Report, product-specific categories). No uniqueness beyond
+-- mayan_document_id -- a category is satisfied by one or more
+-- documents, unlimited accumulation is intentional (matches today's
+-- multi-Bank-Statement behavior). account_id/customer_id start NULL
+-- and are set in bulk by tag_application_documents on approval --
+-- mirrors exactly what that function already tags onto Mayan's own
+-- metadata today, just now also written here.
+CREATE TABLE application_document (
+    application_document_id  TEXT PRIMARY KEY,
+    mayan_document_id        INTEGER NOT NULL,
+    application_id           TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
+    applicant_identifier     TEXT NOT NULL,
+    category                 TEXT NOT NULL,
+    filename                 TEXT NOT NULL,
+    account_id               TEXT,   -- opaque, NOT a FK -- set on approval
+    customer_id              TEXT,   -- opaque, NOT a FK -- set on approval
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ux_application_document_mayan_document_id
+    ON application_document (mayan_document_id);
+
+-- Backs list_documents/check_completeness -- every read this phase
+-- adds filters on application_id first.
+CREATE INDEX ix_application_document_application_id
+    ON application_document (application_id);
+
+-- account_document -- Welcome Letter (system-generated, exactly once
+-- per account) and Consent (customer/staff-uploaded, re-uploadable).
+-- Unique on (account_id, category) -- a re-upload updates the existing
+-- row in place (Mayan's own document-versioning semantics for these
+-- two categories already work this way; this table just makes the
+-- "at most one current copy" rule explicit and enforced here too).
+CREATE TABLE account_document (
+    account_document_id   TEXT PRIMARY KEY,
+    mayan_document_id     INTEGER NOT NULL,
+    account_id            TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
+    applicant_identifier  TEXT NOT NULL,
+    customer_id           TEXT NOT NULL,
+    category              TEXT NOT NULL,   -- 'Welcome Letter' | 'Consent'
+    filename              TEXT NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ux_account_document_mayan_document_id
+    ON account_document (mayan_document_id);
+
+-- The actual business rule this table enforces: at most one current
+-- document per (account, category). document/db.py's upsert functions
+-- rely on this via INSERT ... ON CONFLICT (account_id, category) DO
+-- UPDATE -- same "index is the authoritative backstop" pattern this
+-- schema already uses elsewhere (e.g. ux_closure_requests_account_pending).
+CREATE UNIQUE INDEX ux_account_document_account_category
+    ON account_document (account_id, category);
+
+-- customer_document -- the customer-level Government ID copy
+-- (promote_government_id_to_customer_photo's genuine second Mayan
+-- document, not a re-tagged original -- see CLAUDE.md's "Document
+-- metadata assignment lifecycle"). Unique on (customer_id, category),
+-- same update-in-place reasoning as account_document above -- this is
+-- what makes has_id_photo/list_customer_documents a plain, unambiguous
+-- table read instead of the old "carries customer_id but neither
+-- application_id nor account_id" heuristic.
+CREATE TABLE customer_document (
+    customer_document_id  TEXT PRIMARY KEY,
+    mayan_document_id     INTEGER NOT NULL,
+    customer_id           TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
+    applicant_identifier  TEXT NOT NULL,
+    category              TEXT NOT NULL,   -- always 'Government ID' today, kept general
+    filename              TEXT NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ux_customer_document_mayan_document_id
+    ON customer_document (mayan_document_id);
+
+CREATE UNIQUE INDEX ux_customer_document_customer_category
+    ON customer_document (customer_id, category);

@@ -860,11 +860,17 @@ accumulation per category (matching today's multi-document behavior);
 id stored as a separate `mayan_document_id UNIQUE` column — corrected
 from the user's original "document UUID" phrasing after confirming by
 grep that this codebase has never captured Mayan's real `uuid` field
-anywhere, only its plain integer `id`. **Next: P24-1**
-(`db/schema.sql` — the three new tables). See Phase 24's own preamble
-for the full design, including the new dual-write consistency risk this
-phase deliberately accepts and defers to a future `reconcile.py`
-extension.
+anywhere, only its plain integer `id`. **P24-1 is now done** —
+`db/schema.sql` has all three new tables, verified against a
+disposable scratch container (schema applies cleanly, the two
+update-in-place unique indexes fire correctly, `application_document`'s
+deliberate lack of uniqueness confirmed too — see P24-1's own DONE
+note). **Next: P24-2** (`document/db.py`, the new file backing these
+tables — insert/upsert/read functions, PK-collision-retry loop, same
+per-module convention as `customer/db.py`/`account/db.py`/
+`application/db.py`). See Phase 24's own preamble for the full design,
+including the new dual-write consistency risk this phase deliberately
+accepts and defers to a future `reconcile.py` extension.
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open (see
@@ -5966,7 +5972,7 @@ customer/account/application tables it checks today) is the natural
 follow-up, deliberately deferred rather than folded into this phase's
 own scope.
 
-- [ ] **P24-1** — `db/schema.sql`: add `application_document`,
+- [x] **P24-1** — `db/schema.sql`: add `application_document`,
       `account_document`, `customer_document` exactly as designed above
       (columns, the two update-in-place unique indexes, plus a plain
       index on each table's own "list by owner id" column —
@@ -5988,6 +5994,33 @@ own scope.
       `application_document` accepts two rows for the same
       `(application_id, category)` cleanly (proves no uniqueness was
       accidentally added there).
+      DONE: added `application_document` (`application_document_id`,
+      `mayan_document_id` unique, `application_id`, `applicant_identifier`,
+      `category`, `filename`, nullable `account_id`/`customer_id`,
+      `created_at`/`updated_at`) plus a plain index on `application_id`;
+      `account_document` (`account_document_id`, `mayan_document_id`
+      unique, `account_id`, `applicant_identifier`, `customer_id`,
+      `category`, `filename`, `created_at`/`updated_at`) plus a unique
+      index on `(account_id, category)`; `customer_document` (same shape
+      as `account_document`, keyed on `customer_id` instead) plus a
+      unique index on `(customer_id, category)` — exactly as designed
+      in this phase's preamble, no changes. Verified against a
+      disposable scratch `postgres:16-alpine` container (port `15435`,
+      removed after — never the live stack's own `db` volume, per this
+      task's own note): schema applies cleanly; `application_document`
+      accepted two rows for the same `(application_id, category)` pair
+      (`APP-000000001`/`Bank Statements`, two distinct `mayan_document_id`
+      values) with zero constraint errors; a raw duplicate insert into
+      `account_document` for the same `(account_id, category)` pair
+      correctly raised `duplicate key value violates unique constraint
+      "ux_account_document_account_category"`, and the identical
+      raw-duplicate check against `customer_document` raised the same
+      shape of error against `ux_customer_document_customer_category` —
+      both are exactly the constraint P24-2's `ON CONFLICT (...) DO
+      UPDATE` upserts will rely on. One process note: hit this project's
+      own documented `docker exec` heredoc gotcha (silently no-ops
+      without `-i`) while running the verification SQL — worked around
+      with `-i`, not a schema issue.
 
 - [ ] **P24-2** — `document/db.py` (new file): lazily-initialized pool,
       same per-module convention as `customer/db.py`/`account/db.py`/
@@ -6126,6 +6159,31 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P24-1 done)** — `db/schema.sql` gained
+  `application_document`/`account_document`/`customer_document` exactly
+  as this phase's own preamble designed them: app-minted `idgen` PKs
+  (`APD-`/`ACD-`/`CUD-`), `mayan_document_id` as a separate `UNIQUE`
+  column, unique indexes on `(account_id, category)`/`(customer_id,
+  category)` for the two update-in-place tables, no such uniqueness on
+  `application_document` (unlimited accumulation per category), plus a
+  plain `application_id` index backing `list_documents`/
+  `check_completeness`. Verified against a disposable scratch
+  `postgres:16-alpine` container (port `15435`, removed after — never
+  the live stack's own `db` volume, which still has zero rows for any
+  of these tables and stays untouched until P24-5's real backfill):
+  schema applied cleanly; a raw duplicate insert into `account_document`/
+  `customer_document` for an already-used `(reference_id, category)`
+  pair correctly hit the new unique index (`ux_account_document_account_category`/
+  `ux_customer_document_customer_category`); `application_document`
+  cleanly accepted two rows sharing the same `(application_id,
+  category)` pair, confirming no uniqueness leaked onto that table.
+  Hit this project's own documented `docker exec` heredoc gotcha
+  (silently no-ops without `-i`) while running the verification SQL —
+  worked around, not a schema defect. Next session: P24-2
+  (`document/db.py` — the new file's insert/upsert/read functions,
+  same PK-collision-retry-loop convention `account/db.py`'s `create()`/
+  `create_closure_request()` already establish).
 
 - **2026-09-09 (Phase 24 added, design-only, no code written)** —
   Requested by the user: `document/` has zero Postgres persistence
