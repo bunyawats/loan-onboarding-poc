@@ -860,37 +860,38 @@ accumulation per category (matching today's multi-document behavior);
 id stored as a separate `mayan_document_id UNIQUE` column — corrected
 from the user's original "document UUID" phrasing after confirming by
 grep that this codebase has never captured Mayan's real `uuid` field
-anywhere, only its plain integer `id`. **P24-1 through P24-4 are now
-done** — `db/schema.sql` has all three new tables, `document/db.py`
-(new file) has every insert/upsert/read function this phase's preamble
-designed (13 new tests, real Postgres), `document/service.py` has been
-rewritten so every read function genuinely queries Postgres only
-(proven with a Mayan-client double that raises on any attribute
-access), and `CLAUDE.md`/`docs/diagrams/er-diagram.md` now describe
-the actually-built shape — including one real, pre-existing doc
-inaccuracy found and fixed along the way (a stale
-`promote_government_id_to_customer_photo` description that had drifted
-out of sync with the rest of the file). Full unit suite (329 tests) and
-`lint-imports` (10/10) both green throughout. The live stack's own `db`
-volume is still untouched — real backfill deferred to P24-5. **Next:
-P24-5** — the live migration and, at last, the actual proof this whole
-phase exists for: stop the real `mayan` container and confirm document
-listings still render correctly from Postgres alone. See Phase 24's
-own preamble for the full design, including the new dual-write
-consistency risk this phase deliberately accepts and defers to a
-future `reconcile.py` extension.
+anywhere, only its plain integer `id`. **Phase 24 (P24-1 through P24-5)
+is now fully complete.** Schema, `document/db.py`, the
+`document/service.py` primary-source-of-truth rewrite, `CLAUDE.md`/ER
+diagram updates, and — the actual point of the whole phase — a full
+live migration (all 128 real Mayan documents backfilled into the three
+new tables, spot-checked via `psql`, zero skipped) followed by a real
+`mayan` container shutdown that proved every document read function
+(`list_documents`/`check_completeness`/`list_account_documents`/
+`list_customer_documents`/`has_id_photo`) still returns correct results
+with Mayan completely unreachable, confirmed both by direct script and
+through the real browser reloading a real approved application's
+detail page. `mayan` was restarted afterward and a normal upload/preview
+cycle reconfirmed working. See P24-5's own DONE note for the full
+trace, including a browser-automation-only Keycloak login quirk hit
+along the way (not an application defect, same class of thing this
+project's Known Gaps already documents for other sessions) and why it
+didn't block finishing the verification. Full unit suite (329 tests)
+and `lint-imports` (10/10) green throughout every task.
 
-Two small, non-blocking items remain from earlier phases, neither
-urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open (see
-just above) still hasn't been added to `CLAUDE.md`'s Known Gaps / the
-`known-gaps-and-gotchas` skill; no dedicated `application/` skill exists
-the way `account-closure` does for Phase 22's own design (deliberate —
-this phase's narrative lives directly in `CLAUDE.md`, proportionate to
-a change with no new UI surface). The live `nats`/`temporal`/`db`/
-`risk-adapter`/`krakend`/`mock-risk-engine`/`worker-workflow`/
+**Next: this plan's own backlog is empty again.** Two small,
+non-blocking items remain from earlier phases, neither urgent: the
+`WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
+added to `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill;
+`reconcile.py` doesn't yet cross-check the three new Phase 24 tables
+against Mayan (a deliberately deferred follow-up, documented in both
+`CLAUDE.md`'s "Document/database reconciliation" and this phase's own
+preamble, not an oversight). The live `nats`/`temporal`/`db`/
+`mayan`/`risk-adapter`/`krakend`/`mock-risk-engine`/`worker-workflow`/
 `worker-activity`/`app` containers were all left running, all on
-current Phase 23 code, live database fully migrated — a fresh session
-can pick up Phase 24 directly against this already-current stack.
+current Phase 24 code, live database fully migrated and backfilled — a
+fresh session can pick up any future phase directly against this
+already-current stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -6266,7 +6267,7 @@ own scope.
       code changed this task — a pure documentation task, verified
       anyway per the DoD's own instruction).
 
-- [ ] **P24-5** — Live migration + live-verification, same discipline
+- [x] **P24-5** — Live migration + live-verification, same discipline
       every prior schema-adding phase's final task has used. Migrate the
       live stack's `db` volume (`CREATE TABLE` for all three new tables
       — no existing columns are being dropped this time, since
@@ -6298,6 +6299,68 @@ own scope.
       against the migrated volume; the Mayan-stopped verification above
       performed and passing, then `mayan` restarted and a normal upload
       confirmed working again afterward.
+      DONE: migrated the live `loan_onboarding` database (`CREATE
+      TABLE` for all three new tables — no columns dropped, `document/`
+      never had any before this phase). Backfilled via a one-off script
+      (scratchpad, not committed, reusing `document.service.list_all_documents()`
+      and `document/db.py`'s own insert/upsert functions directly — the
+      real code path, not a hand-rolled parallel one) run inside a
+      freshly built `worker-activity` container: all **128 real Mayan
+      documents** classified with **zero skipped/unclassifiable** — 96
+      into `application_document`, 26 into `account_document`, 6 into
+      `customer_document`. A second pass backfilled `account_id`/
+      `customer_id` provisioning for the 13 already-approved
+      applications' documents via `set_application_document_provisioning`,
+      the exact function the real approve path uses. Spot-checked via
+      `psql`: category counts cross-checked against known real data (21
+      applications × 4 base categories + 8 mortgage/4 auto-loan
+      product-specific = 96; 13 accounts × 2 categories = 26; 6
+      customers × 1 = 6, all exact matches); a specific approved
+      mortgage application's `application_document` rows correctly
+      carry the real `account_id`/`customer_id` from its own `accounts`
+      row (joined and confirmed identical, not just plausible-looking).
+      Rebuilt and recreated `app`/`worker-workflow`/`worker-activity` —
+      clean startup, no errors. Live-verified through the real browser
+      (not curl simulation): an existing approved mortgage application's
+      detail page rendered all 5 real documents correctly
+      (`list_documents`), and clicking through to a real document
+      returned `200 OK` (`preview`, ownership check now via Postgres).
+      Live-verified the full write path too (upload → Postgres insert →
+      `check_completeness` → `list_documents` → `preview`) via a
+      throwaway test application against the real stack, then cleaned
+      up (Mayan-trashed the test document, deleted its Postgres row) —
+      table counts confirmed back to exactly 96/26/6 afterward, no
+      pollution left behind. **Then the actual point of this whole
+      phase, proven live**: stopped the real `mayan` container and
+      confirmed, both via a direct script against the live stack *and*
+      through the real browser reloading the same approved application's
+      detail page, that `list_documents`/`check_completeness`/
+      `list_account_documents`/`list_customer_documents`/`has_id_photo`
+      all still return correct results with Mayan completely
+      unreachable — the exact gap this phase exists to close.
+      `preview` correctly still passes its Postgres ownership check but
+      then fails on the actual Mayan file stream (`httpx.ConnectError`)
+      — expected, unchanged from pre-Phase-24 behavior (the old
+      ownership check called Mayan too, so it failed at the same point,
+      just one step earlier), not a new gap. Restarted `mayan`, waited
+      for its Celery workers to report `RUNNING`, and confirmed a
+      normal upload/preview cycle (script-based) and a real-browser
+      preview reload both worked again — `200 OK` either way, and
+      `application_document`/`account_document`/`customer_document`
+      counts still exactly 96/26/6 (the restart-verification's own test
+      document cleaned up the same way). **One unrelated session note**:
+      hit a real, repeated browser-automation click-reliability issue
+      specifically on Keycloak's login form (clicks/Enter not
+      registering, no request ever reaching Keycloak) while attempting
+      to also live-verify the staff review dialog — matches this
+      project's own previously-documented "browser-automation-only"
+      quirks (Phase 20's `confirm()`-dialog hang, Phase 21's click
+      quirk), not an application defect; abandoned that one surface
+      rather than fight it further, since the customer-side browser
+      verification plus the direct-script verification already cover
+      every function this phase touched — every function
+      `bff_backoffice` calls is identical to what `bff_customer`
+      already exercised live.
 
 ---
 
@@ -6309,6 +6372,54 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P24-5 done — Phase 24 fully complete)** — Migrated the
+  live `loan_onboarding` database (`CREATE TABLE` for all three new
+  tables). Backfilled via a one-off script (scratchpad, not committed,
+  calling `document.service.list_all_documents()` and `document/db.py`'s
+  own real insert/upsert functions directly) run inside a freshly built
+  `worker-activity` container: all **128 real Mayan documents**
+  classified correctly with **zero skipped** — 96 `application_document`,
+  26 `account_document`, 6 `customer_document` — plus a second pass
+  backfilling `account_id`/`customer_id` provisioning for the 13
+  already-approved applications via the real
+  `set_application_document_provisioning` function. Spot-checked via
+  `psql`: category counts exactly matched known real data (21
+  applications × base categories + product-specific extras = 96; 13
+  accounts × 2 categories = 26; 6 customers × 1 = 6), and a specific
+  approved application's `application_document` rows were confirmed to
+  carry the exact `account_id`/`customer_id` its own `accounts` row
+  has. Rebuilt and recreated `app`/`worker-workflow`/`worker-activity`
+  — clean startup. Live-verified through the real browser: a real
+  approved mortgage application's detail page rendered all 5 documents
+  correctly, and its document preview returned `200 OK`. Live-verified
+  the full write path too (upload → Postgres insert →
+  `check_completeness` → `list_documents` → `preview`) via a throwaway
+  test application, then cleaned it up — table counts confirmed back to
+  exactly 96/26/6 afterward. **Then the actual point of this whole
+  phase, proven live**: stopped the real `mayan` container and
+  confirmed — both via a direct script and through the real browser
+  reloading the same application's detail page — that every document
+  read function still returns correct results with Mayan completely
+  unreachable. `preview` correctly still passes its Postgres ownership
+  check but then fails on the actual file stream
+  (`httpx.ConnectError`) — expected, unchanged from pre-Phase-24
+  behavior (the old ownership check called Mayan too, just one step
+  earlier), not a new gap. Restarted `mayan`, waited for its Celery
+  workers to report `RUNNING`, and reconfirmed a normal upload/preview
+  cycle worked again both by script and through the real browser.
+  **One unrelated session note**: hit a real, repeated
+  browser-automation click-reliability issue specifically on
+  Keycloak's login form while attempting to also live-verify the staff
+  review dialog — matches this project's own previously-documented
+  browser-automation-only quirks (Phase 20's `confirm()`-dialog hang,
+  Phase 21's own click quirk), not an application defect; abandoned
+  that one surface rather than fight it further, since
+  `bff_backoffice` calls the exact same `document.service` functions
+  `bff_customer` already exercised live, with identical code on both
+  sides. **Phase 24 (P24-1 through P24-5) is now fully complete** —
+  this plan's backlog is empty again, save for the two small,
+  non-blocking items already noted in Current Status.
 
 - **2026-09-09 (P24-4 done)** — Documentation-only task, no code
   changed. `CLAUDE.md`'s `document/` module section rewritten: the
