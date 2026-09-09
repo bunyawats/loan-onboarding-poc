@@ -13,15 +13,25 @@ stays the system of record only for actual file bytes and the visual
 Index Template tree.
 
 Two accumulation shapes, matching the schema: `application_document`
-has no uniqueness beyond `mayan_document_id` (unlimited rows per
-`(application_id, category)`, `insert_application_document` always
-inserts a new row); `account_document`/`customer_document` are unique
-on `(account_id, category)`/`(customer_id, category)` -- a re-upload
-updates the existing row in place, so their write paths are upserts,
-not plain inserts. Every primary key here is an app-minted `idgen` id,
-same PK-collision-retry convention `account/db.py`'s `create()`/
-`create_closure_request()` already establish -- `document/` joins the
-list of `idgen`-importing modules for the first time this phase."""
+has no uniqueness beyond `mayan_id`/`mayan_document_uuid` (unlimited
+rows per `(application_id, category)`, `insert_application_document`
+always inserts a new row); `account_document`/`customer_document` are
+unique on `(account_id, category)`/`(customer_id, category)` -- a
+re-upload updates the existing row in place, so their write paths are
+upserts, not plain inserts. Every primary key here is an app-minted
+`idgen` id, same PK-collision-retry convention `account/db.py`'s
+`create()`/`create_closure_request()` already establish -- `document/`
+joins the list of `idgen`-importing modules for the first time this
+phase.
+
+**Phase 25, "Track Mayan's real UUID alongside its integer id"** (see
+CLAUDE.md / IMPLEMENTATION_PLAN.md): every document row carries both
+`mayan_document_uuid` (Mayan's real `uuid` field) and `mayan_id`
+(Mayan's plain integer id) -- confirmed live that Mayan's REST API is
+entirely id-addressed for actual operations (file streaming, metadata,
+uploads), so `mayan_id` can't be dropped in favor of the uuid; this
+app's own row is the only place the uuid-to-id mapping lives. Both
+columns are independently `UNIQUE` per table."""
 
 from __future__ import annotations
 
@@ -53,15 +63,16 @@ async def _get_pool() -> asyncpg.Pool:
 
 
 # ---------------------------------------------------------------
-# application_document -- no uniqueness beyond mayan_document_id, so
-# every call always inserts a new row (a category is satisfied by one
-# or more documents -- CLAUDE.md's "a category is satisfied by one or
-# more documents, not exactly one").
+# application_document -- no uniqueness beyond mayan_id/mayan_document_uuid,
+# so every call always inserts a new row (a category is satisfied by
+# one or more documents -- CLAUDE.md's "a category is satisfied by one
+# or more documents, not exactly one").
 # ---------------------------------------------------------------
 
 
 async def insert_application_document(
-    mayan_document_id: int,
+    mayan_document_uuid: str,
+    mayan_id: int,
     application_id: str,
     applicant_identifier: str,
     category: str,
@@ -70,14 +81,16 @@ async def insert_application_document(
 ) -> asyncpg.Record:
     """Called by `document.service.upload` after its Mayan sequence
     succeeds (Mayan first, per this phase's write-ordering rule -- see
-    CLAUDE.md). `account_id` always starts `NULL` here -- there's no
-    account to tag at upload time (see CLAUDE.md's "Applying without
-    being a customer yet"); it's set later, in bulk, by
-    `set_application_document_provisioning` on approval. `customer_id`
-    may already be known at upload time (a returning applicant who
-    already resolves to an existing customer) -- passed straight
-    through, same as `document.service.upload`'s own optional
-    parameter.
+    CLAUDE.md). `mayan_document_uuid`/`mayan_id` both come straight from
+    `mayan_client.create_document(...)`'s own response (Phase 25) --
+    no second Mayan call needed to capture the uuid. `account_id`
+    always starts `NULL` here -- there's no account to tag at upload
+    time (see CLAUDE.md's "Applying without being a customer yet"); it's
+    set later, in bulk, by `set_application_document_provisioning` on
+    approval. `customer_id` may already be known at upload time (a
+    returning applicant who already resolves to an existing customer)
+    -- passed straight through, same as `document.service.upload`'s own
+    optional parameter.
 
     Retries on its own generated `application_document_id` colliding
     with an unrelated row's primary key -- an engineering concern, same
@@ -93,13 +106,14 @@ async def insert_application_document(
             return await pool.fetchrow(
                 """
                 INSERT INTO application_document (
-                    application_document_id, mayan_document_id, application_id,
+                    application_document_id, mayan_document_uuid, mayan_id, application_id,
                     applicant_identifier, category, filename, customer_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING *
                 """,
                 application_document_id,
-                mayan_document_id,
+                mayan_document_uuid,
+                mayan_id,
                 application_id,
                 applicant_identifier,
                 category,
@@ -148,13 +162,16 @@ async def get_application_documents(application_id: str) -> list[asyncpg.Record]
     )
 
 
-async def get_application_document_by_mayan_id(mayan_document_id: int) -> asyncpg.Record | None:
+async def get_application_document_by_mayan_id(mayan_id: int) -> asyncpg.Record | None:
     """Read-only. Backs `document.service.preview`'s ownership check
-    (Postgres now, replacing today's live Mayan metadata fetch)."""
+    (Postgres now, replacing today's live Mayan metadata fetch). Looks
+    up by the integer id, not the uuid (Phase 25) -- `preview`'s own
+    URL parameter is still Mayan's integer id, unaffected by this
+    phase (see CLAUDE.md's Phase 25 section)."""
     pool = await _get_pool()
     return await pool.fetchrow(
-        "SELECT * FROM application_document WHERE mayan_document_id = $1",
-        mayan_document_id,
+        "SELECT * FROM application_document WHERE mayan_id = $1",
+        mayan_id,
     )
 
 
@@ -173,7 +190,8 @@ async def get_application_document_by_mayan_id(mayan_document_id: int) -> asyncp
 
 
 async def upsert_account_document(
-    mayan_document_id: int,
+    mayan_document_uuid: str,
+    mayan_id: int,
     account_id: str,
     applicant_identifier: str,
     customer_id: str,
@@ -185,9 +203,14 @@ async def upsert_account_document(
     upload for this `(account_id, category)` pair, inserts a new row
     under a freshly minted `account_document_id`. On a re-upload
     (`ux_account_document_account_category` fires), updates the
-    existing row's `mayan_document_id`/`filename`/`updated_at` in place
-    -- the existing row's own `account_document_id` is preserved,
-    the freshly generated one from this call is simply discarded."""
+    existing row's `mayan_document_uuid`/`mayan_id`/`filename`/
+    `updated_at` in place -- the existing row's own
+    `account_document_id` is preserved, the freshly generated one from
+    this call is simply discarded. (Phase 25: on `upload_consent`'s
+    true-versioning re-upload path, `mayan_id`/`mayan_document_uuid`
+    are unchanged values -- same underlying Mayan document, just a new
+    file version -- so this `UPDATE` is a no-op on those two columns in
+    that specific case, still correct.)"""
     pool = await _get_pool()
     for _ in range(_MAX_ID_COLLISION_RETRIES):
         account_document_id = idgen_service.generate_id(_ACCOUNT_DOCUMENT_ID_PREFIX, _ACCOUNT_DOCUMENT_ID_LENGTH)
@@ -195,17 +218,19 @@ async def upsert_account_document(
             return await pool.fetchrow(
                 """
                 INSERT INTO account_document (
-                    account_document_id, mayan_document_id, account_id,
+                    account_document_id, mayan_document_uuid, mayan_id, account_id,
                     applicant_identifier, customer_id, category, filename
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (account_id, category) DO UPDATE
-                SET mayan_document_id = EXCLUDED.mayan_document_id,
+                SET mayan_document_uuid = EXCLUDED.mayan_document_uuid,
+                    mayan_id = EXCLUDED.mayan_id,
                     filename = EXCLUDED.filename,
                     updated_at = now()
                 RETURNING *
                 """,
                 account_document_id,
-                mayan_document_id,
+                mayan_document_uuid,
+                mayan_id,
                 account_id,
                 applicant_identifier,
                 customer_id,
@@ -241,19 +266,21 @@ async def get_account_document_by_category(account_id: str, category: str) -> as
     )
 
 
-async def get_account_document_by_mayan_id(mayan_document_id: int) -> asyncpg.Record | None:
+async def get_account_document_by_mayan_id(mayan_id: int) -> asyncpg.Record | None:
     """Read-only. Backs `document.service.preview_account_document`'s
     ownership check (Postgres now, replacing today's live Mayan
-    metadata fetch)."""
+    metadata fetch). Looks up by the integer id, not the uuid (Phase
+    25) -- same reasoning as `get_application_document_by_mayan_id`."""
     pool = await _get_pool()
     return await pool.fetchrow(
-        "SELECT * FROM account_document WHERE mayan_document_id = $1",
-        mayan_document_id,
+        "SELECT * FROM account_document WHERE mayan_id = $1",
+        mayan_id,
     )
 
 
 async def upsert_customer_document(
-    mayan_document_id: int,
+    mayan_document_uuid: str,
+    mayan_id: int,
     customer_id: str,
     applicant_identifier: str,
     category: str,
@@ -261,12 +288,14 @@ async def upsert_customer_document(
 ) -> asyncpg.Record:
     """Called by `document.service.promote_government_id_to_customer_photo`
     after it trashes the customer's prior Mayan copy (if any) and
-    creates a new one. Same insert-or-update-in-place shape as
-    `upsert_account_document` above, keyed on `(customer_id, category)`
-    instead -- this is what makes "exactly one current copy per
-    customer" a real, enforced Postgres invariant rather than the
-    Mayan-side trash-then-recreate sequence being the only thing
-    holding that guarantee."""
+    creates a new one -- a genuinely new Mayan document each time, so
+    `mayan_document_uuid`/`mayan_id` are always fresh values here,
+    unlike `upsert_account_document`'s true-versioning re-upload case.
+    Same insert-or-update-in-place shape as `upsert_account_document`
+    above, keyed on `(customer_id, category)` instead -- this is what
+    makes "exactly one current copy per customer" a real, enforced
+    Postgres invariant rather than the Mayan-side trash-then-recreate
+    sequence being the only thing holding that guarantee."""
     pool = await _get_pool()
     for _ in range(_MAX_ID_COLLISION_RETRIES):
         customer_document_id = idgen_service.generate_id(_CUSTOMER_DOCUMENT_ID_PREFIX, _CUSTOMER_DOCUMENT_ID_LENGTH)
@@ -274,17 +303,19 @@ async def upsert_customer_document(
             return await pool.fetchrow(
                 """
                 INSERT INTO customer_document (
-                    customer_document_id, mayan_document_id, customer_id,
+                    customer_document_id, mayan_document_uuid, mayan_id, customer_id,
                     applicant_identifier, category, filename
-                ) VALUES ($1, $2, $3, $4, $5, $6)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (customer_id, category) DO UPDATE
-                SET mayan_document_id = EXCLUDED.mayan_document_id,
+                SET mayan_document_uuid = EXCLUDED.mayan_document_uuid,
+                    mayan_id = EXCLUDED.mayan_id,
                     filename = EXCLUDED.filename,
                     updated_at = now()
                 RETURNING *
                 """,
                 customer_document_id,
-                mayan_document_id,
+                mayan_document_uuid,
+                mayan_id,
                 customer_id,
                 applicant_identifier,
                 category,

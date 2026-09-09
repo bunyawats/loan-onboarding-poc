@@ -893,13 +893,19 @@ dropped, only supplemented. Confirmed the exact column shape with the
 user via `AskUserQuestion`: `mayan_document_id` renamed to
 `mayan_document_uuid TEXT` (repurposed to literally hold the uuid, as
 asked), plus a new `mayan_id INTEGER` column for the id every real
-Mayan call still needs. **P25-1 is now done** — `db/schema.sql` has
-`mayan_document_uuid`/`mayan_id` in all three tables, each with its own
-`UNIQUE` index, verified against a disposable scratch container (both
-indexes independently reject a raw duplicate on their own column — see
-P25-1's own DONE note). **Next: P25-2** (`document/db.py` — every
-insert/upsert function's signature and SQL). See Phase 25's own
-preamble for the full research and design.
+Mayan call still needs. **P25-1 and P25-2 are now done** —
+`db/schema.sql` has `mayan_document_uuid`/`mayan_id` in all three
+tables, and `document/db.py`'s every insert/upsert/by-id-lookup
+function updated to match (13 tests, `loan_onboarding_test` migrated).
+**`document/service.py` is currently broken against this new shape —
+expected, mid-phase, not a regression**: it still calls `document/db.py`
+with the old `mayan_document_id=` keyword, so
+`tests/unit/document/test_service.py`'s 29 tests currently fail with a
+`TypeError`; confirmed this is the *only* failure surface (300 other
+tests pass) before moving on. **Next: P25-3** (`document/service.py` —
+capture `document["uuid"]` at every Mayan `create_document` call site
+and thread it through; this is what fixes the currently-broken test
+suite). See Phase 25's own preamble for the full research and design.
 
 Two small, non-blocking items remain from earlier phases, neither urgent: the
 `WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
@@ -6474,7 +6480,7 @@ separate, later decision.
       their own column, not just one covering both; a row differing in
       both columns inserted cleanly.
 
-- [ ] **P25-2** — `document/db.py`: every insert/upsert function
+- [x] **P25-2** — `document/db.py`: every insert/upsert function
       (`insert_application_document`, `upsert_account_document`,
       `upsert_customer_document`) takes `mayan_document_uuid: str` and
       `mayan_id: int` instead of a single `mayan_document_id: int`;
@@ -6490,6 +6496,25 @@ separate, later decision.
       (`upsert_account_document`/`upsert_customer_document` called
       twice for the same `(reference_id, category)`) updates both
       `mayan_id` *and* `mayan_document_uuid` on the same row.
+      DONE: all three insert/upsert functions and both by-id lookup
+      functions updated exactly as designed. `tests/unit/document/test_db.py`
+      rewritten (new `_next_mayan_uuid()` helper alongside the existing
+      `_next_mayan_id()`); the two re-upload tests now assert both
+      `mayan_id` *and* `mayan_document_uuid` land as the fresh values on
+      the *same* row (`account_document_id`/`customer_document_id`
+      unchanged) after a second call. Migrated `loan_onboarding_test`'s
+      three document tables directly (`TRUNCATE` — no real data in this
+      ephemeral test database — then `DROP COLUMN mayan_document_id`,
+      `ADD COLUMN mayan_document_uuid`/`mayan_id`, drop the old index,
+      add the two new ones) to run these against. All 13
+      `test_db.py` tests pass. **Expected, scoped-for downstream
+      breakage, not a regression**: `document/service.py` still calls
+      these functions with the old `mayan_document_id=` keyword (P25-3's
+      job), so `tests/unit/document/test_service.py`'s 29 tests
+      currently fail with a `TypeError` — confirmed this is the *only*
+      failure surface by running the full suite: 300 tests pass, all 29
+      failures confined to that one file, nothing else broke.
+      `lint-imports` still green (10/10, no import changes this task).
 
 - [ ] **P25-3** — `document/service.py`: every call site that creates a
       new Mayan document (`upload`, `promote_government_id_to_customer_photo`,
@@ -6551,6 +6576,24 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P25-2 done)** — `document/db.py`'s three insert/upsert
+  functions now take `mayan_document_uuid: str`/`mayan_id: int`
+  instead of a single `mayan_document_id: int`; the two upsert
+  functions' `ON CONFLICT ... DO UPDATE` clauses update both columns;
+  the two by-id lookup functions (`get_application_document_by_mayan_id`/
+  `get_account_document_by_mayan_id`) keep their names and now query
+  the renamed `mayan_id` column. `tests/unit/document/test_db.py`
+  rewritten with a new `_next_mayan_uuid()` helper; the two re-upload
+  tests now assert both `mayan_id` and `mayan_document_uuid` land as
+  fresh values on the same row. Migrated `loan_onboarding_test`'s three
+  tables directly (`TRUNCATE` then `DROP`/`ADD COLUMN`, drop/add
+  indexes — no real data in this ephemeral database). All 13
+  `test_db.py` tests pass. Confirmed the *only* breakage anywhere is
+  `document/service.py`'s own 29 tests (still calling the old
+  `mayan_document_id=` keyword, a `TypeError` — expected, P25-3's job to
+  fix) by running the full suite: 300 other tests pass, nothing else
+  broke. `lint-imports` still green. Next session: P25-3.
 
 - **2026-09-09 (P25-1 done)** — `db/schema.sql` updated in all three
   `*_DOCUMENT` tables exactly as designed: `mayan_document_id` renamed

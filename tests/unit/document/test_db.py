@@ -7,6 +7,7 @@ from loan_onboarding.document import db
 pytestmark = pytest.mark.usefixtures("_clean_document_tables")
 
 _mayan_id_counter = itertools.count(1)
+_mayan_uuid_counter = itertools.count(1)
 _application_id_counter = itertools.count()
 _account_id_counter = itertools.count()
 _customer_id_counter = itertools.count()
@@ -14,6 +15,10 @@ _customer_id_counter = itertools.count()
 
 def _next_mayan_id() -> int:
     return next(_mayan_id_counter)
+
+
+def _next_mayan_uuid() -> str:
+    return f"uuid-{next(_mayan_uuid_counter)}"
 
 
 def _fake_application_id() -> str:
@@ -35,10 +40,12 @@ def _fake_customer_id() -> str:
 
 async def test_insert_application_document_round_trips():
     application_id = _fake_application_id()
-    mayan_document_id = _next_mayan_id()
+    mayan_id = _next_mayan_id()
+    mayan_document_uuid = _next_mayan_uuid()
 
     record = await db.insert_application_document(
-        mayan_document_id=mayan_document_id,
+        mayan_document_uuid=mayan_document_uuid,
+        mayan_id=mayan_id,
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
@@ -46,7 +53,8 @@ async def test_insert_application_document_round_trips():
     )
 
     assert record["application_document_id"].startswith("APD-")
-    assert record["mayan_document_id"] == mayan_document_id
+    assert record["mayan_id"] == mayan_id
+    assert record["mayan_document_uuid"] == mayan_document_uuid
     assert record["application_id"] == application_id
     assert record["applicant_identifier"] == "alice@example.com"
     assert record["category"] == "Government ID"
@@ -63,7 +71,8 @@ async def test_insert_application_document_accepts_customer_id_at_upload_time():
     customer_id = _fake_customer_id()
 
     record = await db.insert_application_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
@@ -83,14 +92,16 @@ async def test_application_document_accepts_two_rows_for_the_same_application_an
     application_id = _fake_application_id()
 
     first = await db.insert_application_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Bank Statements",
         filename="stmt1.pdf",
     )
     second = await db.insert_application_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Bank Statements",
@@ -109,14 +120,16 @@ async def test_set_application_document_provisioning_updates_every_row_at_once()
     customer_id = _fake_customer_id()
 
     await db.insert_application_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
         filename="id.pdf",
     )
     await db.insert_application_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Bank Statements",
@@ -125,7 +138,8 @@ async def test_set_application_document_provisioning_updates_every_row_at_once()
     # A different application's own document must be untouched.
     other_application_id = _fake_application_id()
     await db.insert_application_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         application_id=other_application_id,
         applicant_identifier="bob@example.com",
         category="Government ID",
@@ -147,16 +161,17 @@ async def test_set_application_document_provisioning_updates_every_row_at_once()
 
 async def test_get_application_document_by_mayan_id():
     application_id = _fake_application_id()
-    mayan_document_id = _next_mayan_id()
+    mayan_id = _next_mayan_id()
     await db.insert_application_document(
-        mayan_document_id=mayan_document_id,
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=mayan_id,
         application_id=application_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
         filename="id.pdf",
     )
 
-    record = await db.get_application_document_by_mayan_id(mayan_document_id)
+    record = await db.get_application_document_by_mayan_id(mayan_id)
     assert record["application_id"] == application_id
 
     assert await db.get_application_document_by_mayan_id(_next_mayan_id()) is None
@@ -172,7 +187,8 @@ async def test_upsert_account_document_inserts_a_new_row_on_first_upload():
     customer_id = _fake_customer_id()
 
     record = await db.upsert_account_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=customer_id,
@@ -189,13 +205,15 @@ async def test_upsert_account_document_inserts_a_new_row_on_first_upload():
 
 async def test_upsert_account_document_reupload_updates_existing_row_in_place():
     """The actual point of this table's uniqueness -- a re-upload for
-    the same (account_id, category) updates mayan_document_id/filename/
-    updated_at on the SAME row, rather than inserting a second one."""
+    the same (account_id, category) updates mayan_id/mayan_document_uuid/
+    filename/updated_at on the SAME row, rather than inserting a second
+    one."""
     account_id = _fake_account_id()
     customer_id = _fake_customer_id()
 
     first = await db.upsert_account_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=customer_id,
@@ -203,8 +221,10 @@ async def test_upsert_account_document_reupload_updates_existing_row_in_place():
         filename="consent_v1.pdf",
     )
     new_mayan_id = _next_mayan_id()
+    new_mayan_uuid = _next_mayan_uuid()
     second = await db.upsert_account_document(
-        mayan_document_id=new_mayan_id,
+        mayan_document_uuid=new_mayan_uuid,
+        mayan_id=new_mayan_id,
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=customer_id,
@@ -213,7 +233,8 @@ async def test_upsert_account_document_reupload_updates_existing_row_in_place():
     )
 
     assert second["account_document_id"] == first["account_document_id"]
-    assert second["mayan_document_id"] == new_mayan_id
+    assert second["mayan_id"] == new_mayan_id
+    assert second["mayan_document_uuid"] == new_mayan_uuid
     assert second["filename"] == "consent_v2.pdf"
     assert second["updated_at"] >= first["updated_at"]
 
@@ -226,7 +247,8 @@ async def test_upsert_account_document_different_categories_are_separate_rows():
     customer_id = _fake_customer_id()
 
     await db.upsert_account_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=customer_id,
@@ -234,7 +256,8 @@ async def test_upsert_account_document_different_categories_are_separate_rows():
         filename="welcome.pdf",
     )
     await db.upsert_account_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=customer_id,
@@ -249,7 +272,8 @@ async def test_upsert_account_document_different_categories_are_separate_rows():
 async def test_get_account_document_by_category():
     account_id = _fake_account_id()
     await db.upsert_account_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=_fake_customer_id(),
@@ -263,9 +287,10 @@ async def test_get_account_document_by_category():
 
 async def test_get_account_document_by_mayan_id():
     account_id = _fake_account_id()
-    mayan_document_id = _next_mayan_id()
+    mayan_id = _next_mayan_id()
     await db.upsert_account_document(
-        mayan_document_id=mayan_document_id,
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=mayan_id,
         account_id=account_id,
         applicant_identifier="alice@example.com",
         customer_id=_fake_customer_id(),
@@ -273,7 +298,7 @@ async def test_get_account_document_by_mayan_id():
         filename="consent.pdf",
     )
 
-    record = await db.get_account_document_by_mayan_id(mayan_document_id)
+    record = await db.get_account_document_by_mayan_id(mayan_id)
     assert record["account_id"] == account_id
 
     assert await db.get_account_document_by_mayan_id(_next_mayan_id()) is None
@@ -288,7 +313,8 @@ async def test_upsert_customer_document_inserts_a_new_row_on_first_upload():
     customer_id = _fake_customer_id()
 
     record = await db.upsert_customer_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         customer_id=customer_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
@@ -304,19 +330,24 @@ async def test_upsert_customer_document_reupload_updates_existing_row_in_place()
     """Same "exactly one current copy" enforcement account_document's
     own re-upload test proves -- this is what makes
     promote_government_id_to_customer_photo's Postgres mirror a real,
-    enforced invariant."""
+    enforced invariant. Unlike account_document's true-versioning case,
+    every call here is a genuinely new Mayan document (trash-then-
+    recreate), so mayan_id/mayan_document_uuid always change too."""
     customer_id = _fake_customer_id()
 
     first = await db.upsert_customer_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         customer_id=customer_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
         filename="id_v1.pdf",
     )
     new_mayan_id = _next_mayan_id()
+    new_mayan_uuid = _next_mayan_uuid()
     second = await db.upsert_customer_document(
-        mayan_document_id=new_mayan_id,
+        mayan_document_uuid=new_mayan_uuid,
+        mayan_id=new_mayan_id,
         customer_id=customer_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
@@ -324,7 +355,8 @@ async def test_upsert_customer_document_reupload_updates_existing_row_in_place()
     )
 
     assert second["customer_document_id"] == first["customer_document_id"]
-    assert second["mayan_document_id"] == new_mayan_id
+    assert second["mayan_id"] == new_mayan_id
+    assert second["mayan_document_uuid"] == new_mayan_uuid
     assert second["filename"] == "id_v2.pdf"
 
     documents = await db.get_customer_documents(customer_id)
@@ -334,7 +366,8 @@ async def test_upsert_customer_document_reupload_updates_existing_row_in_place()
 async def test_get_customer_document_by_category():
     customer_id = _fake_customer_id()
     await db.upsert_customer_document(
-        mayan_document_id=_next_mayan_id(),
+        mayan_document_uuid=_next_mayan_uuid(),
+        mayan_id=_next_mayan_id(),
         customer_id=customer_id,
         applicant_identifier="alice@example.com",
         category="Government ID",
