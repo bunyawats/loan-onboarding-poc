@@ -893,19 +893,25 @@ dropped, only supplemented. Confirmed the exact column shape with the
 user via `AskUserQuestion`: `mayan_document_id` renamed to
 `mayan_document_uuid TEXT` (repurposed to literally hold the uuid, as
 asked), plus a new `mayan_id INTEGER` column for the id every real
-Mayan call still needs. **P25-1 and P25-2 are now done** —
+Mayan call still needs. **P25-1 through P25-3 are now done** —
 `db/schema.sql` has `mayan_document_uuid`/`mayan_id` in all three
-tables, and `document/db.py`'s every insert/upsert/by-id-lookup
-function updated to match (13 tests, `loan_onboarding_test` migrated).
-**`document/service.py` is currently broken against this new shape —
-expected, mid-phase, not a regression**: it still calls `document/db.py`
-with the old `mayan_document_id=` keyword, so
-`tests/unit/document/test_service.py`'s 29 tests currently fail with a
-`TypeError`; confirmed this is the *only* failure surface (300 other
-tests pass) before moving on. **Next: P25-3** (`document/service.py` —
-capture `document["uuid"]` at every Mayan `create_document` call site
-and thread it through; this is what fixes the currently-broken test
-suite). See Phase 25's own preamble for the full research and design.
+tables, `document/db.py`'s every insert/upsert/by-id-lookup function
+matches, and `document/service.py` captures `document["uuid"]` at
+every Mayan `create_document` call site (`upload`,
+`promote_government_id_to_customer_photo`, `generate_welcome_letter`)
+and threads it through — `upload_consent`'s true-versioning re-upload
+branch reuses the existing row's own uuid instead, proven by a
+dedicated test that it stays identical across re-uploads while
+`promote_government_id_to_customer_photo`'s own repeat-call test proves
+the opposite (a genuinely new uuid each time, since that path always
+creates a new Mayan document). `grep` confirms zero remaining
+references to the old `mayan_document_id` name anywhere in
+`loan_onboarding/` or `tests/`. Full unit suite (333 tests, up from
+324 pre-Phase-25) and `lint-imports` (10/10) both green. The live
+stack's own `db` volume is still on the pre-Phase-25 shape — real
+migration deferred to P25-5. **Next: P25-4** (`CLAUDE.md`/ER diagram —
+document the built shape). See Phase 25's own preamble for the full
+research and design.
 
 Two small, non-blocking items remain from earlier phases, neither urgent: the
 `WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
@@ -6516,7 +6522,7 @@ separate, later decision.
       failures confined to that one file, nothing else broke.
       `lint-imports` still green (10/10, no import changes this task).
 
-- [ ] **P25-3** — `document/service.py`: every call site that creates a
+- [x] **P25-3** — `document/service.py`: every call site that creates a
       new Mayan document (`upload`, `promote_government_id_to_customer_photo`,
       `generate_welcome_letter`, `upload_consent`'s create branch)
       captures `document["uuid"]` from `create_document(...)`'s own
@@ -6537,6 +6543,33 @@ separate, later decision.
       a `upload_consent` re-upload keeps the *same* `mayan_document_uuid`
       (proving the re-upload branch doesn't fabricate a new one). Full
       unit suite green, `lint-imports` unaffected (no new imports).
+      DONE: every call site updated exactly as designed — `upload`,
+      `promote_government_id_to_customer_photo`, `generate_welcome_letter`
+      all capture `document["uuid"]` straight from their own
+      `create_document(...)` response and thread it through to
+      `document_db`; `upload_consent`'s re-upload branch reuses
+      `existing["mayan_document_uuid"]` instead (no new Mayan document,
+      so no new uuid), its create branch captures a fresh one like every
+      other write path. The three `_*_document_ref` helpers now read
+      `record["mayan_id"]` for `DocumentRef.document_id` — unchanged
+      public meaning, confirmed by grep (`mayan_document_id` no longer
+      appears anywhere in `loan_onboarding/` or `tests/`).
+      `tests/unit/document/fake_mayan_client.py`'s `create_document` now
+      returns a deterministic fake `uuid` (`f"fake-uuid-{document_id}"`)
+      and stores it on `_StoredDocument`. All two previously-broken
+      tests (from P24-3, asserting the old column name) fixed by
+      renaming their assertion to `mayan_id`; four new tests added
+      proving the actual DoD claims: a real `mayan_document_uuid` lands
+      in Postgres after `upload`/`generate_welcome_letter`; an
+      `upload_consent` re-upload keeps the exact *same* uuid (not just
+      "a" uuid); and, as a deliberate contrast case,
+      `promote_government_id_to_customer_photo` called twice produces
+      two *different* uuids (a genuinely new Mayan document each time,
+      unlike `upload_consent`'s true-versioning case) — proving the
+      re-upload-reuse logic is scoped correctly, not applied
+      universally. Full `document/` suite (62 tests, up from 58) and
+      full unit suite (333 tests, up from 329) both green;
+      `lint-imports` unaffected (10/10, no new imports this task).
 
 - [ ] **P25-4** — `CLAUDE.md`/`docs/diagrams/er-diagram.md`: update the
       three `*_DOCUMENT` table descriptions/entity blocks for the
@@ -6576,6 +6609,32 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P25-3 done)** — `document/service.py`'s every
+  document-creating call site (`upload`,
+  `promote_government_id_to_customer_photo`, `generate_welcome_letter`)
+  now captures `document["uuid"]` straight from its own
+  `create_document(...)` response and threads it through to
+  `document_db` — no second Mayan call added anywhere.
+  `upload_consent`'s re-upload branch reuses the existing Postgres
+  row's own `mayan_document_uuid` (no new Mayan document created, so no
+  new uuid); its create-first-version branch captures a fresh one like
+  every other path. The three `_*_document_ref` helpers now read
+  `record["mayan_id"]` for `DocumentRef.document_id`, unchanged public
+  meaning. `tests/unit/document/fake_mayan_client.py`'s `create_document`
+  gained a deterministic fake `uuid`. Fixed the two tests broken by
+  P25-2's rename (renamed their assertion to `mayan_id`); added four
+  new tests: a real `mayan_document_uuid` lands in Postgres after
+  `upload`/`generate_welcome_letter`; an `upload_consent` re-upload
+  keeps the *same* uuid; and — the deliberate contrast case —
+  `promote_government_id_to_customer_photo` called twice produces two
+  *different* uuids, proving the reuse logic is correctly scoped to
+  true-versioning only, not applied everywhere. Full `document/` suite
+  (62 tests) and full unit suite (333 tests, up from 324 pre-Phase-25)
+  both green; `grep` confirmed zero remaining references to the old
+  `mayan_document_id` name anywhere in the codebase. `lint-imports`
+  still green (no new imports). Next session: P25-4 (`CLAUDE.md`/ER
+  diagram).
 
 - **2026-09-09 (P25-2 done)** — `document/db.py`'s three insert/upsert
   functions now take `mayan_document_uuid: str`/`mayan_id: int`

@@ -436,7 +436,7 @@ async def test_upload_writes_a_real_application_document_row(fake_client):
 
     records = await document_db.get_application_documents("app-1")
     assert len(records) == 1
-    assert records[0]["mayan_document_id"] == ref.document_id
+    assert records[0]["mayan_id"] == ref.document_id
     assert records[0]["filename"] == "id.pdf"
     assert records[0]["category"] == "Government ID"
     assert records[0]["account_id"] is None
@@ -474,7 +474,60 @@ async def test_upload_consent_reupload_keeps_one_postgres_row(fake_client):
     records = await document_db.get_account_documents("acct-1")
     assert len(records) == 1
     assert records[0]["filename"] == "consent_v2.pdf"
-    assert records[0]["mayan_document_id"] == first.document_id == second.document_id
+    assert records[0]["mayan_id"] == first.document_id == second.document_id
+
+
+# ---------------------------------------------------------------
+# Phase 25 -- new coverage proving mayan_document_uuid is captured for
+# real on every write path, and that a true-versioning re-upload
+# doesn't fabricate a new one.
+# ---------------------------------------------------------------
+
+
+async def test_upload_writes_a_real_mayan_document_uuid():
+    await service.upload("alice@example.com", "app-uuid-1", "Government ID", UploadedFile("id.pdf", b"content"))
+
+    records = await document_db.get_application_documents("app-uuid-1")
+    assert len(records) == 1
+    assert records[0]["mayan_document_uuid"] == "fake-uuid-1"
+
+
+async def test_generate_welcome_letter_writes_a_real_mayan_document_uuid():
+    await service.generate_welcome_letter("alice@example.com", "acct-uuid-1", "cust-1", "Alice", "personal_loan", "10000")
+
+    records = await document_db.get_account_documents("acct-uuid-1")
+    assert len(records) == 1
+    assert records[0]["mayan_document_uuid"] == "fake-uuid-1"
+
+
+async def test_upload_consent_reupload_keeps_the_same_mayan_document_uuid():
+    """The whole point of Phase 25's re-upload branch: no new Mayan
+    document is created on a true-versioning re-upload, so its uuid
+    must not change either -- proves the re-upload branch reuses the
+    existing Postgres row's own mayan_document_uuid rather than
+    fabricating a new one."""
+    await service.upload_consent("alice@example.com", "acct-uuid-2", "cust-1", UploadedFile("consent_v1.pdf", b"v1"))
+    first_uuid = (await document_db.get_account_documents("acct-uuid-2"))[0]["mayan_document_uuid"]
+
+    await service.upload_consent("alice@example.com", "acct-uuid-2", "cust-1", UploadedFile("consent_v2.pdf", b"v2"))
+    second_uuid = (await document_db.get_account_documents("acct-uuid-2"))[0]["mayan_document_uuid"]
+
+    assert first_uuid == second_uuid == "fake-uuid-1"
+
+
+async def test_promote_government_id_writes_a_fresh_mayan_document_uuid_each_time():
+    """Unlike upload_consent's true-versioning case, promote always
+    creates a genuinely new Mayan document (trash-then-recreate) -- its
+    uuid must change on a second promotion, not stay the same."""
+    await service.upload("alice@example.com", "app-uuid-2", "Government ID", UploadedFile("id1.pdf", b"1"))
+    await service.promote_government_id_to_customer_photo("app-uuid-2", "cust-uuid-1")
+    first_uuid = (await document_db.get_customer_documents("cust-uuid-1"))[0]["mayan_document_uuid"]
+
+    await service.upload("alice@example.com", "app-uuid-3", "Government ID", UploadedFile("id2.pdf", b"2"))
+    await service.promote_government_id_to_customer_photo("app-uuid-3", "cust-uuid-1")
+    second_uuid = (await document_db.get_customer_documents("cust-uuid-1"))[0]["mayan_document_uuid"]
+
+    assert first_uuid != second_uuid
 
 
 async def test_list_documents_and_check_completeness_never_touch_mayan(fake_client, monkeypatch):

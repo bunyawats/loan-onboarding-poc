@@ -105,7 +105,7 @@ class DocumentNotFound(Exception):
 
 def _application_document_ref(record: asyncpg.Record) -> DocumentRef:
     return DocumentRef(
-        document_id=record["mayan_document_id"],
+        document_id=record["mayan_id"],
         filename=record["filename"],
         category=record["category"],
         applicant_identifier=record["applicant_identifier"],
@@ -117,7 +117,7 @@ def _application_document_ref(record: asyncpg.Record) -> DocumentRef:
 
 def _account_document_ref(record: asyncpg.Record) -> DocumentRef:
     return DocumentRef(
-        document_id=record["mayan_document_id"],
+        document_id=record["mayan_id"],
         filename=record["filename"],
         category=record["category"],
         applicant_identifier=record["applicant_identifier"],
@@ -128,7 +128,7 @@ def _account_document_ref(record: asyncpg.Record) -> DocumentRef:
 
 def _customer_document_ref(record: asyncpg.Record) -> DocumentRef:
     return DocumentRef(
-        document_id=record["mayan_document_id"],
+        document_id=record["mayan_id"],
         filename=record["filename"],
         category=record["category"],
         applicant_identifier=record["applicant_identifier"],
@@ -236,6 +236,7 @@ async def upload(
 
     document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_APPLICATION], file.filename)
     document_id = document["id"]
+    document_uuid = document["uuid"]
 
     await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
 
@@ -256,9 +257,12 @@ async def upload(
 
     # Postgres mirror, written only after Mayan succeeds (Phase 24's
     # write-ordering rule -- see this module's own docstring and
-    # document/db.py's).
+    # document/db.py's). document_uuid comes straight from
+    # create_document(...)'s own response -- no second Mayan call
+    # needed to capture it (Phase 25).
     await document_db.insert_application_document(
-        mayan_document_id=document_id,
+        mayan_document_uuid=document_uuid,
+        mayan_id=document_id,
         application_id=application_id,
         applicant_identifier=applicant_identifier,
         category=category,
@@ -453,7 +457,7 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     # ux_customer_document_customer_category).
     existing_copy = await document_db.get_customer_document_by_category(customer_id, CATEGORY_GOVERNMENT_ID)
     if existing_copy is not None:
-        response = await mayan_client.delete(f"/documents/{existing_copy['mayan_document_id']}/")
+        response = await mayan_client.delete(f"/documents/{existing_copy['mayan_id']}/")
         response.raise_for_status()
 
     doc_type_ids, metadata_type_ids = await asyncio.gather(
@@ -461,6 +465,7 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     )
     copy_document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_APPLICATION], source.filename)
     copy_document_id = copy_document["id"]
+    copy_document_uuid = copy_document["uuid"]
     await mayan_client.upload_file(copy_document_id, source.filename, content, action_name="replace")
 
     for field, value in [
@@ -473,7 +478,8 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     await mayan_client.rebuild_index()
 
     await document_db.upsert_customer_document(
-        mayan_document_id=copy_document_id,
+        mayan_document_uuid=copy_document_uuid,
+        mayan_id=copy_document_id,
         customer_id=customer_id,
         applicant_identifier=source.applicant_identifier,
         category=CATEGORY_GOVERNMENT_ID,
@@ -523,6 +529,7 @@ async def generate_welcome_letter(
     )
     document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_ACCOUNT], filename)
     document_id = document["id"]
+    document_uuid = document["uuid"]
 
     await mayan_client.upload_file(document_id, filename, content, action_name="replace")
 
@@ -542,7 +549,8 @@ async def generate_welcome_letter(
     # UPDATE path exists for account_document's uniqueness rule
     # generally, not because this call is expected to hit it.
     await document_db.upsert_account_document(
-        mayan_document_id=document_id,
+        mayan_document_uuid=document_uuid,
+        mayan_id=document_id,
         account_id=account_id,
         applicant_identifier=applicant_identifier,
         customer_id=customer_id,
@@ -632,18 +640,27 @@ async def upload_consent(
     now converge on one `document_db.upsert_account_document` call at
     the end, written only after Mayan succeeds -- on the re-upload
     branch this is genuinely an update-in-place (same
-    `account_document_id`, same `mayan_document_id` since Mayan
-    versioned the *existing* document rather than creating a new one,
-    new `filename`/`updated_at`); on the create-first-version branch
-    it's the insert path. Replaces the old two-different-return-shapes
+    `account_document_id`, same `mayan_id`/`mayan_document_uuid` since
+    Mayan versioned the *existing* document rather than creating a new
+    one, new `filename`/`updated_at`); on the create-first-version
+    branch it's the insert path. Replaces the old two-different-return-shapes
     design (`dataclasses.replace(...)` on the re-upload branch, a fresh
     `DocumentRef(...)` on the other) with one shared
     `_account_document_ref(...)` conversion of whichever row the upsert
-    returns."""
+    returns.
+
+    **Phase 25**: on the re-upload branch, `mayan_document_uuid` comes
+    from the *existing* Postgres row (`existing["mayan_document_uuid"]`)
+    rather than a fresh Mayan fetch -- no new Mayan document was
+    created, so its identity (and therefore its uuid) hasn't changed.
+    On the create-first-version branch, `document_uuid` comes straight
+    from `create_document(...)`'s own response, same as every other
+    write path this phase touched."""
     existing = await document_db.get_account_document_by_category(account_id, CATEGORY_CONSENT)
 
     if existing is not None:
-        document_id = existing["mayan_document_id"]
+        document_id = existing["mayan_id"]
+        document_uuid = existing["mayan_document_uuid"]
         await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
     else:
         doc_type_ids, metadata_type_ids = await asyncio.gather(
@@ -651,6 +668,7 @@ async def upload_consent(
         )
         document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_ACCOUNT], file.filename)
         document_id = document["id"]
+        document_uuid = document["uuid"]
 
         await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
 
@@ -665,7 +683,8 @@ async def upload_consent(
         await mayan_client.rebuild_index()
 
     record = await document_db.upsert_account_document(
-        mayan_document_id=document_id,
+        mayan_document_uuid=document_uuid,
+        mayan_id=document_id,
         account_id=account_id,
         applicant_identifier=applicant_identifier,
         customer_id=customer_id,

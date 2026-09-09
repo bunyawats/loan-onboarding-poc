@@ -23,6 +23,7 @@ from loan_onboarding.document.mayan_client import (
 @dataclass
 class _StoredDocument:
     document_id: int
+    document_uuid: str
     document_type_label: str
     filename: str
     metadata: dict[str, str] = field(default_factory=dict)
@@ -51,13 +52,22 @@ class FakeMayanClient:
         return dict(self._metadata_type_ids)
 
     async def create_document(self, document_type_id: int, label: str) -> dict[str, Any]:
+        """Real Mayan's own POST response already includes `uuid`
+        (confirmed live, Phase 25 -- see CLAUDE.md's Phase 25 section)
+        -- this fake mints a deterministic one per document id so
+        `FakeMayanClient`-backed tests exercise the same response shape
+        without needing real randomness."""
         label_by_id = {v: k for k, v in self._document_type_ids.items()}
         document_id = self._next_id
         self._next_id += 1
+        document_uuid = f"fake-uuid-{document_id}"
         self.documents[document_id] = _StoredDocument(
-            document_id=document_id, document_type_label=label_by_id[document_type_id], filename=label
+            document_id=document_id,
+            document_uuid=document_uuid,
+            document_type_label=label_by_id[document_type_id],
+            filename=label,
         )
-        return {"id": document_id, "label": label}
+        return {"id": document_id, "label": label, "uuid": document_uuid}
 
     async def upload_file(self, document_id: int, filename: str, content: bytes, action_name: str = "replace") -> None:
         # Real Mayan always creates a new DocumentFile/DocumentVersion on
