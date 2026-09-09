@@ -928,14 +928,21 @@ blast radius to deletions only, the same as it's always been. Four-task
 breakdown (P26-1 `document/db.py`'s new list/delete functions, P26-2
 `reconcile.py`'s new `ReconcileReport`/ghost-row detection/orphan-fix
 bug fix, P26-3 docs, P26-4 live verification against real drift)
-written into this file. **P26-1 is now done** — `document/db.py` has
-all seven new functions (three unfiltered list scans, the missing
-`get_customer_document_by_mayan_id`, three delete-by-`mayan_id`
-functions), 7 new tests (20 total in that file). Full unit suite (340
-tests) and `lint-imports` (10/10) both green. **Next: P26-2**
-(`reconcile.py`'s own rewrite — the new `ReconcileReport`
-dataclass/ghost-row/hidden-document detection, and the orphan-fix
-regression fix this phase exists to close).
+written into this file. **P26-1 and P26-2 are now done** —
+`document/db.py` has all seven new functions, and `reconcile.py`
+itself now has the `ReconcileReport` dataclass, ghost-row/hidden-document
+detection, and the orphan-fix regression fix this phase exists to
+close. **Two more real bugs caught while writing `reconcile.py`'s own
+tests, not assumed safe**: the table-dispatch dicts originally bound
+`document_db.*` function references at import time, which this file's
+own `monkeypatch.setattr(reconcile.document_db, ...)` convention
+couldn't reach — fixed with a lambda-wrapper indirection; and an
+orphaned document was also getting flagged `hidden` (pure noise, since
+it's getting trashed regardless) — fixed with an explicit exemption,
+locked in by a dedicated regression test. Full unit suite (352 tests,
+up from 340) and `lint-imports` (10/10) both green. **Next: P26-3**
+(`CLAUDE.md` + the `document-reconciliation` skill — document the
+actually-built two new drift categories).
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open still
@@ -6765,7 +6772,7 @@ not a new gap this phase introduces.
       call. Full unit suite (340 tests, up from 333) and `lint-imports`
       (10/10) both green.
 
-- [ ] **P26-2** — `reconcile.py`: `scan()` returns a new
+- [x] **P26-2** — `reconcile.py`: `scan()` returns a new
       `ReconcileReport` dataclass (`orphaned`, `stale_tags`, `ghost_rows`,
       `hidden`) instead of the current 2-tuple — `ghost_rows` computed
       by walking all three `document/db.py` tables via P26-1's new list
@@ -6793,6 +6800,43 @@ not a new gap this phase introduces.
       regression case this phase exists to close — trashing an orphan
       now also calls the matching delete-by-mayan-id function for its
       mirror row, not just `mayan_client.delete(...)`.
+      DONE: built exactly as designed — `ReconcileReport` dataclass,
+      ghost-row detection (walks all three tables via P26-1's new list
+      functions, checks each row's `mayan_id` against the one Mayan
+      scan already made for orphaned/stale_tags), hidden-document
+      detection (reverse direction, via each table's by-`mayan_id`
+      lookup), `fix()` extended with `ghost_rows`/`hidden` parameters,
+      and the orphan-fix regression fix (every orphan trash now also
+      deletes its mirror row via the same table-dispatch mapping).
+      **One real bug caught while writing this file's own tests, not
+      assumed safe**: the three table-dispatch dicts
+      (`_LIST_ALL_BY_TABLE`/`_GET_BY_MAYAN_ID_BY_TABLE`/
+      `_DELETE_BY_MAYAN_ID_BY_TABLE`) originally stored the
+      `document_db.*` function objects directly, which bind at
+      *import* time — `monkeypatch.setattr(reconcile.document_db, ...)`
+      (this file's own established mocking convention) can't reach a
+      reference already captured into a dict, so every test using them
+      would have silently exercised the real, un-mocked functions
+      instead. Fixed by wrapping each entry in a small lambda that
+      looks the attribute up on `document_db` fresh on every call,
+      matching how every other `document_service.<name>(...)`/
+      `mayan_client.<name>(...)` call in this file already works.
+      **A second, real design gap caught the same way**: without an
+      explicit exemption, a document already flagged `orphaned` was
+      also getting flagged `hidden` (its owner is gone, so of course it
+      has no Postgres mirror row either) — pure noise in the report,
+      not a second real problem, since it's getting trashed from Mayan
+      regardless of its Postgres status. Fixed by excluding
+      already-orphaned document ids from the hidden check, with a
+      dedicated regression test. `tests/unit/test_reconcile.py`
+      rewritten (25 tests, up from 13 — the 13 original updated for the
+      new `ReconcileReport`/4-parameter `fix()` shape, 12 new: ghost-row
+      detection/fix across all three tables, hidden-document
+      detection/never-fixed, the orphaned-not-also-hidden exemption,
+      the no-id-document exemption carried through to hidden too, and
+      the orphan-fix-also-deletes-mirror-row regression case). Full unit
+      suite (352 tests, up from 340) and `lint-imports` (10/10) both
+      green.
 
 - [ ] **P26-3** — `CLAUDE.md`'s "Document/database reconciliation"
       section and the `document-reconciliation` skill: remove the "not
@@ -6841,6 +6885,44 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P26-2 done)** — `reconcile.py` rewritten:
+  `scan()` now returns a `ReconcileReport` dataclass
+  (`orphaned`/`stale_tags`/`ghost_rows`/`hidden`) instead of a 2-tuple;
+  ghost-row detection walks all three `document/db.py` tables via
+  P26-1's new list functions and checks each row's `mayan_id` against
+  the one Mayan document scan already made; hidden-document detection
+  runs the reverse direction via each table's by-`mayan_id` lookup.
+  `fix()` gained `ghost_rows`/`hidden` parameters — deletes each ghost
+  row via the matching table's delete function, never touches `hidden`
+  at all — **and now also deletes the matching mirror row every time it
+  trashes an orphan**, closing this phase's own found-and-fixed bug (a
+  gap present in every orphan cleanup this tool has ever run).
+  **Two more real bugs caught while writing this file's own tests, not
+  assumed safe**: (1) the three table-dispatch dicts
+  (`_LIST_ALL_BY_TABLE`/`_GET_BY_MAYAN_ID_BY_TABLE`/
+  `_DELETE_BY_MAYAN_ID_BY_TABLE`) originally stored the `document_db.*`
+  function objects directly, binding at *import* time — this file's own
+  `monkeypatch.setattr(reconcile.document_db, ...)` convention can't
+  reach a reference already captured into a dict, so every test using
+  them would have silently exercised the real, un-mocked functions;
+  fixed by wrapping each entry in a lambda that looks the attribute up
+  on `document_db` fresh on every call, matching how every other
+  `document_service`/`mayan_client` call in this file already works;
+  (2) without an explicit exemption, an already-orphaned document was
+  also getting flagged `hidden` (its owner is gone, so naturally it has
+  no Postgres mirror row either) — pure report noise, not a second real
+  problem, since it's getting trashed from Mayan regardless of its
+  Postgres status; fixed by excluding already-orphaned document ids
+  from the hidden check, with a dedicated regression test proving it.
+  `tests/unit/test_reconcile.py` rewritten: 25 tests (up from 13) — the
+  13 original updated for the new signatures, 12 new covering ghost-row
+  detection/fix across all three tables, hidden-document
+  detection/never-fixed, both exemptions (orphaned-not-also-hidden,
+  no-id-document), and the orphan-fix-also-deletes-mirror-row
+  regression case. Full unit suite (352 tests, up from 340) and
+  `lint-imports` (10/10) both green. Next session: P26-3 (`CLAUDE.md` +
+  the `document-reconciliation` skill).
 
 - **2026-09-09 (P26-1 done)** — Added seven functions to
   `document/db.py`: `list_all_application_documents`/
