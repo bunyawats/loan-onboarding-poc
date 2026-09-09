@@ -860,25 +860,25 @@ accumulation per category (matching today's multi-document behavior);
 id stored as a separate `mayan_document_id UNIQUE` column — corrected
 from the user's original "document UUID" phrasing after confirming by
 grep that this codebase has never captured Mayan's real `uuid` field
-anywhere, only its plain integer `id`. **P24-1 through P24-3 are now
+anywhere, only its plain integer `id`. **P24-1 through P24-4 are now
 done** — `db/schema.sql` has all three new tables, `document/db.py`
 (new file) has every insert/upsert/read function this phase's preamble
-designed (13 new tests, real Postgres), and `document/service.py` has
-been rewritten so every read function (`list_documents`,
-`check_completeness`, `list_account_documents`, `list_customer_documents`,
-`has_id_photo`) genuinely queries Postgres only — proven with a
-Mayan-client double that raises on any attribute access, not just
-asserted — while every write function still calls Mayan first, then
-mirrors into Postgres. Full unit suite (329 tests) and `lint-imports`
-(10/10) both green; a full-codebase grep confirmed zero files outside
-`document/` needed any change. The live stack's own `db` volume is
-still untouched — real backfill deferred to P24-5. **Next: P24-4**
-(`CLAUDE.md`/`docs/diagrams/er-diagram.md` — document the built shape:
-`document/` no longer "no Postgres of its own," the eight-table "Data
-storage" section, the new `idgen`-importer, the three new ER
-relationships). See Phase 24's own preamble for the full design,
-including the new dual-write consistency risk this phase deliberately
-accepts and defers to a future `reconcile.py` extension.
+designed (13 new tests, real Postgres), `document/service.py` has been
+rewritten so every read function genuinely queries Postgres only
+(proven with a Mayan-client double that raises on any attribute
+access), and `CLAUDE.md`/`docs/diagrams/er-diagram.md` now describe
+the actually-built shape — including one real, pre-existing doc
+inaccuracy found and fixed along the way (a stale
+`promote_government_id_to_customer_photo` description that had drifted
+out of sync with the rest of the file). Full unit suite (329 tests) and
+`lint-imports` (10/10) both green throughout. The live stack's own `db`
+volume is still untouched — real backfill deferred to P24-5. **Next:
+P24-5** — the live migration and, at last, the actual proof this whole
+phase exists for: stop the real `mayan` container and confirm document
+listings still render correctly from Postgres alone. See Phase 24's
+own preamble for the full design, including the new dual-write
+consistency risk this phase deliberately accepts and defers to a
+future `reconcile.py` extension.
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open (see
@@ -6203,7 +6203,7 @@ own scope.
       `document.service` with unchanged signatures and unchanged
       `DocumentRef` return shape).
 
-- [ ] **P24-4** — `CLAUDE.md`: update `document/` module section (no
+- [x] **P24-4** — `CLAUDE.md`: update `document/` module section (no
       longer "No Postgres of its own" — describe the three new tables,
       the primary-source-of-truth read path, the write-ordering/
       accepted-drift-risk tradeoff, and `document/` joining the list of
@@ -6219,6 +6219,52 @@ own scope.
       changed during P24-1 through P24-3; `lint-imports` still green
       (the only new cross-module import is `document/` → `idgen/`,
       already an explicitly allowed exception).
+      DONE: `document/`'s module section rewritten — opening paragraph
+      no longer claims "No Postgres of its own," now describes the
+      three new tables, the primary-source-of-truth read path, the
+      Mayan-first-then-Postgres write ordering and the dual-write risk
+      it accepts, and `document/` joining the `idgen`-importers list;
+      per-function bullets annotated `(Phase 24, built)` wherever
+      behavior actually changed (`list_documents`, `check_completeness`,
+      `tag_application_documents`, `promote_government_id_to_customer_photo`,
+      `has_id_photo`, `generate_welcome_letter`, `upload_consent`,
+      `preview`/`preview_account_document`, `list_customer_documents`/
+      `list_account_documents`); closing line now also names
+      `document/db.py`. **One real, pre-existing inaccuracy found and
+      corrected along the way, unrelated to Phase 24 itself**: the
+      `promote_government_id_to_customer_photo` bullet still described
+      its *original* re-tag-in-place design ("one Mayan document,
+      findable from both nodes"), contradicting the already-correct
+      "genuine second Mayan document" description in this same file's
+      "Document metadata assignment lifecycle" section — the two had
+      drifted out of sync at some earlier point; fixed in place rather
+      than left silently wrong, flagged explicitly as a correction. Also
+      updated: "Data storage" (eight tables, not five; the FK-discipline
+      paragraph now names all three new tables; the id-prefix table
+      gained `APD-`/`ACD-`/`CUD-`; a new paragraph on
+      `mayan_document_id` having no `idgen`-style collision-retry, since
+      it's Mayan's own id, not app-generated); the module dependency
+      graph's `idgen`-importers note (now enumerates actual importers
+      by name instead of a vague "every other module" claim); "Document/
+      database reconciliation" (a new paragraph flagging that
+      `reconcile.py` doesn't yet cross-check the three new tables — a
+      deliberately deferred follow-up, not an oversight); the repo
+      layout tree (`document/` now shows `db.py`). `docs/diagrams/er-diagram.md`
+      updated to match: three new relationships
+      (`APPLICATIONS ||..o{ APPLICATION_DOCUMENT`,
+      `ACCOUNTS ||..o{ ACCOUNT_DOCUMENT`,
+      `CUSTOMERS ||..o{ CUSTOMER_DOCUMENT`) and three new entity blocks
+      in the Mermaid diagram, five new "Reading this diagram" bullets
+      explaining the accumulate-vs-update-in-place distinction and the
+      `mayan_document_id` design choice, and the stale "No relationship
+      line for Mayan documents" bullet (now false — these three tables
+      *do* have real relationship lines) rewritten to correctly scope
+      what's still Mayan-only (file bytes, the visual index tree) versus
+      what's now expressible in Postgres (document existence and
+      ownership). Header paragraphs updated from "five" to "eight"
+      tables throughout. `lint-imports` reconfirmed green (10/10, no
+      code changed this task — a pure documentation task, verified
+      anyway per the DoD's own instruction).
 
 - [ ] **P24-5** — Live migration + live-verification, same discipline
       every prior schema-adding phase's final task has used. Migrate the
@@ -6263,6 +6309,41 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P24-4 done)** — Documentation-only task, no code
+  changed. `CLAUDE.md`'s `document/` module section rewritten: the
+  opening paragraph no longer claims "No Postgres of its own," now
+  describes the three new tables, the primary-source-of-truth read
+  path, the Mayan-first-then-Postgres write ordering and its accepted
+  dual-write risk, and `document/` joining the `idgen`-importers list;
+  every function bullet whose behavior actually changed got a `(Phase
+  24, built)` annotation. **One real, pre-existing doc inaccuracy found
+  and corrected along the way, unrelated to Phase 24 itself**: the
+  `promote_government_id_to_customer_photo` bullet still described its
+  *original*, superseded re-tag-in-place design, contradicting the
+  already-correct "genuine second Mayan document" description already
+  sitting in this same file's "Document metadata assignment lifecycle"
+  section — the two had silently drifted apart at some earlier point;
+  fixed in place, flagged explicitly as a correction rather than
+  silently patched. Also updated: "Data storage" (eight tables, the
+  FK-discipline paragraph, the id-prefix table gaining `APD-`/`ACD-`/
+  `CUD-`, a new note on why `mayan_document_id` has no `idgen`-style
+  collision retry), the module dependency graph's `idgen`-importers
+  note (now names actual importers instead of a vague "every other
+  module" claim), "Document/database reconciliation" (a new paragraph
+  flagging `reconcile.py` doesn't yet cross-check the three new tables
+  — deliberately deferred, not an oversight), and the repo layout tree.
+  `docs/diagrams/er-diagram.md` gained three new relationships and
+  entity blocks, five new "Reading this diagram" bullets, and a
+  rewrite of the now-false "No relationship line for Mayan documents"
+  bullet (these three tables *do* have real relationship lines now —
+  only file bytes and the visual index tree remain Mayan-only).
+  `lint-imports` reconfirmed green (10/10). Next session: P24-5 — the
+  live migration (backfill every real existing Mayan document into the
+  correct one of the three new tables) and the actual live proof this
+  phase exists for: stop the real `mayan` container and confirm
+  document listings/completeness checks still render correctly from
+  Postgres alone.
 
 - **2026-09-09 (P24-3 done)** — Rewrote `document/service.py`: every
   read function (`list_documents`/`check_completeness`/

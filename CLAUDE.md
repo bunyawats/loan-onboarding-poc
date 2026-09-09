@@ -106,13 +106,17 @@ being a customer yet" below. Left off the diagram to keep it readable;
 the rule is stated explicitly in the bullet list below instead.
 
 **Also not drawn**: `idgen/`, a fifth leaf module (`customer/`,
-`account/`, `document/`, `workflow/`'s siblings) that every other
-module imports for `generate_id(prefix, length) -> str` — the
-human-readable primary keys described in "Data storage" below. Omitted
-from the diagram because it fans out to literally everything (every
-arrow above would grow a second, parallel arrow to `idgen/`), not
-because the edge is unusual; it's the plainest possible leaf
-dependency, a pure function with zero I/O and zero state.
+`account/`, `document/`, `workflow/`'s siblings) for
+`generate_id(prefix, length) -> str` — the human-readable primary keys
+described in "Data storage" below. Omitted from the diagram because
+it's the plainest possible leaf dependency, a pure function with zero
+I/O and zero state, not because the edge is unusual. **Every module
+that mints its own table's primary key imports it**: `customer/`,
+`account/`, `application/` originally; `document/` joined this list in
+Phase 24, once it got its own Postgres tables for the first time (see
+`document/`'s own module section) — `workflow/` never has, since it
+owns no Postgres table of its own (Temporal's own persistence is
+managed by the Temporal server container, not this module's code).
 
 **Built (Phase 18, P18-2, "Account closure" below)**: a sixth leaf
 module, `notifications/`, same shape as `idgen/` — promoted out of
@@ -923,9 +927,54 @@ data-integrity one.
 ### 6. `document/` — Document module
 
 The direct promotion of `mayan-edms-customer-archive`'s
-`mayan_client.py` + a document-service layer into a module of this app.
-No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
-"Data storage") is the only persistence behind it.
+`mayan_client.py` + a document-service layer into a module of this app,
+plus its own Postgres persistence (Phase 24, built — see below), the
+one thing this module went the longest without.
+
+**Own Postgres tables (Phase 24, built and live-verified)**: three new
+tables — `application_document`, `account_document`, `customer_document`
+(one per Mayan index level, owned exclusively by a new `document/db.py`,
+this module's first `db.py`) — are now the **primary source of truth**
+for "what documents exist," not a fallback cache. Every read function
+below (`list_documents`, `check_completeness`, `list_account_documents`,
+`list_customer_documents`, `has_id_photo`) queries `document/db.py`
+directly; Mayan is no longer touched at all on these paths. This closes
+a real, previously-undetectable gap — a Mayan outage used to mean this
+app couldn't even list what documents exist for an application/account/
+customer — and, as a genuine side effect, fixes the O(all documents in
+the Mayan instance)-per-call performance gap `_documents_matching` still
+has (Known Gaps below still documents that scan, now used only by
+`list_all_documents()` and `tag_application_documents()`'s own Mayan
+metadata loop — see those two bullets below for why those two
+deliberately keep scanning Mayan directly). Every write function still
+calls Mayan first (create/upload/attach-metadata, exactly as before —
+Mayan remains the system of record for actual file bytes and the visual
+Index Template tree staff browse), *then* mirrors into Postgres — this
+ordering is deliberate: a Postgres write failing after Mayan succeeds
+leaves a document "hidden" (invisible to every read until reconciled)
+rather than Postgres claiming a file that doesn't exist, the safer of
+the two failure modes. This is a genuinely new dual-write consistency
+risk (Mayan and Postgres still have no shared transaction, no cascade)
+— **not closed**, same "flag it, don't silently absorb it" treatment
+this file's Known Gaps already gives `reconcile.py`'s existing scope;
+extending `reconcile.py` to cross-check these three tables against
+Mayan too (not just the customer/account/application tables it checks
+today) is a deliberately deferred follow-up, not part of this phase.
+`account_document`/`customer_document` are unique on `(reference_id,
+category)` — a re-upload updates the row in place, matching Mayan's own
+document-versioning semantics for Consent/Welcome Letter/the
+customer-level Government ID copy; `application_document` has no such
+uniqueness (unlimited accumulation per category, matching the
+"a category is satisfied by one or more documents" rule below).
+Primary keys are the same app-minted `idgen` scheme every other table
+in this schema uses (`APD-`/`ACD-`/`CUD-` — see "Data storage") —
+`document/` joins the list of `idgen`-importing modules for the first
+time this phase. Mayan's own document id is stored as a separate
+`mayan_document_id INTEGER UNIQUE` column, **not a real UUID** — this
+codebase has never captured Mayan's actual `uuid` field anywhere;
+every caller (including every `preview(...)` route) has always been
+built around Mayan's plain integer `id`, which is what these tables key
+on too.
 
 - `service.upload(applicant_identifier, application_id, category, file,
   customer_id=None)` — create-document → upload-file
@@ -945,16 +994,23 @@ No Postgres of its own — Mayan's own dedicated Postgres/Redis (see
   through too when it's knowable at all (a returning applicant who
   already resolves to an existing customer), `None` for a brand-new
   one.
-- `service.list_documents(application_id)`.
+- `service.list_documents(application_id)` — **(Phase 24, built)**:
+  reads `document/db.py` directly, zero Mayan calls.
 - `service.check_completeness(application_id, product_type,
   exclude_categories=None) -> list[str]` (missing categories, empty if
   satisfied) — called by `application.service` at create/resubmit time.
-  **A category is satisfied by one or more documents, not exactly
+  **(Phase 24, built)**: reads `document/db.py` directly too, zero
+  Mayan calls — no more risk of the Index Template tree's async
+  rebuild lag ever mattering here, since a direct Postgres read was
+  never subject to it in the first place (that risk only ever applied
+  to reading the *tree*, CLAUDE.md's "Document hierarchy"). **A
+  category is satisfied by one or more documents, not exactly
   one** — a customer can upload three separate PDFs under "Bank
   Statements" and the gate is satisfied the same as if they'd uploaded
   one; `upload()` is safe to call repeatedly for the same
   `application_id`/`category`, each call creating a distinct Mayan
-  document, never overwriting a prior one. (This resolves "an
+  document (and a distinct `application_document` Postgres row),
+  never overwriting a prior one. (This resolves "an
   application can have multiple financial-proof documents" — no
   renaming, no new category: "Proof of Income" already works this way
   and always was meant to.) **`exclude_categories` (Phase 14, built)**:
@@ -986,7 +1042,12 @@ through the application flow:
   never looks outside `application_id`'s own documents, and re-attaching
   `customer_id` to the Government ID document a second time (once here,
   once via `promote_government_id_to_customer_photo`) is a harmless
-  idempotent no-op, not a conflict.
+  idempotent no-op, not a conflict. **(Phase 24, built)**: also calls
+  `document_db.set_application_document_provisioning(...)` once, after
+  the Mayan side succeeds — one `UPDATE` touching every
+  `application_document` row for this application at once, mirroring
+  the same `account_id`/`customer_id` this function already attaches
+  via Mayan metadata.
 - `service.promote_government_id_to_customer_photo(application_id,
   customer_id) -> None` — **called only from
   `application/activities.py`'s `persist_decision`**, as one more step
@@ -999,26 +1060,39 @@ through the application flow:
   original behavior, which unconditionally `raise`d `DocumentNotFound`
   in this case**; that assumed every approved application always has
   its own Government ID document, no longer true once reuse exists. If
-  one *does* exist (a fresh upload), it first strips `customer_id`
-  metadata from any *other* document already carrying it for this
-  customer (via `mayan_client.delete_metadata_entry`), then attaches
-  `customer_id` metadata to the new one (**re-tags, does not copy** —
-  one Mayan document, findable from both the application's node and the
-  customer's `id_photo` node once the index rebuilds) — enforcing
-  "exactly one current `id_photo` per customer" for real, which nothing
-  did before this (see "Returning-customer profile refresh and ID
-  reuse" above for why this is a correction of a real,
-  previously-unenforced gap, not new behavior this feature
-  introduces). Live-verified: promoting a second, fresh Government ID
-  upload for the same customer stripped the first document's
-  `customer_id` metadata entry while tagging the second.
+  one *does* exist (a fresh upload), it downloads the source file
+  content and creates a **genuine *second* Mayan document** carrying
+  the same content but tagged only with `customer_id`/
+  `applicant_identifier`/`category` — deliberately **no**
+  `application_id`/`account_id`, so it lives purely at the customer
+  level, sibling to (not nested under) the account/application
+  branches. **Corrected here from an earlier draft of this bullet**,
+  which had described this as a re-tag-in-place ("one Mayan document,
+  findable from both nodes") — that was this function's *original*
+  design, superseded by a direct design request per "Document metadata
+  assignment lifecycle" below (which already carried the corrected
+  description; this bullet had simply drifted out of sync with it).
+  Before creating the new copy, the customer's previous one (if any) is
+  trashed first (`DELETE /documents/{id}/`, Mayan's own reversible
+  soft-delete) — enforcing "exactly one current `id_photo` per
+  customer" for real. Live-verified: promoting a second, fresh
+  Government ID upload for the same customer trashed the first copy
+  while creating the second. **(Phase 24, built)**: both the "does a
+  Government ID document exist under this application" and "does the
+  customer already have a copy" lookups now read `document/db.py`
+  (Postgres) instead of scanning Mayan; the Postgres mirror is written
+  via one `document_db.upsert_customer_document(...)` call at the end
+  — its own `ON CONFLICT (customer_id, category) DO UPDATE` is what
+  replaces the old copy's row in place, so there's no separate Postgres
+  delete call needed the way there is on the Mayan side.
 - **(Phase 14, built)**: `service.has_id_photo(customer_id) -> bool` —
   **read-only**, a thin wrapper over `list_customer_documents(customer_id)`
   (any result *is* the `id_photo`, per the one-per-customer invariant
-  above). Called by `application.service.create_application` to decide
-  whether reuse is
-  even offerable, and by `bff_customer` to decide whether to show the
-  "already on file" choice at all.
+  above; **Phase 24, built**: that function now reads `document/db.py`
+  directly, so this needed no code change of its own to also become
+  Mayan-outage-safe). Called by `application.service.create_application`
+  to decide whether reuse is even offerable, and by `bff_customer` to
+  decide whether to show the "already on file" choice at all.
 - `service.generate_welcome_letter(applicant_identifier, account_id,
   customer_id, applicant_name, product_type, amount) -> DocumentRef` —
   **called only from `application/activities.py`'s `persist_decision`**,
@@ -1041,7 +1115,10 @@ through the application flow:
   `FakeMayanClient`-backed unit tests, since Mayan's own
   required-metadata enforcement is what actually catches an omission.
   A document created before this was fixed stays orphaned under `None`
-  — not retroactively backfilled.
+  — not retroactively backfilled. **(Phase 24, built)**: also calls
+  `document_db.upsert_account_document(...)` after the Mayan sequence
+  succeeds — always the insert branch in practice, since exactly one
+  Welcome Letter is ever generated per account.
 - `service.upload_consent(applicant_identifier, account_id, customer_id,
   file) -> DocumentRef` — **true Mayan document versioning, not a new
   document per call**: if the account already has a "consent" document,
@@ -1063,22 +1140,44 @@ through the application flow:
   `APPROVED`, plus `bff_backoffice`'s review dialog for staff to
   upload/replace on the customer's behalf — see both modules' sections
   below. Both write to the same document; a replace from either surface
-  is immediately visible from the other.
+  is immediately visible from the other. **(Phase 24, built)**: the
+  "does a document already exist" check now reads
+  `document_db.get_account_document_by_category(...)` instead of
+  scanning Mayan, and both branches converge on one
+  `document_db.upsert_account_document(...)` call at the end — on the
+  re-upload branch this genuinely updates the existing row in place
+  (same `account_document_id`, same `mayan_document_id` since Mayan
+  versioned the existing document rather than creating a new one, new
+  `filename`/`updated_at`).
 - `service.preview_account_document(account_id, document_id) ->
   DocumentStream` — the account-scoped sibling of `preview(application_id,
   document_id)`, needed because an account-level document (Consent,
   Welcome Letter) carries no `application_id` at all, so `preview`
   itself can never authorize a request for one. Shares the actual
   Mayan-streaming call with `preview` via a private `_stream_document`
-  helper; only the ownership check differs.
+  helper; only the ownership check differs. **(Phase 24, built)**: both
+  `preview` and `preview_account_document`'s ownership checks now read
+  `document/db.py`'s by-`mayan_document_id` lookups instead of a live
+  Mayan metadata fetch — the file itself still streams from Mayan
+  either way, unchanged, since Postgres holds no file bytes.
 - `service.list_customer_documents(customer_id) -> list[DocumentRef]`,
   `service.list_account_documents(account_id) -> list[DocumentRef]` —
   for staff/customer viewing (`id_photo`; `welcome_letter` + `consent`
-  respectively).
+  respectively). **(Phase 24, built)**: both now read `document/db.py`
+  directly — table identity itself is the disambiguator for
+  `list_customer_documents` now (a customer-level copy is a
+  `customer_document` row, full stop), replacing an older "carries
+  `customer_id` but neither `application_id` nor `account_id`"
+  heuristic that only existed because every document type used to
+  share one flat Mayan metadata search.
 
 Owns `scripts/setup_document_hierarchy.sh` (one-time, not idempotent)
 and the Mayan Index Template definitions (three — Customer/Account/
-Application Index, see "Document hierarchy" below).
+Application Index, see "Document hierarchy" below). **(Phase 24,
+built)**: also owns `document/db.py`, the only code touching
+`application_document`/`account_document`/`customer_document` — same
+"one `db.py` per owning module" convention `customer/`/`account/`/
+`application/` already follow.
 
 ### 7. `workflow/` — Workflow module
 
@@ -1302,24 +1401,31 @@ purpose-built identity problem — PRD §7.1).
 
 *(ER diagram: [`docs/diagrams/er-diagram.md`](docs/diagrams/er-diagram.md).)*
 
-**One application database, `loan_onboarding`**, holding all five
+**One application database, `loan_onboarding`**, holding all eight
 domain tables — `customers` (owned by `customer/`), `accounts` +
 `account_closure_requests` (both owned by `account/`, Phase 22),
 `applications` + `loan_apply_requests` (both owned by `application/`,
-Phase 23) — plus a separate `temporal` database for Temporal's own
-persistence, both in the **same Postgres container**. This is exactly
+Phase 23), `application_document` + `account_document` +
+`customer_document` (all three owned by `document/`, Phase 24) — plus
+a separate `temporal` database for Temporal's own persistence, both in
+the **same Postgres container**. This is exactly
 `review-approval-temporal`'s own two-database-one-container pattern
-(`db/init/*.sh` creates both), just with five app tables instead of
-one. Two of those five tables (`account_closure_requests`,
-`loan_apply_requests`) are 1:M/1:1 splits of another table *within the
-same owning module* — see each module's own section above for why;
-they still follow the "no real FKs" discipline below even though a
-cross-module coupling concern doesn't strictly apply to them.
+(`db/init/*.sh` creates both), just with eight app tables instead of
+one. Five of those eight tables (`account_closure_requests`,
+`loan_apply_requests`, and all three `document/`-owned tables) are
+either a 1:M/1:1 split of another table *within the same owning
+module*, or (the three `document/` tables) simply don't reference any
+other table's row directly at all — see each module's own section
+above for why; they still follow the "no real FKs" discipline below
+even though a cross-module coupling concern doesn't strictly apply to
+the same-module splits.
 
 **No foreign keys anywhere in this schema** — not just between
 `accounts.customer_id`/`accounts.application_id`/
 `applications.customer_id` and the tables they reference (the
-cross-module case), but also `account_closure_requests.account_id` and
+cross-module case, which `application_document.application_id`/
+`account_document.account_id`/`customer_document.customer_id` all join
+too, Phase 24), but also `account_closure_requests.account_id` and
 `loan_apply_requests.application_id` (same-module links to
 `accounts`/`applications` respectively) — deliberately, for a uniform
 reason even though only the cross-module case is about preventing
@@ -1336,7 +1442,9 @@ plain `UNIQUE` index — enforcing "at most one account per application"
 is a within-table constraint, not a cross-module join, so it doesn't
 raise the same concern a real FK would; `loan_apply_requests.application_id`
 is its own `PRIMARY KEY` for the same reason, a 1:1 constraint, not a
-join-enabling one.)
+join-enabling one; `account_document`/`customer_document`'s own unique
+indexes on `(reference_id, category)` are the same within-table-only
+kind of constraint, unrelated to the no-FK rule.)
 
 **Primary keys are short, human-readable, application-assigned
 strings — not database-generated `UUID`s.** Each entity type gets its
@@ -1349,18 +1457,30 @@ module, `idgen/` (see "Module dependency graph"):
 | `accounts.account_id` | `ACC-` | `ACC-019283746` |
 | `applications.application_id` | `APP-` | `APP-573920184` |
 | `account_closure_requests.closure_request_id` (Phase 22) | `ACR-` | `ACR-826326088` |
+| `application_document.application_document_id` (Phase 24) | `APD-` | `APD-104829371` |
+| `account_document.account_document_id` (Phase 24) | `ACD-` | `ACD-778213940` |
+| `customer_document.customer_document_id` (Phase 24) | `CUD-` | `CUD-330192847` |
 
 `idgen.service.generate_id(prefix, length) -> str` is a pure function
 (`secrets.choice` over `0-9`, no I/O) — every module that assigns one
 of these ids (`customer/db.py`, `account/db.py`, `application/service.py`,
-and `bff_customer/routes.py` for its provisional pre-mint) calls it
-directly and passes the result into its own `INSERT`; nothing reads a
-database default anymore. **Collision handling lives at each insert
-site, not inside `idgen`**: on a `UniqueViolationError` against the
-table's own primary key specifically (never a business-rule constraint
-like `ux_accounts_customer_active_product_type` or the
-`applicant_identifier` unique index), the caller regenerates the id and
-retries the insert, bounded at 10 attempts.
+`document/db.py` (Phase 24), and `bff_customer/routes.py` for its
+provisional pre-mint) calls it directly and passes the result into its
+own `INSERT`; nothing reads a database default anymore. **Collision
+handling lives at each insert site, not inside `idgen`**: on a
+`UniqueViolationError` against the table's own primary key specifically
+(never a business-rule constraint like
+`ux_accounts_customer_active_product_type`, the `applicant_identifier`
+unique index, or `account_document`/`customer_document`'s own
+`(reference_id, category)` unique indexes), the caller regenerates the
+id and retries the insert, bounded at 10 attempts. **One new wrinkle
+in Phase 24, not present in any earlier module's `db.py`**: the three
+new tables also carry a *second* uniqueness concern,
+`mayan_document_id` — but that column is never generated by this app
+(it's Mayan's own id, handed back from a `create_document` call), so
+there's no collision-retry loop for it; a real collision there would
+mean Mayan itself somehow reused an id, not something this app's own
+`idgen` call could ever cause.
 
 **This is a real, deliberate entropy tradeoff, not an oversight**: pure
 digits at length 9 is `10^9` (1 billion) values per entity type —
@@ -1394,7 +1514,14 @@ tags). Cascade-on-delete (deleting an app-owned document when *this
 app itself* deletes a customer/account/application) is deliberately not
 built — there is no delete operation for any of these three entities in
 this codebase today, and whether one should ever exist is an open
-product question, not a build gap. **Load the `document-reconciliation`
+product question, not a build gap. **Not extended for Phase 24**:
+`reconcile.py` still only cross-checks Mayan documents against
+`customers`/`accounts`/`applications`, not against the three new
+`document/`-owned tables (`application_document`/`account_document`/
+`customer_document`) — those introduce their own, separate dual-write
+drift risk (see `document/`'s own module section above), which this
+tool doesn't detect yet. A deliberately deferred follow-up, not an
+oversight. **Load the `document-reconciliation`
 skill** for the full orphaned-vs-stale-tag distinction and the live
 27-document verification sweep.
 
@@ -1485,7 +1612,10 @@ loan-onboarding-poc/
     │                          # `loan_apply_requests` tables (Phase 23)
     ├── document/
     │   ├── mayan_client.py
-    │   └── service.py
+    │   ├── service.py
+    │   └── db.py               # built, Phase 24 -- the ONLY code touching
+    │                          # application_document/account_document/
+    │                          # customer_document
     ├── workflow/
     │   ├── workflows.py
     │   ├── worker.py            # bootstrap fn taking an activities list --

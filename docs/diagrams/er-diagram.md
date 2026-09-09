@@ -1,25 +1,33 @@
 # ER diagram — `loan_onboarding` database
 
 Source of truth: [`db/schema.sql`](../../db/schema.sql). This covers
-the five Postgres tables only — Mayan's own documents live in a
-completely separate database (`mayan-db`, not `loan_onboarding`; see
-`CLAUDE.md`'s "Data storage") and aren't part of this diagram. For how
-documents associate to these entities, see `CLAUDE.md`'s "Document
-hierarchy" section.
+the eight Postgres tables only — Mayan's own *file content* still lives
+in a completely separate database (`mayan-db`, not `loan_onboarding`;
+see `CLAUDE.md`'s "Data storage"), never part of this diagram. **What
+changed in Phase 24**: the three `*_DOCUMENT` tables below are `document/`'s
+own real Postgres persistence — the primary source of truth for "what
+documents exist," not just Mayan metadata anymore (see `CLAUDE.md`'s
+`document/` module section) — so document *existence and ownership* now
+genuinely is expressible here, even though the actual file bytes still
+aren't. For the parts of the document lifecycle that remain
+Mayan-only (the visual Index Template tree, file content itself), see
+`CLAUDE.md`'s "Document hierarchy" section.
 
 **Every relationship below is dashed deliberately** — none of them are
 real foreign keys. `CLAUDE.md`'s "Data storage" explains why: a
 same-database FK would make it trivially easy to write a query that
 joins across module boundaries directly, which is exactly the coupling
-the module split (`customer/`, `account/`, `application/` each owning
-their own tables) exists to prevent — including the two same-module
-splits below (`ACCOUNTS`/`ACCOUNT_CLOSURE_REQUESTS`,
-`APPLICATIONS`/`LOAN_APPLY_REQUESTS`), which follow the same "no FKs,
-anywhere" rule uniformly even though a cross-module coupling concern
-doesn't strictly apply to them. Every one of these ids is resolved only
-through the owning module's `service.py` — never a SQL join, except
-`application/db.py`'s and `account/db.py`'s own internal `LEFT JOIN`s
-between their respective table pairs, which stay inside those modules.
+the module split (`customer/`, `account/`, `application/`, `document/`
+each owning their own tables) exists to prevent — including the two
+same-module splits (`ACCOUNTS`/`ACCOUNT_CLOSURE_REQUESTS`,
+`APPLICATIONS`/`LOAN_APPLY_REQUESTS`) and the three `document/`-owned
+tables (Phase 24), which follow the same "no FKs, anywhere" rule
+uniformly even though a cross-module coupling concern doesn't strictly
+apply to the two same-module splits. Every one of these ids is resolved
+only through the owning module's `service.py` — never a SQL join,
+except `application/db.py`'s and `account/db.py`'s own internal `LEFT
+JOIN`s between their respective table pairs, which stay inside those
+modules.
 
 ```mermaid
 erDiagram
@@ -28,6 +36,9 @@ erDiagram
     APPLICATIONS ||..o| ACCOUNTS : "ACCOUNTS.application_id (account.service.create_account, exactly once, at terminal APPROVED)"
     ACCOUNTS ||..o{ ACCOUNT_CLOSURE_REQUESTS : "one row per closure request against this account (Phase 22, 1:M)"
     APPLICATIONS ||..o| LOAN_APPLY_REQUESTS : "onboarding-workflow tracking, joined in via LEFT JOIN (Phase 23, 1:1)"
+    APPLICATIONS ||..o{ APPLICATION_DOCUMENT : "document.service.upload -- unlimited per category (Phase 24, 1:M)"
+    ACCOUNTS ||..o{ ACCOUNT_DOCUMENT : "generate_welcome_letter / upload_consent -- at most one per category (Phase 24, 1:M)"
+    CUSTOMERS ||..o{ CUSTOMER_DOCUMENT : "promote_government_id_to_customer_photo -- at most one per category (Phase 24, 1:M)"
 
     CUSTOMERS {
         string customer_id PK "CUS- + random 9-digit number, app-assigned via idgen"
@@ -84,6 +95,42 @@ erDiagram
         text manager_comment
         timestamptz manager_decided_at
         text risk_tier "nullable -- LOW | MEDIUM | HIGH; built Phase 21, set only for an auto-decided LOW/HIGH outcome, never for MEDIUM or a human decision"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    APPLICATION_DOCUMENT {
+        string application_document_id PK "APD- + random 9-digit number, app-assigned via idgen (Phase 24)"
+        int mayan_document_id UK "Mayan's own plain integer document id -- NOT a real UUID, see CLAUDE.md's document/ section"
+        string application_id "opaque, NOT a FK -- unlimited rows per (application_id, category), no uniqueness here"
+        text applicant_identifier
+        text category "Government ID | Proof of Income | Bank Statements | Credit Report | product-specific"
+        text filename
+        string account_id "opaque, NOT a FK -- nullable, set in bulk by tag_application_documents on approval"
+        string customer_id "opaque, NOT a FK -- nullable, set in bulk by tag_application_documents on approval"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    ACCOUNT_DOCUMENT {
+        string account_document_id PK "ACD- + random 9-digit number, app-assigned via idgen (Phase 24)"
+        int mayan_document_id UK "Mayan's own plain integer document id"
+        string account_id "opaque, NOT a FK -- UNIQUE together with category (at most one current copy per category)"
+        text applicant_identifier
+        text customer_id "opaque, NOT a FK"
+        text category UK "'Welcome Letter' | 'Consent' -- UNIQUE together with account_id"
+        text filename
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    CUSTOMER_DOCUMENT {
+        string customer_document_id PK "CUD- + random 9-digit number, app-assigned via idgen (Phase 24)"
+        int mayan_document_id UK "Mayan's own plain integer document id"
+        string customer_id "opaque, NOT a FK -- UNIQUE together with category (at most one current copy per category)"
+        text applicant_identifier
+        text category UK "always 'Government ID' today, kept general -- UNIQUE together with customer_id"
+        text filename
         timestamptz created_at
         timestamptz updated_at
     }
@@ -148,10 +195,41 @@ erDiagram
   `LEFT JOIN`s the two tables for exactly this reason — an inner `JOIN`
   would make the application vanish from every list the moment this
   row is gone, defeating the whole point of the mirror.
-- **No relationship line for Mayan documents** — `id_photo` (customer),
-  `Welcome Letter`/`Consent` (account), and the submission-gate
-  categories (application) all live in Mayan, associated by metadata
-  tags, not by anything a Postgres FK or this ER diagram could express.
+- **`APPLICATIONS ||..o{ APPLICATION_DOCUMENT` (built, Phase 24)** —
+  one application, zero or many uploaded documents (Government ID,
+  Proof of Income, Bank Statements, Credit Report, product-specific
+  categories). **No uniqueness beyond `mayan_document_id`** — a
+  category is satisfied by one or more documents (three separate Bank
+  Statement PDFs all count), matching `document.service.check_completeness`'s
+  own rule; `account_id`/`customer_id` start `NULL` and are set on
+  every row for the application at once, in bulk, on approval
+  (`tag_application_documents`).
+- **`ACCOUNTS ||..o{ ACCOUNT_DOCUMENT` (built, Phase 24)** — one
+  account, zero or many documents, but really at most two at a time in
+  practice (`Welcome Letter`, `Consent`) — the `(account_id, category)`
+  unique index enforces "at most one *current* row per category," so a
+  re-upload updates the existing row in place (mirroring Mayan's own
+  document-versioning semantics for these two categories) rather than
+  accumulating like `APPLICATION_DOCUMENT` does.
+- **`CUSTOMERS ||..o{ CUSTOMER_DOCUMENT` (built, Phase 24)** — one
+  customer, zero or one document in practice (always `Government ID`
+  today, the customer-level identity-photo copy created by
+  `promote_government_id_to_customer_photo` — a genuine second Mayan
+  document, not the original application copy, see `CLAUDE.md`'s
+  "Document metadata assignment lifecycle"). Same update-in-place
+  shape as `ACCOUNT_DOCUMENT`, via the `(customer_id, category)` unique
+  index — a fresh Government ID promotion replaces the row (and the
+  underlying Mayan document) in place rather than accumulating.
+- **These three tables are the *primary source of truth* for "what
+  documents exist," not a cache** (`CLAUDE.md`'s `document/` module
+  section) — every `document.service` read function queries them
+  directly; Mayan is consulted only for actual file bytes and the
+  separate, purely-visual Index Template tree staff browse (still not
+  expressible in this diagram — a document's *placement in that tree*
+  has no Postgres row of its own, only its existence and ownership
+  do). `mayan_document_id` is deliberately Mayan's own plain integer
+  `id`, not a real UUID — this codebase has never captured Mayan's
+  actual `uuid` field anywhere.
 - **`ACCOUNTS.product_type` isn't just descriptive — it's constrained.**
   A customer's `ACTIVE` accounts may never repeat a `product_type` (a
   `CLOSED` and a new `ACTIVE` `personal_loan` account can coexist, two
