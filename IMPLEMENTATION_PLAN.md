@@ -860,17 +860,23 @@ accumulation per category (matching today's multi-document behavior);
 id stored as a separate `mayan_document_id UNIQUE` column — corrected
 from the user's original "document UUID" phrasing after confirming by
 grep that this codebase has never captured Mayan's real `uuid` field
-anywhere, only its plain integer `id`. **P24-1 is now done** —
-`db/schema.sql` has all three new tables, verified against a
-disposable scratch container (schema applies cleanly, the two
+anywhere, only its plain integer `id`. **P24-1 and P24-2 are now done**
+— `db/schema.sql` has all three new tables (verified against a
+disposable scratch container: schema applies cleanly, the two
 update-in-place unique indexes fire correctly, `application_document`'s
-deliberate lack of uniqueness confirmed too — see P24-1's own DONE
-note). **Next: P24-2** (`document/db.py`, the new file backing these
-tables — insert/upsert/read functions, PK-collision-retry loop, same
-per-module convention as `customer/db.py`/`account/db.py`/
-`application/db.py`). See Phase 24's own preamble for the full design,
-including the new dual-write consistency risk this phase deliberately
-accepts and defers to a future `reconcile.py` extension.
+deliberate lack of uniqueness confirmed too), and `document/db.py` (new
+file) has every insert/upsert/read function this phase's preamble
+designed, backed by 13 new tests against the real `loan_onboarding_test`
+database (now migrated with the three new tables — the live stack's own
+`db` volume is still untouched, real backfill deferred to P24-5). Full
+unit suite (324 tests) and `lint-imports` (10/10) both green — see
+P24-1/P24-2's own DONE notes for the full verification trace. **Next:
+P24-3** (`document/service.py` — rewrite every read function to query
+`document/db.py` only, add the Postgres-mirror write after each
+existing Mayan write, per this phase's Mayan-first write-ordering
+rule). See Phase 24's own preamble for the full design, including the
+new dual-write consistency risk this phase deliberately accepts and
+defers to a future `reconcile.py` extension.
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open (see
@@ -6022,7 +6028,7 @@ own scope.
       without `-i`) while running the verification SQL — worked around
       with `-i`, not a schema issue.
 
-- [ ] **P24-2** — `document/db.py` (new file): lazily-initialized pool,
+- [x] **P24-2** — `document/db.py` (new file): lazily-initialized pool,
       same per-module convention as `customer/db.py`/`account/db.py`/
       `application/db.py`. `insert_application_document(...)` —
       idgen-mint + PK-collision-retry loop, identical shape to
@@ -6058,6 +6064,47 @@ own scope.
       a second row; `application_document` accepts two rows for the same
       `(application_id, category)`; `set_application_document_provisioning`
       updates every row for an application in one call.
+      DONE: `document/db.py` built exactly as designed —
+      `insert_application_document` (idgen-mint + PK-collision-retry
+      loop, identical shape to `account/db.py`'s `create()`),
+      `set_application_document_provisioning` (one `UPDATE` touching
+      every row for an application at once), `upsert_account_document`/
+      `upsert_customer_document` (`INSERT ... ON CONFLICT (reference_id,
+      category) DO UPDATE`, wrapped in the same PK-collision-retry loop
+      as `account/db.py`'s `create_closure_request()`, catching
+      `UniqueViolationError` only on the primary-key constraint
+      specifically), plus all seven read functions
+      (`get_application_documents`, `get_application_document_by_mayan_id`,
+      `get_account_documents`, `get_account_document_by_category`,
+      `get_account_document_by_mayan_id`, `get_customer_documents`,
+      `get_customer_document_by_category`). New
+      `tests/unit/document/test_db.py` (13 tests, real Postgres —
+      `tests/unit/document/conftest.py` added the same non-autouse
+      `_clean_document_tables` fixture shape
+      `tests/unit/application/conftest.py` already establishes, since
+      this package also holds `test_service.py`/`test_mayan_client.py`,
+      neither of which needs Postgres yet as of this task) prove every
+      DoD claim for real: a normal `insert_application_document` round
+      trip; two rows accepted for the same `(application_id, category)`
+      pair with both surviving in `get_application_documents`;
+      `set_application_document_provisioning` updating every row for
+      one application in a single call while a different application's
+      own row stays untouched; `upsert_account_document`/
+      `upsert_customer_document` re-uploads updating the *same* row
+      in place (identical `account_document_id`/`customer_document_id`,
+      new `mayan_document_id`/`filename`/`updated_at`) rather than
+      inserting a second one, confirmed by `get_account_documents`/
+      `get_customer_documents` still returning exactly one row
+      afterward. Migrated `loan_onboarding_test` (the full
+      `db/schema.sql` re-applied — the five pre-existing tables' own
+      `CREATE TABLE`/`CREATE INDEX` statements errored as expected
+      since they already existed, the three new ones applied cleanly)
+      to run these against, same "migrate the test database, not the
+      live stack" discipline P23-2 already established — the live
+      stack's own `db` volume is untouched, real backfill deferred to
+      P24-5. Full unit suite (324 tests, 13 new) and `lint-imports`
+      (10/10, `document/` → `idgen/` the only new edge, already an
+      explicitly allowed exception) both green.
 
 - [ ] **P24-3** — `document/service.py`: rewrite `list_documents`/
       `check_completeness`/`list_account_documents`/
@@ -6159,6 +6206,34 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P24-2 done)** — Built `document/db.py` (this module's
+  first-ever `db.py`): `insert_application_document` (idgen-mint +
+  PK-collision-retry, same shape `account/db.py`'s `create()` already
+  uses), `set_application_document_provisioning` (one `UPDATE` for
+  every row under an application at once), `upsert_account_document`/
+  `upsert_customer_document` (`ON CONFLICT (reference_id, category) DO
+  UPDATE`, wrapped in the same PK-collision-retry loop
+  `create_closure_request()` already establishes), and seven read
+  functions including the two by-`mayan_document_id` lookups P24-3
+  will use for `preview`/`preview_account_document`'s ownership check.
+  New `tests/unit/document/conftest.py` (a non-autouse
+  `_clean_document_tables` fixture, same shape
+  `tests/unit/application/conftest.py` already uses, since this
+  package's `test_service.py`/`test_mayan_client.py` don't need
+  Postgres yet) and `tests/unit/document/test_db.py` (13 tests) — all
+  four of P24-1's own DoD claims proven for real, plus the re-upload
+  behavior each upsert function's whole design point is (same row
+  updated in place, confirmed via the returned primary key staying
+  identical across two calls). Migrated `loan_onboarding_test` by
+  re-applying the full `db/schema.sql` (the five pre-existing tables'
+  statements errored as expected, harmless — the three new ones applied
+  cleanly), same "migrate the test database, not the live stack"
+  discipline P23-2 already established. Full unit suite (324 tests, up
+  from 311) and `lint-imports` (10/10) both green. Next session: P24-3
+  (`document/service.py`'s rewrite — the actual primary-source-of-truth
+  read-path switch, plus the Mayan-then-Postgres write-ordering this
+  phase's preamble specifies).
 
 - **2026-09-09 (P24-1 done)** — `db/schema.sql` gained
   `application_document`/`account_document`/`customer_document` exactly
