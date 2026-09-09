@@ -911,19 +911,34 @@ to exactly 96/26/6). Full unit suite (333 tests) and `lint-imports`
 references to the old `mayan_document_id` name anywhere in the
 codebase or docs.
 
-**Next: this plan's own backlog is empty again.** Two small,
-non-blocking items remain from earlier phases, neither urgent: the
-`WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
-added to `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill;
-`reconcile.py` doesn't yet cross-check the three new Phase 24 tables
-against Mayan (a deliberately deferred follow-up, documented in both
-`CLAUDE.md`'s "Document/database reconciliation" and this phase's own
-preamble, not an oversight). The live `nats`/`temporal`/`db`/
-`mayan`/`risk-adapter`/`krakend`/`mock-risk-engine`/`worker-workflow`/
-`worker-activity`/`app` containers were all left running, all on
-current Phase 25 code, live database fully migrated and backfilled — a
-fresh session can pick up any future phase directly against this
-already-current stack.
+**Phase 26 (Extend reconcile.py to cross-check the three document
+tables) added after Phase 25 closed — design-only, no code written
+yet.** Requested directly by the user, closing the exact follow-up
+Phase 24/25 both flagged as deliberately deferred. **A second, real gap
+found while designing this, confirmed with the user before proceeding
+(not a separate ask)**: `reconcile.py`'s existing `fix()` has always
+trashed an orphaned Mayan document without deleting its matching
+`document/db.py` mirror row — since Phase 24 made those tables
+primary, every past orphan cleanup has left a "ghost" row behind; this
+phase fixes that alongside the new cross-check. Confirmed the fix
+behavior for the new "hidden document" case (a real Mayan document
+with no Postgres mirror row) via `AskUserQuestion`: report-only, `--fix`
+never auto-recreates it — the recommended option, keeping `--fix`'s
+blast radius to deletions only, the same as it's always been. Four-task
+breakdown (P26-1 `document/db.py`'s new list/delete functions, P26-2
+`reconcile.py`'s new `ReconcileReport`/ghost-row detection/orphan-fix
+bug fix, P26-3 docs, P26-4 live verification against real drift)
+written into this file. **Next: P26-1.**
+
+Two small, non-blocking items remain from earlier phases, neither
+urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open still
+hasn't been added to `CLAUDE.md`'s Known Gaps / the
+`known-gaps-and-gotchas` skill; and Phase 26 itself, just added. The
+live `nats`/`temporal`/`db`/`mayan`/`risk-adapter`/`krakend`/
+`mock-risk-engine`/`worker-workflow`/`worker-activity`/`app` containers
+were all left running, all on current Phase 25 code, live database
+fully migrated and backfilled — a fresh session can pick up Phase 26
+directly against this already-current stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -6650,6 +6665,151 @@ separate, later decision.
 
 ---
 
+## Phase 26 — Extend reconcile.py to cross-check the three document tables
+
+**Depends on:** Phase 24 (`document/db.py`, `application_document`/
+`account_document`/`customer_document`), Phase 25 (`mayan_id`/
+`mayan_document_uuid` — this phase's new checks are keyed on `mayan_id`).
+**Not part of the original build-out** — requested directly by the
+user, closing the exact deliberately-deferred follow-up both `CLAUDE.md`'s
+"Document/database reconciliation" section and Phase 24's own preamble
+already named: `reconcile.py` today only cross-checks Mayan documents
+against `customers`/`accounts`/`applications` — it has never known the
+three `document/`-owned tables exist.
+
+**A second, real gap found while designing this, not part of the
+original ask, confirmed with the user before proceeding**:
+`reconcile.py`'s existing `fix()` trashes an orphaned Mayan document
+(its `application_id`/`account_id` no longer resolves) but never
+touches the matching row in `application_document`/`account_document`/
+`customer_document` — since Phase 24 made those tables the *primary*
+read source, every orphan `--fix` has ever cleaned up has been leaving
+a "ghost" row behind: a document/db.py row that still confidently
+points at a `mayan_id` that no longer exists in Mayan at all. This
+phase fixes that alongside adding the new cross-check, not as a
+separate, later task — leaving it unfixed would mean the new
+ghost-row detector immediately flags every orphan this tool has ever
+fixed.
+
+**Two new drift categories, confirmed with the user via
+`AskUserQuestion`**:
+
+1. **Ghost mirror row** — a `document/db.py` row whose `mayan_id` no
+   longer has a matching Mayan document (either because Mayan's own
+   document was deleted directly, outside this app, or — until this
+   phase's own fix — because `reconcile.py`'s orphan cleanup left it
+   behind). **`--fix` deletes it** — a `DELETE` on a row that's already
+   lying about a document that doesn't exist is squarely the same kind
+   of cleanup this tool has always done, not a new class of mutation.
+2. **Hidden document** — a real Mayan document with no matching
+   `document/db.py` row at all — the write-ordering risk `CLAUDE.md`'s
+   `document/` module section already names as an accepted, previously
+   *undetected* dual-write consistency gap (Postgres write failing
+   after Mayan succeeds). **`--fix` deliberately does NOT auto-recreate
+   it** — the recommended, user-confirmed choice: `--fix` only ever
+   deletes in this tool (trash orphans, strip stale tags, remove ghost
+   rows), never performs a new class of mutation (a Postgres `INSERT`).
+   A hidden document shows up in every `--report`/`--fix` run's report
+   until a human resolves it by hand — keeping this tool's blast radius
+   exactly what it's always been.
+
+**Classification reuses the same three-way split this codebase already
+uses twice** (the original P24-5 live backfill script, and
+`list_customer_documents`'s own pre-Phase-24 heuristic): a document's
+`application_id`/`account_id`/`customer_id` shape (from its own Mayan
+metadata, already returned by `document.service.list_all_documents()`)
+says which of the three tables it belongs in. A document with none of
+the three ids is untouched by this phase's new checks, same as it
+already was invisible to the *existing* orphan/stale-tag checks —
+not a new gap this phase introduces.
+
+- [ ] **P26-1** — `document/db.py`: add the read/delete functions
+      `reconcile.py` needs that don't exist yet — three unfiltered scans
+      (`list_all_application_documents()`, `list_all_account_documents()`,
+      `list_all_customer_documents()`, mirroring `document.service.list_all_documents()`'s
+      role on the Mayan side), one missing by-id lookup
+      (`get_customer_document_by_mayan_id(mayan_id)` — `application_document`/
+      `account_document` already have this from Phase 24, `customer_document`
+      never needed it until now), and three delete-by-id functions
+      (`delete_application_document_by_mayan_id`,
+      `delete_account_document_by_mayan_id`,
+      `delete_customer_document_by_mayan_id`).
+      DoD: new tests in `tests/unit/document/test_db.py` (real Postgres)
+      prove each list function returns every row regardless of owner id
+      (unlike the existing owner-scoped `get_*_documents` functions),
+      `get_customer_document_by_mayan_id` round-trips like its two
+      siblings already do, and each delete function actually removes
+      the row (confirmed via a follow-up `get_*_documents` call
+      returning empty) without touching an unrelated row.
+
+- [ ] **P26-2** — `reconcile.py`: `scan()` returns a new
+      `ReconcileReport` dataclass (`orphaned`, `stale_tags`, `ghost_rows`,
+      `hidden`) instead of the current 2-tuple — `ghost_rows` computed
+      by walking all three `document/db.py` tables via P26-1's new list
+      functions and checking each row's `mayan_id` against the set of
+      real Mayan document ids `list_all_documents()` already returns;
+      `hidden` computed the reverse way, checking each real Mayan
+      document against the matching table's by-`mayan_id` lookup (per
+      this phase's own classification rule). `fix()` gains a
+      `ghost_rows` parameter — deletes each one via the matching
+      P26-1 delete function — **and is changed to also delete the
+      matching mirror row every time it trashes an orphan** (this
+      phase's own found-and-fixed bug, not a separate task). `hidden`
+      is passed to `fix()` for reporting purposes only — never mutated.
+      `_print_report`/`main()` updated for the new report shape.
+      DoD: `tests/unit/test_reconcile.py`'s existing 12 tests updated
+      for the new `ReconcileReport`/`fix()` signature (still
+      function-boundary-mocked, no real Postgres/Mayan — same
+      convention this file already uses); new coverage proves a ghost
+      row (`document/db.py` row present, `mayan_id` absent from the
+      mocked Mayan document list) is detected and, under `--fix`,
+      deleted via the correct table's delete function; a hidden
+      document (Mayan document present, no matching mocked
+      `document/db.py` row) is detected but **never** triggers a
+      delete/insert call of any kind, `--fix` or not; and the
+      regression case this phase exists to close — trashing an orphan
+      now also calls the matching delete-by-mayan-id function for its
+      mirror row, not just `mayan_client.delete(...)`.
+
+- [ ] **P26-3** — `CLAUDE.md`'s "Document/database reconciliation"
+      section and the `document-reconciliation` skill: remove the "not
+      extended for Phase 24" flag (both currently say this), describe
+      the two new drift categories, the classification rule, and the
+      report-only-for-hidden-documents design choice (with the
+      real reasoning: `--fix` never performs a new class of mutation).
+      DoD: both docs describe the actually-built shape; `lint-imports`
+      unaffected (no new cross-module import — `reconcile.py` already
+      imports `document/db.py` transitively via `document.service`, and
+      this phase's own direct `document_db` import is the same
+      leaf-reaching pattern `reconcile.py` already uses for every other
+      domain module).
+
+- [ ] **P26-4** — Live-verify against the real stack. First, run
+      `python -m loan_onboarding.reconcile` (report mode) and confirm
+      it reports zero drift of any kind — the live stack's three
+      document tables were fully, correctly backfilled in P24-5/P25-5,
+      so this is the expected clean baseline, not assumed. Then
+      deliberately construct one of each new drift category against
+      real data (a disposable, throwaway test document for each, not
+      real production-meaningful data) — trash one real Mayan document
+      directly via `mayan_client.delete(...)` without touching its
+      Postgres row (a ghost row), and delete one real `document/db.py`
+      row directly via `psql` without touching its Mayan document (a
+      hidden document) — confirm `--report` correctly lists both, then
+      run `--fix` and confirm the ghost row is gone while the hidden
+      document is still reported afterward (never auto-fixed). Restore
+      or clean up every artifact this verification creates; also
+      re-verify the *existing* orphan-cleanup path still works end to
+      end on the live stack (trash both the Mayan document and its
+      Postgres row together, same as `--fix` now does automatically).
+      DoD: live `--report`/`--fix` output confirmed correct for all
+      four categories (orphaned, stale tag, ghost row, hidden) against
+      the real stack, not just unit-tested; the live stack's document
+      table counts confirmed back to the clean 96/26/6 baseline
+      afterward, no leftover test artifacts.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -6658,6 +6818,37 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (Phase 26 added, design-only, no code written)** —
+  Requested directly by the user: extend `reconcile.py` to cross-check
+  `application_document`/`account_document`/`customer_document` against
+  Mayan, closing the exact follow-up both `CLAUDE.md` and Phase 24's own
+  preamble already flagged as deliberately deferred. **A second, real
+  bug found while designing this, not part of the original ask**:
+  `reconcile.py`'s `fix()` has always trashed an orphaned Mayan document
+  (found via the existing customer/account/application check) without
+  ever deleting the matching `document/db.py` mirror row — since Phase
+  24 made those tables the primary read source, every past orphan
+  cleanup has silently left a "ghost" row behind, pointing at a
+  now-trashed document. Raised this back to the user rather than
+  silently deciding, since it also determines what the new drift-check
+  should do about the analogous "hidden document" case (a real Mayan
+  document with no Postgres mirror row at all — the Phase 24
+  write-ordering risk, previously undetected): confirmed via
+  `AskUserQuestion` that `--fix` should only ever delete, never
+  auto-recreate — a hidden document stays report-only until a human
+  resolves it, keeping this tool's mutation surface exactly what it's
+  always been (deletions only, never a new `INSERT`). The orphan-cleanup
+  bug itself *is* being fixed as part of this phase (not deferred
+  again), since leaving it would mean the new ghost-row detector
+  immediately flags every orphan this tool has ever cleaned up. Four
+  tasks written into this file: P26-1 (`document/db.py`'s three new
+  unfiltered list functions, one missing by-id lookup, three
+  delete-by-id functions), P26-2 (`reconcile.py`'s new `ReconcileReport`
+  dataclass, ghost-row/hidden-document detection, the orphan-fix
+  regression fix), P26-3 (`CLAUDE.md` + the `document-reconciliation`
+  skill), P26-4 (live verification against real, deliberately
+  constructed drift of all four kinds). Next session: P26-1.
 
 - **2026-09-09 (P25-5 done — Phase 25 fully complete)** — Migrated the
   live `loan_onboarding` database in the exact designed order: added
