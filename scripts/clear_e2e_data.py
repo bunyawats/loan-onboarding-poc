@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Clears ALL loan-onboarding data across the three independent systems
-that hold it -- Postgres (applications/accounts/customers), Temporal
-(every LoanApplicationWorkflow execution, running or completed), and
-Mayan (every document, trashed AND permanently purged). Companion to
-`generate_real_e2e_data.py`, which only ever creates data -- clearing is
-a separate, deliberate step so review data survives until you ask for
-this.
+that hold it -- Postgres (all eight tables: `customers`/`accounts`/
+`account_closure_requests`/`applications`/`loan_apply_requests`/
+`application_document`/`account_document`/`customer_document`),
+Temporal (every LoanApplicationWorkflow execution, running or
+completed), and Mayan (every document, trashed AND permanently purged).
+Companion to `generate_real_e2e_data.py`, which only ever creates data
+-- clearing is a separate, deliberate step so review data survives
+until you ask for this.
 
 Talks to each system directly (Postgres via asyncpg, Temporal via the
 temporalio SDK, Mayan via its REST API) -- no `docker exec`, no
@@ -68,11 +70,38 @@ def log(msg: str) -> None:
 
 
 async def clear_postgres() -> dict[str, int]:
+    """No real FKs anywhere in this schema (CLAUDE.md's "Data storage"),
+    so table order below is purely cosmetic, not a dependency
+    requirement -- every `DELETE` is independent.
+
+    **Extended (2026-09-09) to cover all eight tables, not the original
+    three** -- this script predates Phase 22 (`account_closure_requests`),
+    Phase 23 (`loan_apply_requests`), and Phase 24
+    (`application_document`/`account_document`/`customer_document`).
+    Found while asked to "clear all test data" and re-checking this
+    script against the current schema before running it: as originally
+    written, it would have deleted `applications`/`accounts`/`customers`
+    while silently leaving all five newer tables' rows behind --
+    `account_closure_requests`/`loan_apply_requests` pointing at deleted
+    accounts/applications, and (since this script also purges every
+    Mayan document) `application_document`/`account_document`/
+    `customer_document` left as pure ghost rows -- exactly the drift
+    Phase 26's `reconcile.py` now exists to detect. A real, previously
+    undiscovered gap in this script, not a hypothetical one."""
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
     try:
         counts: dict[str, int] = {}
         async with pool.acquire() as conn:
-            for table in ("applications", "accounts", "customers"):
+            for table in (
+                "account_closure_requests",
+                "loan_apply_requests",
+                "application_document",
+                "account_document",
+                "customer_document",
+                "applications",
+                "accounts",
+                "customers",
+            ):
                 result = await conn.execute(f"DELETE FROM {table}")
                 counts[table] = int(result.split()[-1])
         return counts
@@ -166,9 +195,12 @@ def rebuild_mayan_indexes(client: httpx.Client) -> None:
 
 async def main() -> None:
     if "--yes" not in sys.argv:
-        print("This will PERMANENTLY delete ALL applications/accounts/customers (Postgres),")
-        print(f"ALL {WORKFLOW_TYPE} executions (Temporal), and ALL documents, trashed AND")
-        print("purged (Mayan). This cannot be undone.")
+        print("This will PERMANENTLY delete ALL rows in all eight loan-onboarding")
+        print("Postgres tables (customers/accounts/account_closure_requests/")
+        print("applications/loan_apply_requests/application_document/")
+        print(f"account_document/customer_document), ALL {WORKFLOW_TYPE} executions")
+        print("(Temporal), and ALL documents, trashed AND purged (Mayan).")
+        print("This cannot be undone.")
         answer = input("Type 'yes' to continue: ")
         if answer.strip().lower() != "yes":
             print("Aborted -- nothing was touched.")
