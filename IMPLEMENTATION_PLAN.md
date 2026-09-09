@@ -893,8 +893,13 @@ dropped, only supplemented. Confirmed the exact column shape with the
 user via `AskUserQuestion`: `mayan_document_id` renamed to
 `mayan_document_uuid TEXT` (repurposed to literally hold the uuid, as
 asked), plus a new `mayan_id INTEGER` column for the id every real
-Mayan call still needs. **Next: P25-1** (`db/schema.sql`). See Phase
-25's own preamble for the full research and design.
+Mayan call still needs. **P25-1 is now done** — `db/schema.sql` has
+`mayan_document_uuid`/`mayan_id` in all three tables, each with its own
+`UNIQUE` index, verified against a disposable scratch container (both
+indexes independently reject a raw duplicate on their own column — see
+P25-1's own DONE note). **Next: P25-2** (`document/db.py` — every
+insert/upsert function's signature and SQL). See Phase 25's own
+preamble for the full research and design.
 
 Two small, non-blocking items remain from earlier phases, neither urgent: the
 `WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
@@ -6437,7 +6442,7 @@ scope boundary, not an oversight; surfacing it publicly (e.g. in
 preview URLs, to stop them being sequentially guessable) would be a
 separate, later decision.
 
-- [ ] **P25-1** — `db/schema.sql`: in all three tables
+- [x] **P25-1** — `db/schema.sql`: in all three tables
       (`application_document`, `account_document`, `customer_document`),
       rename `mayan_document_id INTEGER NOT NULL` to
       `mayan_document_uuid TEXT NOT NULL`, add `mayan_id INTEGER NOT
@@ -6448,6 +6453,26 @@ separate, later decision.
       not here (128 real documents to account for).
       DoD: schema applies cleanly to a fresh database; both new/renamed
       columns reject a raw duplicate insert via their own unique index.
+      DONE: all three tables updated exactly as designed —
+      `mayan_document_id` renamed to `mayan_document_uuid TEXT NOT
+      NULL`, new `mayan_id INTEGER NOT NULL` added, both with their own
+      `UNIQUE` index (`ux_<table>_mayan_document_uuid`,
+      `ux_<table>_mayan_id`), replacing the old single
+      `ux_<table>_mayan_document_id` index. The table header comment
+      block updated too (no longer claims "NOT a real UUID" — now
+      explains why both columns exist, citing the live Mayan API
+      research this phase's preamble already recorded). Verified
+      against a disposable scratch `postgres:16-alpine` container (port
+      `15436`, removed after — never the live stack's own `db` volume,
+      real backfill deferred to P25-5): schema applies cleanly; a raw
+      duplicate insert sharing an existing row's `mayan_document_uuid`
+      (different `mayan_id`) was rejected by
+      `ux_application_document_mayan_document_uuid`, and a separate raw
+      duplicate sharing the existing row's `mayan_id` (different
+      `mayan_document_uuid`) was independently rejected by
+      `ux_application_document_mayan_id` — proving both indexes fire on
+      their own column, not just one covering both; a row differing in
+      both columns inserted cleanly.
 
 - [ ] **P25-2** — `document/db.py`: every insert/upsert function
       (`insert_application_document`, `upsert_account_document`,
@@ -6526,6 +6551,21 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P25-1 done)** — `db/schema.sql` updated in all three
+  `*_DOCUMENT` tables exactly as designed: `mayan_document_id` renamed
+  to `mayan_document_uuid TEXT NOT NULL`, new `mayan_id INTEGER NOT
+  NULL` added, each with its own `UNIQUE` index. Table header comment
+  rewritten (no longer claims "NOT a real UUID"). Verified against a
+  disposable scratch `postgres:16-alpine` container, removed after —
+  never the live stack's own `db` volume, real backfill deferred to
+  P25-5: schema applies cleanly; a raw duplicate insert sharing an
+  existing row's `mayan_document_uuid` (different `mayan_id`) was
+  rejected by its own index, and a separate duplicate sharing the
+  existing row's `mayan_id` (different `mayan_document_uuid`) was
+  independently rejected by its own index too — proving both
+  constraints are real, separate indexes, not one covering both
+  columns. Next session: P25-2 (`document/db.py`).
 
 - **2026-09-09 (Phase 25 added, design-only, no code written)** —
   Requested directly by the user: "use mayan UUID property for

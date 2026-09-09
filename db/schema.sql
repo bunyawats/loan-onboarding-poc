@@ -375,13 +375,21 @@ CREATE INDEX ix_loan_apply_requests_workflow_id
 -- documents exist" (not a fallback cache) -- every document/service.py
 -- read function queries these directly; Mayan stays the system of
 -- record only for actual file bytes and the visual Index Template
--- tree staff browse. mayan_document_id is Mayan's own plain integer
--- document id (NOT a real UUID -- nothing in this codebase has ever
--- captured Mayan's actual uuid field; every existing caller, including
--- every preview route, is already built around this integer id, so
--- that's what these tables key on too). Same "no FKs anywhere, opaque
--- string reference, app-minted idgen primary key" discipline every
--- other table in this schema follows.
+-- tree staff browse. Same "no FKs anywhere, opaque string reference,
+-- app-minted idgen primary key" discipline every other table in this
+-- schema follows.
+--
+-- Two Mayan identifiers, both kept (Phase 25, "Track Mayan's real
+-- UUID alongside its integer id" -- see CLAUDE.md / IMPLEMENTATION_PLAN.md):
+-- mayan_document_uuid is Mayan's real uuid field; mayan_id is its
+-- plain integer id. Confirmed live against the real Mayan instance
+-- before adding mayan_document_uuid: Mayan's REST API is entirely
+-- id-addressed for actual operations (file streaming, metadata
+-- attach, upload) -- GET /documents/<uuid>/ 404s, and ?uuid=<value>
+-- as a list-endpoint filter is silently ignored -- so mayan_id can't
+-- be dropped in favor of the uuid; every existing caller, including
+-- every preview route, is still built around the integer id, and
+-- there is no Mayan-side way to resolve a uuid back to one.
 --
 -- Write ordering (document/service.py's own discipline, not enforced
 -- by anything in this schema): every write calls Mayan first, then
@@ -396,15 +404,16 @@ CREATE INDEX ix_loan_apply_requests_workflow_id
 -- application_document -- documents uploaded during the application
 -- flow (Government ID, Proof of Income, Bank Statements, Credit
 -- Report, product-specific categories). No uniqueness beyond
--- mayan_document_id -- a category is satisfied by one or more
--- documents, unlimited accumulation is intentional (matches today's
--- multi-Bank-Statement behavior). account_id/customer_id start NULL
--- and are set in bulk by tag_application_documents on approval --
--- mirrors exactly what that function already tags onto Mayan's own
--- metadata today, just now also written here.
+-- mayan_id/mayan_document_uuid -- a category is satisfied by one or
+-- more documents, unlimited accumulation is intentional (matches
+-- today's multi-Bank-Statement behavior). account_id/customer_id
+-- start NULL and are set in bulk by tag_application_documents on
+-- approval -- mirrors exactly what that function already tags onto
+-- Mayan's own metadata today, just now also written here.
 CREATE TABLE application_document (
     application_document_id  TEXT PRIMARY KEY,
-    mayan_document_id        INTEGER NOT NULL,
+    mayan_document_uuid      TEXT NOT NULL,
+    mayan_id                 INTEGER NOT NULL,
     application_id           TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
     applicant_identifier     TEXT NOT NULL,
     category                 TEXT NOT NULL,
@@ -415,8 +424,11 @@ CREATE TABLE application_document (
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX ux_application_document_mayan_document_id
-    ON application_document (mayan_document_id);
+CREATE UNIQUE INDEX ux_application_document_mayan_document_uuid
+    ON application_document (mayan_document_uuid);
+
+CREATE UNIQUE INDEX ux_application_document_mayan_id
+    ON application_document (mayan_id);
 
 -- Backs list_documents/check_completeness -- every read this phase
 -- adds filters on application_id first.
@@ -431,7 +443,8 @@ CREATE INDEX ix_application_document_application_id
 -- "at most one current copy" rule explicit and enforced here too).
 CREATE TABLE account_document (
     account_document_id   TEXT PRIMARY KEY,
-    mayan_document_id     INTEGER NOT NULL,
+    mayan_document_uuid   TEXT NOT NULL,
+    mayan_id              INTEGER NOT NULL,
     account_id            TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
     applicant_identifier  TEXT NOT NULL,
     customer_id           TEXT NOT NULL,
@@ -441,8 +454,11 @@ CREATE TABLE account_document (
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX ux_account_document_mayan_document_id
-    ON account_document (mayan_document_id);
+CREATE UNIQUE INDEX ux_account_document_mayan_document_uuid
+    ON account_document (mayan_document_uuid);
+
+CREATE UNIQUE INDEX ux_account_document_mayan_id
+    ON account_document (mayan_id);
 
 -- The actual business rule this table enforces: at most one current
 -- document per (account, category). document/db.py's upsert functions
@@ -462,7 +478,8 @@ CREATE UNIQUE INDEX ux_account_document_account_category
 -- application_id nor account_id" heuristic.
 CREATE TABLE customer_document (
     customer_document_id  TEXT PRIMARY KEY,
-    mayan_document_id     INTEGER NOT NULL,
+    mayan_document_uuid   TEXT NOT NULL,
+    mayan_id              INTEGER NOT NULL,
     customer_id           TEXT NOT NULL,   -- opaque string, NOT a FK -- see header
     applicant_identifier  TEXT NOT NULL,
     category              TEXT NOT NULL,   -- always 'Government ID' today, kept general
@@ -471,8 +488,11 @@ CREATE TABLE customer_document (
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX ux_customer_document_mayan_document_id
-    ON customer_document (mayan_document_id);
+CREATE UNIQUE INDEX ux_customer_document_mayan_document_uuid
+    ON customer_document (mayan_document_uuid);
+
+CREATE UNIQUE INDEX ux_customer_document_mayan_id
+    ON customer_document (mayan_id);
 
 CREATE UNIQUE INDEX ux_customer_document_customer_category
     ON customer_document (customer_id, category);
