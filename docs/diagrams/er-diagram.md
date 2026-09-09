@@ -1,25 +1,33 @@
 # ER diagram — `loan_onboarding` database
 
 Source of truth: [`db/schema.sql`](../../db/schema.sql). This covers
-the three Postgres tables only — Mayan's own documents live in a
+the five Postgres tables only — Mayan's own documents live in a
 completely separate database (`mayan-db`, not `loan_onboarding`; see
 `CLAUDE.md`'s "Data storage") and aren't part of this diagram. For how
 documents associate to these entities, see `CLAUDE.md`'s "Document
 hierarchy" section.
 
-**All three relationships below are dashed deliberately** — none of
-them are real foreign keys. `CLAUDE.md`'s "Data storage" explains why:
-a same-database FK would make it trivially easy to write a query that
+**Every relationship below is dashed deliberately** — none of them are
+real foreign keys. `CLAUDE.md`'s "Data storage" explains why: a
+same-database FK would make it trivially easy to write a query that
 joins across module boundaries directly, which is exactly the coupling
 the module split (`customer/`, `account/`, `application/` each owning
-one table) exists to prevent. Every one of these ids is resolved only
-through the owning module's `service.py` — never a SQL join.
+their own tables) exists to prevent — including the two same-module
+splits below (`ACCOUNTS`/`ACCOUNT_CLOSURE_REQUESTS`,
+`APPLICATIONS`/`LOAN_APPLY_REQUESTS`), which follow the same "no FKs,
+anywhere" rule uniformly even though a cross-module coupling concern
+doesn't strictly apply to them. Every one of these ids is resolved only
+through the owning module's `service.py` — never a SQL join, except
+`application/db.py`'s and `account/db.py`'s own internal `LEFT JOIN`s
+between their respective table pairs, which stay inside those modules.
 
 ```mermaid
 erDiagram
     CUSTOMERS ||..o{ ACCOUNTS : "customer.service.get_or_create (approval-time only)"
     CUSTOMERS ||..o{ APPLICATIONS : "customer.service.find_by_identifier (submission) or get_or_create (approval)"
     APPLICATIONS ||..o| ACCOUNTS : "ACCOUNTS.application_id (account.service.create_account, exactly once, at terminal APPROVED)"
+    ACCOUNTS ||..o{ ACCOUNT_CLOSURE_REQUESTS : "one row per closure request against this account (Phase 22, 1:M)"
+    APPLICATIONS ||..o| LOAN_APPLY_REQUESTS : "onboarding-workflow tracking, joined in via LEFT JOIN (Phase 23, 1:1)"
 
     CUSTOMERS {
         string customer_id PK "CUS- + random 9-digit number, app-assigned via idgen"
@@ -36,26 +44,39 @@ erDiagram
         string application_id UK "opaque, NOT a FK -- NOT NULL, unique; points at the owning application"
         text product_type "personal_loan | auto_loan | mortgage"
         timestamptz opened_at
-        text status "ACTIVE | CLOSURE_REQUESTED | CLOSED"
-        text closure_workflow_id "nullable -- set once a closure is requested (Phase 18)"
-        timestamptz closure_requested_at "nullable"
-        text closure_decision_comment "nullable -- staff attestation text, e.g. balance confirmed zero"
-        text closure_decided_by "nullable -- authenticated Keycloak preferred_username"
-        timestamptz closure_decided_at "nullable"
+        text status "ACTIVE | CLOSURE_REQUESTED | CLOSED -- current-state only since Phase 22, see ACCOUNT_CLOSURE_REQUESTS"
+    }
+
+    ACCOUNT_CLOSURE_REQUESTS {
+        string closure_request_id PK "ACR- + random 9-digit number, app-assigned via idgen"
+        string account_id "opaque, NOT a FK -- many rows per account over time (Phase 22, 1:M)"
+        text workflow_id "NOT NULL -- deterministic account-closure-<account_id>, reused across every request"
+        text workflow_run_id "nullable -- disambiguates a repeat request against the same account"
+        timestamptz requested_at
+        text status "PENDING | APPROVED | REJECTED | CANCELLED -- own vocabulary, not ACCOUNTS.status's"
+        text decision_comment "nullable -- staff attestation text, e.g. balance confirmed zero; NULL for a customer self-cancel"
+        text decided_by "nullable -- authenticated Keycloak preferred_username; NULL for a customer self-cancel"
+        timestamptz decided_at "nullable"
     }
 
     APPLICATIONS {
         string application_id PK "APP- + random 9-digit number, app-assigned via idgen"
         text applicant_identifier "NOT NULL -- durable key, always known at submission"
         string customer_id "opaque, NOT a FK -- nullable"
-        text workflow_id "nullable -- Temporal's id, never cleared afterward (see CLAUDE.md's Known gaps)"
         text product_type "personal_loan | auto_loan | mortgage"
         jsonb payload "product-specific fields only"
         text applicant_name
         text applicant_email
         text applicant_phone
         numeric amount "> 0"
-        text status "PENDING_RISK_ASSESSMENT | PENDING_UNDERWRITING | MORE_INFO_REQUESTED | PENDING_MANAGER_APPROVAL | APPROVED | REJECTED | CANCELLED"
+        text status "PENDING_RISK_ASSESSMENT | PENDING_UNDERWRITING | MORE_INFO_REQUESTED | PENDING_MANAGER_APPROVAL | APPROVED | REJECTED | CANCELLED -- MIRRORED from LOAN_APPLY_REQUESTS.status (Phase 23), survives that table being truncated"
+        timestamptz created_at
+    }
+
+    LOAN_APPLY_REQUESTS {
+        string application_id PK "same id as the owning APPLICATIONS row -- genuinely 1:1, no separate id (Phase 23)"
+        text workflow_id "nullable -- Temporal's id, never cleared afterward (see CLAUDE.md's Known gaps)"
+        text status "same enum as APPLICATIONS.status -- this is the day-to-day OPERATIONAL copy"
         text underwriter_name
         text underwriter_comment
         timestamptz underwriter_decided_at
@@ -99,6 +120,34 @@ erDiagram
   column it referenced moved to the other table; see `CLAUDE.md`'s
   Known Gaps for this as an explicit, accepted reduction in the safety
   net.
+- **`ACCOUNTS ||..o{ ACCOUNT_CLOSURE_REQUESTS` (built, Phase 22)** —
+  one account, zero or many closure requests over its lifetime: a
+  rejected or customer-cancelled request reverts `ACCOUNTS.status` back
+  to `ACTIVE`, and a new request is reachable again the moment it does,
+  so the same account can accumulate real history here (request →
+  reject → request again → approve, for example). Each row is its own
+  request-and-eventual-decision, not split further — see
+  `ACCOUNT_CLOSURE_REQUESTS`'s own note below for why a *second*
+  `PENDING` row for the same account is rejected outright rather than
+  merely discouraged.
+- **`APPLICATIONS ||..o| LOAN_APPLY_REQUESTS` (built, Phase 23)** —
+  one application, zero or one workflow-tracking row — genuinely 1:1
+  (an application is submitted once; a resubmission overwrites this
+  row's `status`/decision fields in place, same as it always has, no
+  history added here), **unlike** `ACCOUNTS`/`ACCOUNT_CLOSURE_REQUESTS`'s
+  own 1:M shape just above. The "zero" case is deliberate, not just a
+  timing window before the first activity commits: `APPLICATIONS.status`
+  is a durable, mirrored copy kept in sync with
+  `LOAN_APPLY_REQUESTS.status` on every write, specifically so that
+  deleting (or truncating) this table still leaves `APPLICATIONS`
+  answering "what happened to this loan" correctly — live-verified by
+  deleting a real, already-`REJECTED` application's
+  `LOAN_APPLY_REQUESTS` row outright and confirming its outcome still
+  rendered on both the customer and staff UI surfaces. Every read in
+  `application/db.py` (`get`/`list_for_applicant`/`list_by_status`)
+  `LEFT JOIN`s the two tables for exactly this reason — an inner `JOIN`
+  would make the application vanish from every list the moment this
+  row is gone, defeating the whole point of the mirror.
 - **No relationship line for Mayan documents** — `id_photo` (customer),
   `Welcome Letter`/`Consent` (account), and the submission-gate
   categories (application) all live in Mayan, associated by metadata
@@ -122,23 +171,27 @@ erDiagram
   request is still pending. Not flagged anywhere as a gap; noted here
   only because reviewing this diagram against Phase 18's schema change
   is what surfaced it.
+- **`ACCOUNT_CLOSURE_REQUESTS.status` isn't just descriptive either —
+  it's what actually enforces "at most one pending request per
+  account."** A partial unique index —
+  `ux_closure_requests_account_pending` on `account_id WHERE status =
+  'PENDING'` — is the same "constrains rows within one table, invisible
+  as a diagram line, but load-bearing" pattern the bullet above
+  describes for `ACCOUNTS.product_type`. `account/db.py`'s
+  `create_closure_request` relies on this index firing under a genuine
+  race (rather than a Temporal retry, which it distinguishes via
+  `workflow_run_id` — see `CLAUDE.md`'s "Account closure request
+  history" section for the full reasoning).
 - **`APPLICATIONS.status`'s `PENDING_RISK_ASSESSMENT` value (built,
   Phase 21) is now every application's real initial status** — no
   longer an implicit table `DEFAULT`; `application/db.py`'s `insert()`
   takes an explicit `status` argument (`workflows.py`'s own
-  `self._status`) instead. `APPLICATIONS.risk_tier` is written only for
-  a risk-driven auto-Approve/auto-Reject (`underwriter_name` set to the
+  `self._status`) instead, written to both tables in one transaction
+  since Phase 23. `LOAN_APPLY_REQUESTS.risk_tier` is written only for a
+  risk-driven auto-Approve/auto-Reject (`underwriter_name` set to the
   fixed marker `"risk-engine-auto"` in that case, the one deliberate,
   documented break of "always an authenticated Keycloak username") —
   never for `MEDIUM` (a real, minor, accepted gap: the tier that
   triggered human review isn't retained on the row) and never for a
   human decision. See `CLAUDE.md`'s "Automated risk assessment via
   NATS" / the `risk-assessment-nats` skill for the full design.
-- **`ACCOUNTS`'s five `closure_*` columns (built, Phase 18) track at
-  most one *current* closure request** — all nullable, all unset until
-  a customer first requests closure; a second request after a rejection
-  (which reverts `status` back to `ACTIVE`) overwrites these rather than
-  preserving history, same POC-scale simplification this project accepts
-  elsewhere for `applications`' own decision columns. See `CLAUDE.md`'s
-  "Account closure" for the full `ACTIVE` → `CLOSURE_REQUESTED` →
-  `CLOSED`-or-back-to-`ACTIVE` state machine these columns support.
