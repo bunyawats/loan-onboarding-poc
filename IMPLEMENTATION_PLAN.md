@@ -844,10 +844,31 @@ rebuilt and running current code. `CLAUDE.md`'s `application/` module
 section and "Data storage" are both updated to describe the built
 split.
 
-**Next: this plan's own backlog is empty again.** Two small,
-non-blocking items remain from earlier phases, neither urgent: the
-`WorkflowAlreadyStartedError` gap Phase 22 left open (see just above)
-still hasn't been added to `CLAUDE.md`'s Known Gaps / the
+**Phase 24 (Document metadata persistence in Postgres) added after
+Phase 23 closed — design-only, no code written yet.** Requested by the
+user (`document/` has zero Postgres persistence today, so a Mayan
+outage means this app can't even list what documents exist for an
+application/account/customer) and confirmed via `AskUserQuestion` on
+three open design forks: (1) the new tables become the **primary**
+source of truth for "what documents exist" (not just a fallback cache),
+which also fixes the pre-existing O(all documents)-per-call performance
+gap in `_documents_matching`; (2) `account_document`/`customer_document`
+update in place per `(reference_id, category)` (matching Mayan's own
+versioning semantics), `application_document` allows unlimited
+accumulation per category (matching today's multi-document behavior);
+(3) app-minted `idgen` primary keys, with Mayan's own integer document
+id stored as a separate `mayan_document_id UNIQUE` column — corrected
+from the user's original "document UUID" phrasing after confirming by
+grep that this codebase has never captured Mayan's real `uuid` field
+anywhere, only its plain integer `id`. **Next: P24-1**
+(`db/schema.sql` — the three new tables). See Phase 24's own preamble
+for the full design, including the new dual-write consistency risk this
+phase deliberately accepts and defers to a future `reconcile.py`
+extension.
+
+Two small, non-blocking items remain from earlier phases, neither
+urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open (see
+just above) still hasn't been added to `CLAUDE.md`'s Known Gaps / the
 `known-gaps-and-gotchas` skill; no dedicated `application/` skill exists
 the way `account-closure` does for Phase 22's own design (deliberate —
 this phase's narrative lives directly in `CLAUDE.md`, proportionate to
@@ -855,8 +876,7 @@ a change with no new UI surface). The live `nats`/`temporal`/`db`/
 `risk-adapter`/`krakend`/`mock-risk-engine`/`worker-workflow`/
 `worker-activity`/`app` containers were all left running, all on
 current Phase 23 code, live database fully migrated — a fresh session
-can pick up any future phase directly against this already-current
-stack.
+can pick up Phase 24 directly against this already-current stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -5825,6 +5845,279 @@ claim stays true, not writing new code in those other files.
 
 ---
 
+## Phase 24 — Document metadata persistence in Postgres (Application/Account/Customer Document tables)
+
+**Depends on:** Phase 5 (`document/` module — `mayan_client.py`/
+`service.py`/`models.py`, all touched here), Phase 13 (`idgen/` —
+`document/` imports it for the first time, to mint these tables'
+primary keys). **Not part of the original build-out** — a design
+change requested and confirmed by the user, following the same "give a
+module its own Postgres table(s)" pattern Phase 22/23 already
+established for `account/`/`application/`, applied here to the one
+domain module that has never had any Postgres persistence at all.
+
+**The gap**: `document/` is a pure Mayan-API-backed leaf module
+(`CLAUDE.md`: "No Postgres of its own... Mayan's own dedicated
+Postgres/Redis... is the only persistence behind it"). Every read
+(`list_documents`, `check_completeness`, `list_account_documents`,
+`list_customer_documents`, `has_id_photo`) goes through
+`_documents_matching`, which fetches *every* document in the Mayan
+instance and filters in Python (already a documented Known Gap —
+O(all documents) per call, `_MAX_SEARCH_CANDIDATES = 1000`). Worse, and
+the reason this phase exists: if Mayan is unreachable, this application
+currently has **no way to even list what documents exist** for an
+application/account/customer — not a degraded read, a total one, since
+there's no local record of anything Mayan holds. Raised directly by the
+user: *"we never get information [if] mayan [is] out of service."*
+
+**Design, confirmed with the user across three questions**:
+
+1. **Postgres becomes the primary source of truth for "what documents
+   exist," not a fallback cache.** Every read function in
+   `document/service.py` (`list_documents`, `check_completeness`,
+   `list_account_documents`, `list_customer_documents`, `has_id_photo`)
+   is rewritten to query the new tables directly — Mayan is no longer
+   touched at all for these calls. This closes the outage gap *and* the
+   pre-existing O(all documents) performance gap in the same change (a
+   genuine side effect, not a separate ask). Mayan stays the system of
+   record for the one thing Postgres can't hold — actual file bytes
+   (`upload`/`preview`/`preview_account_document`/`upload_consent`'s
+   file-version POST all still call Mayan directly) — and for the
+   visual Index Template tree staff browse (`CLAUDE.md`'s "Document
+   hierarchy"), which every write function below still maintains
+   exactly as it does today, unchanged. `list_all_documents()` (used
+   only by `reconcile.py`'s cross-system orphan scan) is the one
+   deliberate exception — it keeps scanning Mayan directly, since its
+   entire job is comparing Mayan's own truth against Postgres, which
+   only makes sense if it doesn't read the new mirror it's checking.
+2. **Two accumulation shapes, matching each category's real-world
+   semantics, not one uniform rule**: `account_document`/
+   `customer_document` each get a unique index on `(reference_id,
+   category)` — a re-upload updates the existing row in place,
+   mirroring Mayan's own versioning model for Consent (already true
+   today) and extending the same "at most one current copy" idea to
+   Welcome Letter and the customer-level Government ID copy (also
+   already true today, just not enforced this explicitly).
+   `application_document` gets no such uniqueness — multiple Bank
+   Statements (or any other category) stay multiple rows, matching the
+   existing "a category is satisfied by one or more documents" rule
+   (`CLAUDE.md`'s `check_completeness` note) that this phase doesn't
+   change.
+3. **App-minted `idgen` primary keys, `mayan_document_id` as a separate
+   `UNIQUE NOT NULL` column** — same convention every table
+   `customer/`/`account/`/`application/` already uses (`document/`
+   joins the list of `idgen`-importing modules for the first time).
+   **Named `mayan_document_id`, not `document_uuid`** — a correction
+   from the user's own original phrasing, found while checking the
+   actual code before writing this plan: nothing in this codebase has
+   ever captured Mayan's real `uuid` field — `DocumentRef.document_id`,
+   every `preview(...)`/`preview_account_document(...)` route, and
+   `FakeMayanClient`'s own test double are all built around Mayan's
+   plain integer `id`, which is what actually flows through this app's
+   URLs and every existing caller today. Adding real UUID tracking now
+   would be a second, unrelated change with no caller that needs it —
+   `mayan_document_id INTEGER NOT NULL UNIQUE` (per table) is what these
+   new tables actually need to key a Postgres row to its one real Mayan
+   document.
+
+**Three new tables, one per Mayan index level, each owned exclusively
+by a new `document/db.py`** (this module's first-ever `db.py`, same
+one-file-per-table-owner convention every other domain module already
+follows):
+
+- **`application_document`** — `application_document_id` (`APD-`),
+  `mayan_document_id` (unique), `application_id`, `applicant_identifier`,
+  `category`, `filename`, plus nullable `account_id`/`customer_id` (set
+  by `tag_application_documents` on approval — mirrors exactly what
+  that function already tags onto Mayan's own metadata today, just now
+  also written to Postgres), `created_at`/`updated_at`. No uniqueness
+  beyond `mayan_document_id` — unlimited accumulation per
+  `(application_id, category)`, per decision 2.
+- **`account_document`** — `account_document_id` (`ACD-`),
+  `mayan_document_id` (unique), `account_id`, `applicant_identifier`,
+  `customer_id`, `category` (`Welcome Letter` | `Consent`), `filename`,
+  `created_at`/`updated_at`. Unique index on `(account_id, category)` —
+  update-in-place, per decision 2.
+- **`customer_document`** — `customer_document_id` (`CUD-`),
+  `mayan_document_id` (unique), `customer_id`, `applicant_identifier`,
+  `category` (always `Government ID` today, kept general rather than
+  hardcoded), `filename`, `created_at`/`updated_at`. Unique index on
+  `(customer_id, category)` — update-in-place, per decision 2; this is
+  what makes `has_id_photo`/`list_customer_documents` a plain,
+  unambiguous table read instead of today's "carries `customer_id` but
+  neither `application_id` nor `account_id`" heuristic
+  (`_documents_matching` filtered in Python) — a real simplification
+  this split earns, not just a mirror of the old logic.
+
+**Write ordering, and the accepted risk it trades for**: every write
+path calls Mayan first (create/upload/attach-metadata, unchanged),
+*then* writes the Postgres mirror — never the reverse. If the Postgres
+write fails after Mayan's succeeded, the real document exists in Mayan
+but is invisible to every read in this app until reconciled (a "hidden"
+document) — the safer of the two failure modes, versus Postgres
+claiming a document exists with no real file behind it. This is a
+genuinely new dual-write consistency risk this phase introduces (Mayan
+and Postgres still have no shared transaction, no cascade) — **not
+closed in this phase**, same "flag it, don't silently absorb it"
+treatment `CLAUDE.md`'s Known Gaps already gives `reconcile.py`'s
+existing scope; a future session extending `reconcile.py` to also
+cross-check these three new tables against Mayan (not just the
+customer/account/application tables it checks today) is the natural
+follow-up, deliberately deferred rather than folded into this phase's
+own scope.
+
+- [ ] **P24-1** — `db/schema.sql`: add `application_document`,
+      `account_document`, `customer_document` exactly as designed above
+      (columns, the two update-in-place unique indexes, plus a plain
+      index on each table's own "list by owner id" column —
+      `application_id`/`account_id`/`customer_id` respectively — since
+      every read function this phase adds filters on exactly one of
+      those). Same "no migration tooling, verify against a scratch
+      database" discipline every prior schema change here has hit
+      (`CLAUDE.md`'s Known Gaps) — the live stack's own `db` volume gets
+      a real backfill pass later, in P24-5, not here (there's real Mayan
+      data to account for, same "check for real data before touching
+      the schema" discipline Phase 22/23's own live migrations
+      established).
+      DoD: schema applies cleanly to a fresh database; a second insert
+      into `account_document`/`customer_document` for an already-used
+      `(account_id, category)`/`(customer_id, category)` pair is
+      rejected by the new unique index unless it's a real `ON CONFLICT
+      ... DO UPDATE` (proven in P24-2, not here — this task only proves
+      the constraint itself fires on a raw duplicate insert);
+      `application_document` accepts two rows for the same
+      `(application_id, category)` cleanly (proves no uniqueness was
+      accidentally added there).
+
+- [ ] **P24-2** — `document/db.py` (new file): lazily-initialized pool,
+      same per-module convention as `customer/db.py`/`account/db.py`/
+      `application/db.py`. `insert_application_document(...)` —
+      idgen-mint + PK-collision-retry loop, identical shape to
+      `account/db.py`'s `create()`.
+      `set_application_document_provisioning(application_id, account_id,
+      customer_id) -> None` — one `UPDATE ... WHERE application_id = $1`
+      touching every row for that application at once (a real
+      simplification over today's per-document Mayan-metadata loop).
+      `upsert_account_document(...)`/`upsert_customer_document(...)` —
+      `INSERT ... ON CONFLICT (account_id, category) DO UPDATE SET
+      mayan_document_id = EXCLUDED.mayan_document_id, filename =
+      EXCLUDED.filename, updated_at = now()`, wrapped in the same
+      PK-collision-retry loop as `account/db.py`'s
+      `create_closure_request()` (catch `UniqueViolationError` on the
+      *primary key* specifically, retry; the `(account_id, category)`/
+      `(customer_id, category)` conflict is the intended `DO UPDATE`
+      path, never caught as an error). Read functions:
+      `get_application_documents(application_id)`,
+      `get_account_documents(account_id)`,
+      `get_account_document_by_category(account_id, category)`,
+      `get_customer_documents(customer_id)`,
+      `get_customer_document_by_category(customer_id, category)`, plus
+      `get_application_document_by_mayan_id`/
+      `get_account_document_by_mayan_id` (back `preview`/
+      `preview_account_document`'s ownership check in P24-3, replacing
+      today's live Mayan metadata fetch).
+      DoD: unit tests (real Postgres, same deliberate exception every
+      other module's `db.py` test suite already takes —
+      `tests/unit/document/test_db.py`, new) prove: a normal insert
+      round-trips; a `(account_id, category)` re-upload updates the
+      existing row (same `account_document_id`, new
+      `mayan_document_id`/`filename`/`updated_at`) rather than inserting
+      a second row; `application_document` accepts two rows for the same
+      `(application_id, category)`; `set_application_document_provisioning`
+      updates every row for an application in one call.
+
+- [ ] **P24-3** — `document/service.py`: rewrite `list_documents`/
+      `check_completeness`/`list_account_documents`/
+      `list_customer_documents`/`has_id_photo` to read `document/db.py`
+      only, zero Mayan calls. `upload` gains a `document/db.py` insert
+      after its existing Mayan sequence (Mayan first, per this phase's
+      write-ordering rule). `tag_application_documents` keeps its
+      existing Mayan metadata loop (the visual index tree still needs
+      it) *and* adds one `set_application_document_provisioning` call.
+      `promote_government_id_to_customer_photo` reads the application's
+      Government-ID row from `document/db.py` (replacing its own
+      `_documents_matching` call) to find the source
+      `mayan_document_id`/`filename`; the reuse-path no-op is unchanged.
+      `generate_welcome_letter`/`upload_consent` each add an
+      `upsert_account_document` call after their existing Mayan
+      sequence; `upload_consent`'s "does a document already exist" check
+      reads `get_account_document_by_category` instead of
+      `_documents_matching`. `preview`/`preview_account_document`'s
+      ownership check reads `document/db.py`'s by-`mayan_document_id`
+      lookups instead of a live Mayan metadata fetch, then streams from
+      Mayan exactly as today (file bytes still only live there).
+      `list_all_documents()` is untouched — still a real Mayan scan,
+      deliberately, per this phase's own preamble.
+      DoD: `tests/unit/document/test_service.py`'s existing suite (18
+      tests, `FakeMayanClient`-backed) all still pass, extended to also
+      assert against real Postgres rows where a test's own point is now
+      the mirror, not just Mayan's fake state (this file's tests take on
+      the same "hits a real Postgres" exception `test_db.py` does, a
+      first for this module's test suite — document it in this file's
+      own module docstring, matching `tests/unit/application/conftest.py`'s
+      own precedent for explaining a directory-scoped testing exception).
+      New coverage: `check_completeness`/`list_documents` return correct
+      results with **zero calls into the `FakeMayanClient` double**
+      (proving the read path really doesn't touch Mayan anymore, not
+      just that it happens to still pass); a real Postgres row exists
+      after `upload`; `tag_application_documents` updates every
+      `application_document` row's `account_id`/`customer_id` in
+      Postgres, not just Mayan's metadata; `upload_consent` called twice
+      for the same account keeps one `account_document` row (same PK,
+      updated `mayan_document_id`/`filename`).
+
+- [ ] **P24-4** — `CLAUDE.md`: update `document/` module section (no
+      longer "No Postgres of its own" — describe the three new tables,
+      the primary-source-of-truth read path, the write-ordering/
+      accepted-drift-risk tradeoff, and `document/` joining the list of
+      modules that import `idgen`), "Data storage" (now eight tables,
+      not five — extend the existing "no FKs anywhere" framing rather
+      than re-deriving it), the `idgen` id-prefix table (add `APD-`/
+      `ACD-`/`CUD-`), and the module dependency graph's "not drawn"
+      `idgen`-importers note. `docs/diagrams/er-diagram.md`: add the
+      three new tables and their relationships (same dashed-line,
+      no-real-FK treatment every existing relationship already gets).
+      DoD: `CLAUDE.md` and the ER diagram both describe the
+      actually-built shape, not the originally-proposed one, if anything
+      changed during P24-1 through P24-3; `lint-imports` still green
+      (the only new cross-module import is `document/` → `idgen/`,
+      already an explicitly allowed exception).
+
+- [ ] **P24-5** — Live migration + live-verification, same discipline
+      every prior schema-adding phase's final task has used. Migrate the
+      live stack's `db` volume (`CREATE TABLE` for all three new tables
+      — no existing columns are being dropped this time, since
+      `document/` never had any). Backfill: walk every real document
+      currently in the live Mayan instance
+      (`document.service.list_all_documents()`, already exists, used
+      unchanged) and classify each into exactly one of the three new
+      tables by its existing metadata shape (`application_id` set →
+      `application_document`; `account_id` set, no `application_id` →
+      `account_document`; `customer_id` set, neither `application_id`
+      nor `account_id` → `customer_document` — the same three-way split
+      `list_customer_documents`'s own pre-this-phase heuristic already
+      used, just performed once as a backfill instead of on every read).
+      Rebuild/restart `app`/`worker-workflow`/`worker-activity`.
+      Live-verify through the real browser: normal document
+      upload/list/completeness-check/preview flows render identically to
+      before this phase. **Then the actual point of this whole phase,
+      proven live**: stop the `mayan` container and confirm the
+      customer/staff application detail pages, document lists, and
+      `check_completeness` all still render correctly from Postgres
+      alone (upload/preview are expected to still fail without Mayan —
+      that's the one thing this phase doesn't fix, file bytes only ever
+      lived in Mayan) — this is what actually proves the motivating
+      problem is solved, not just that the schema applies.
+      DoD: every real, pre-existing Mayan document backfilled into
+      exactly one of the three new tables, spot-checked via `psql`
+      against a few real documents' known categories/owners;
+      `app`/`worker-workflow`/`worker-activity` running current code
+      against the migrated volume; the Mayan-stopped verification above
+      performed and passing, then `mayan` restarted and a normal upload
+      confirmed working again afterward.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -5833,6 +6126,46 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (Phase 24 added, design-only, no code written)** —
+  Requested by the user: `document/` has zero Postgres persistence
+  today (the one domain module that never got any), so a Mayan outage
+  leaves this app with no way to even list what documents exist for an
+  application/account/customer. Three real design questions were raised
+  back to the user via `AskUserQuestion` rather than guessed at, all
+  answered with the recommended option: (1) the new
+  `application_document`/`account_document`/`customer_document` tables
+  become the **primary** read path for "what documents exist," not a
+  fallback cache — this also fixes the pre-existing, already-documented
+  O(all documents)-per-call performance gap in `_documents_matching` as
+  a side effect, not a separate ask; (2) `account_document`/
+  `customer_document` update in place per `(reference_id, category)`,
+  `application_document` allows unlimited accumulation per category
+  (matching each category's existing real-world behavior — Consent/
+  Welcome Letter/id_photo are each "one current copy," Bank Statements
+  etc. already accumulate); (3) app-minted `idgen` primary keys, Mayan's
+  own document id stored as a separate `mayan_document_id UNIQUE`
+  column. **One real correction found while writing the plan, not
+  guessed at**: the user's own phrasing called this column "document
+  UUID" — a grep across `document/models.py`, `document/mayan_client.py`,
+  and `FakeMayanClient` before writing anything confirmed this codebase
+  has never captured Mayan's actual `uuid` field anywhere; every
+  existing caller (including every `preview(...)` route) is built
+  around Mayan's plain integer `id`, so that's what the new column
+  mirrors, named accordingly and noted as a correction in the plan
+  rather than silently substituted. Also surfaced and documented, not
+  fixed: a genuinely new dual-write consistency risk (Mayan and
+  Postgres still have no shared transaction) — write ordering is
+  Mayan-first-then-Postgres, deliberately (a Postgres-write failure
+  leaves a document "hidden" rather than Postgres claiming a file that
+  doesn't exist), with `reconcile.py` extension to also cross-check
+  these three tables left as an explicit, deferred follow-up. Full
+  five-task breakdown (P24-1 schema, P24-2 `document/db.py`, P24-3
+  `document/service.py` rewrite, P24-4 `CLAUDE.md`/ER diagram, P24-5
+  live migration + live-verification — including actually stopping the
+  `mayan` container to prove the motivating problem is fixed) written
+  into this file per this project's own "plan doc before code" habit.
+  Next session: P24-1.
 
 - **2026-09-09 (P23-4 done — Phase 23 fully complete)** — Migrated the
   live `loan_onboarding` database (21 real applications), backfilling
