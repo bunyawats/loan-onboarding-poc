@@ -23,16 +23,6 @@ class Account:
     product_type: str
     opened_at: datetime
     status: AccountStatus
-    # Closure request/decision tracking (Phase 18, "Account closure" --
-    # see CLAUDE.md). All None until a closure is ever requested; only
-    # the *current* request's data is kept, same as applications' own
-    # decision columns -- a second request after a rejection overwrites
-    # these rather than preserving history.
-    closure_workflow_id: Optional[str] = None
-    closure_requested_at: Optional[datetime] = None
-    closure_decision_comment: Optional[str] = None
-    closure_decided_by: Optional[str] = None
-    closure_decided_at: Optional[datetime] = None
 
     @classmethod
     def from_record(cls, record: asyncpg.Record) -> "Account":
@@ -43,11 +33,43 @@ class Account:
             product_type=record["product_type"],
             opened_at=record["opened_at"],
             status=record["status"],
-            closure_workflow_id=record["closure_workflow_id"],
-            closure_requested_at=record["closure_requested_at"],
-            closure_decision_comment=record["closure_decision_comment"],
-            closure_decided_by=record["closure_decided_by"],
-            closure_decided_at=record["closure_decided_at"],
+        )
+
+
+ClosureRequestStatus = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED"]
+
+
+@dataclass(frozen=True, slots=True)
+class AccountClosureRequest:
+    """One row per closure request against an account (Phase 22,
+    "Account closure request history (1:M)" -- see CLAUDE.md /
+    IMPLEMENTATION_PLAN.md). Replaces the single-current-request
+    closure_* fields that used to live on `Account` itself -- a given
+    account can have many of these over its lifetime (reject/cancel,
+    then request again), each independently preserved."""
+
+    closure_request_id: str
+    account_id: str
+    workflow_id: str
+    workflow_run_id: Optional[str]
+    requested_at: datetime
+    status: ClosureRequestStatus
+    decision_comment: Optional[str] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+
+    @classmethod
+    def from_record(cls, record: asyncpg.Record) -> "AccountClosureRequest":
+        return cls(
+            closure_request_id=record["closure_request_id"],
+            account_id=record["account_id"],
+            workflow_id=record["workflow_id"],
+            workflow_run_id=record["workflow_run_id"],
+            requested_at=record["requested_at"],
+            status=record["status"],
+            decision_comment=record["decision_comment"],
+            decided_by=record["decided_by"],
+            decided_at=record["decided_at"],
         )
 
 

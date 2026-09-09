@@ -12,4 +12,8 @@ from loan_onboarding.account import db
 async def _clean_accounts_table():
     pool = await db._get_pool()
     yield
+    # account_closure_requests has no real FK to accounts (CLAUDE.md's
+    # "no real FKs between tables" rule) -- clean both explicitly, not
+    # relying on a cascade that doesn't exist.
+    await pool.execute("DELETE FROM account_closure_requests")
     await pool.execute("DELETE FROM accounts")

@@ -321,6 +321,8 @@ async def _detail_context(application: Application) -> dict[str, Any]:
         ]
     account = None
     consent_document = None
+    pending_closure_request = None
+    closure_history = []
     if application.status == STATUS_APPROVED:
         # Consent is an account-level document (CLAUDE.md's "Document
         # metadata assignment lifecycle") -- only offerable once the
@@ -332,6 +334,16 @@ async def _detail_context(application: Application) -> dict[str, Any]:
         if account is not None:
             account_documents = await document_service.list_account_documents(account.account_id)
             consent_document = next((d for d in account_documents if d.category == CATEGORY_CONSENT), None)
+            if account.status == STATUS_ACCOUNT_CLOSURE_REQUESTED:
+                # Closure history moved off `Account` itself (Phase 22,
+                # "Account closure request history (1:M)") -- the
+                # template's own "requested on <date>" line now reads
+                # this instead of a field on `account`.
+                pending_closure_request = await account_service.get_pending_closure_request(account.account_id)
+            # Full history (Phase 22, P22-4) -- every past request
+            # against this account, not just whichever one is currently
+            # pending. Newest first.
+            closure_history = await account_service.list_closure_requests_for_account(account.account_id)
 
     return {
         "application": application,
@@ -340,8 +352,10 @@ async def _detail_context(application: Application) -> dict[str, Any]:
         "by_category": by_category,
         "categories": categories,
         "is_terminal": application.status in TERMINAL_STATUSES,
+        "closure_history": closure_history,
         "account": account,
         "consent_document": consent_document,
+        "pending_closure_request": pending_closure_request,
     }
 
 
@@ -534,10 +548,11 @@ async def cancel_account_closure(
     request: Request, application_id: str, applicant_identifier: str = Depends(_require_applicant)
 ):
     _, account = await _owned_account(application_id, applicant_identifier)
-    if account.status != STATUS_ACCOUNT_CLOSURE_REQUESTED or account.closure_workflow_id is None:
+    pending_request = await account_service.get_pending_closure_request(account.account_id)
+    if account.status != STATUS_ACCOUNT_CLOSURE_REQUESTED or pending_request is None:
         raise HTTPException(status_code=400, detail="account has no pending closure request")
     client = await _get_temporal_client()
-    await workflow_service.signal_close_account_cancel(client, account.closure_workflow_id)
+    await workflow_service.signal_close_account_cancel(client, pending_request.workflow_id)
     await account_service.wait_for_status_change(account.account_id, account.status)
     return RedirectResponse(url=f"/apply/applications/{application_id}", status_code=303)
 

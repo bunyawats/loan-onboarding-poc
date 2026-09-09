@@ -801,17 +801,38 @@ real gap: `PENDING_RISK_ASSESSMENT` was missing from `PRD.md`'s own
 `status` enum table entirely) were all updated to drop every remaining
 "planned, not yet built" marker for Phase 21.
 
+**Phase 22 (Account closure request history — 1:M) is complete — all
+five tasks (P22-1 through P22-5) done.** Schema, the full code layer
+(`account/db.py`, `account/models.py`, `account/service.py`,
+`account/activities.py`, `workflow/workflows.py`'s closure
+dataclasses), the closure-history UI on both the customer detail page
+and the staff review dialog, and a genuinely fresh live-verification
+cycle (request → reject → request again → approve, driven through the
+real browser against a real account with zero prior closure history)
+are all done and confirmed — see each task's own DONE note, especially
+P22-5's for the full live-verification trace. `CLAUDE.md`'s "Account
+closure" section and the `account-closure` skill are both updated to
+describe the built 1:M design. The live stack is fully migrated and
+rebuilt (`loan_onboarding`'s `db` volume has `account_closure_requests`,
+all pre-existing real closure data backfilled before the old columns
+were dropped) and `app`/`worker-workflow`/`worker-activity` are running
+current code. **One deliberate, still-open gap, not fixed this
+phase, worth a future session**: `request_closure()`'s own
+race-safety against two near-simultaneous requests for the same account
+is unchanged from before Phase 22 — it relies on Temporal's own
+`WorkflowAlreadyStartedError` for the actually-reachable race, not a
+Postgres constraint (see P22-3's DONE note for the full trace); nothing
+today catches that exception and converts it to a clean error.
+
 **Next: this plan's own backlog is empty again.** Remaining work is
-only the Known Gaps in `CLAUDE.md` / the `known-gaps-and-gotchas` skill,
-plus whatever new gaps Phase 21 itself surfaced (none found beyond the
-already-accepted MEDIUM-never-writes-`risk_tier` scoping and the
-already-documented local-worker/stale-Docker-worker race, re-confirmed
-twice this session, not newly introduced by it). The live
-`nats`/`temporal`/`db`/`risk-adapter`/`krakend`/`mock-risk-engine`/
-`worker-workflow`/`worker-activity`/`app` containers were all left
-running, all on current Phase 21 code, live database migrated — a
-fresh session can pick up any future phase directly against this
-already-current stack.
+only the Known Gaps in `CLAUDE.md` / the `known-gaps-and-gotchas` skill
+(now including the `WorkflowAlreadyStartedError` gap above, not yet
+added there — a future session should add it), plus whatever future
+work the user brings. The live `nats`/`temporal`/`db`/`risk-adapter`/
+`krakend`/`mock-risk-engine`/`worker-workflow`/`worker-activity`/`app`
+containers were all left running, all on current Phase 22 code, live
+database migrated — a fresh session can pick up any future phase
+directly against this already-current stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -5199,6 +5220,313 @@ tasks are implemented yet.** Start at P21-1.
 
 ---
 
+## Phase 22 — Account closure request history (1:M)
+
+**Depends on:** Phase 18 (`account/` module, `CloseAccountWorkflow`,
+the `accounts.status`/`closure_*` columns this phase replaces — see
+`CLAUDE.md`'s "Account closure" / the `account-closure` skill). **Not
+part of the original build-out** — a design change requested and
+confirmed by the user, found while reviewing Phase 18's own schema
+comment, which already flagged this as a known, accepted
+simplification: *"Only the CURRENT request's data is kept... same
+POC-scale simplification this file already accepts elsewhere"*
+(`db/schema.sql`'s own `accounts` table comment).
+
+**The gap**: `account.service.request_closure()` is reachable again
+once a prior request is `REJECTED` or `CANCELLED` (both revert
+`accounts.status` back to `ACTIVE`) — so one account can genuinely
+accumulate many closure requests over its lifetime, but
+`accounts.closure_workflow_id`/`closure_requested_at`/
+`closure_decision_comment`/`closure_decided_by`/`closure_decided_at`
+are single columns on the account row itself: every new request
+overwrites the previous one's data outright. This is a real 1:M
+relationship (one account, many historical closure requests) currently
+collapsed into a 1:1-overwritten shape.
+
+**Design, confirmed with the user**: a new `account_closure_requests`
+table, one row per request (not per decision — a request and its
+eventual decision are the same row, updated in place once a decision
+lands), same "opaque string, no real FK" discipline `db/schema.sql`'s
+header already applies everywhere else in this schema.
+`accounts.status` stays exactly as it is today (current-state only:
+`ACTIVE`/`CLOSURE_REQUESTED`/`CLOSED`) — nothing about the account's
+own current-state model is wrong, only the missing history alongside
+it. **One design gap surfaced while reviewing this**:
+`workflow.service._workflow_id_for_account_closure`'s deterministic
+`account-closure-<account_id>` id is reused across every request
+against the same account (safe today, relying on Temporal's default
+`AllowDuplicate` reuse policy) — but nothing currently captures the
+Temporal **run id** anywhere, so `workflow_id` alone can't
+disambiguate which historical request a given execution belongs to
+once more than one exists against the same account. Add
+`workflow_run_id` to the new table; P22-1 below is where exactly it
+gets captured and stored is decided for real, not just noted here.
+
+- [x] **P22-1** — `db/schema.sql`: add `account_closure_requests`
+      (`closure_request_id TEXT PRIMARY KEY` via a new `idgen` prefix —
+      pick one, e.g. `ACR-`; `account_id TEXT NOT NULL`, opaque, not a
+      FK, same discipline as `accounts.customer_id`; `workflow_id TEXT
+      NOT NULL`; `workflow_run_id TEXT` — decide exactly where this
+      gets captured, see the design note above; `requested_at
+      TIMESTAMPTZ NOT NULL DEFAULT now()`; `status TEXT NOT NULL
+      DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED',
+      'REJECTED', 'CANCELLED'))`; `decision_comment TEXT`; `decided_by
+      TEXT`; `decided_at TIMESTAMPTZ`), plus indexes: `(account_id,
+      requested_at DESC)` for a per-account history view, and a
+      **partial unique index on `account_id WHERE status = 'PENDING'`**
+      (same shape `ux_accounts_customer_active_product_type` already
+      uses elsewhere in this file) as the DB-level backstop against two
+      simultaneously-`PENDING` requests for one account. Drop
+      `accounts.closure_workflow_id`/`closure_requested_at`/
+      `closure_decision_comment`/`closure_decided_by`/
+      `closure_decided_at` — `accounts.status` itself is untouched.
+      Same "no migration tooling" discipline every prior schema change
+      here has hit (see `CLAUDE.md`'s Known Gaps) — verify against a
+      scratch database first; the live stack's own `db` volume needs a
+      manual `CREATE TABLE` + `ALTER TABLE ... DROP COLUMN` as a
+      separate, later step, not folded into this task.
+      DoD: schema applies cleanly to a fresh database; a second insert
+      with `status = 'PENDING'` for an `account_id` that already has one
+      is rejected by the new partial unique index; a second `PENDING`
+      insert for the same account succeeds once the first row's status
+      has moved to `REJECTED`/`CANCELLED`.
+      DONE: added `account_closure_requests` (`closure_request_id`,
+      `account_id`, `workflow_id`, nullable `workflow_run_id` — capture
+      site left for P22-2/P22-3 to close, not guessed at here — plus
+      `requested_at`/`status`/`decision_comment`/`decided_by`/
+      `decided_at`), its three indexes (`(account_id, requested_at
+      DESC)` for history; `ux_closure_requests_account_pending` — the
+      partial unique index on `account_id WHERE status = 'PENDING'`;
+      `ix_closure_requests_pending_requested_at` for the FIFO queue
+      read), and removed `accounts.closure_workflow_id`/
+      `closure_requested_at`/`closure_decision_comment`/
+      `closure_decided_by`/`closure_decided_at` (`accounts.status`
+      itself untouched). Verified against a disposable scratch
+      Postgres container (`postgres:16-alpine`, port `15433`, removed
+      after — not the live stack's own `db` volume, same discipline
+      this task's own wording requires): fresh `db/schema.sql` applies
+      cleanly; a second `PENDING` insert for an `account_id` that
+      already has one is rejected with `duplicate key value violates
+      unique constraint "ux_closure_requests_account_pending"`; updating
+      the first row to `REJECTED` then lets a second `PENDING` insert
+      for the same account succeed; a history query
+      (`ORDER BY requested_at DESC`) correctly returns both rows with
+      independent `decision_comment`/`decided_by`/`workflow_run_id`
+      values — confirming genuine 1:M history, not an overwrite.
+      `\d accounts`/`\d account_closure_requests` confirmed the exact
+      column/index shape by hand, not just assumed from the SQL text.
+      Live-stack `db` volume's own `CREATE TABLE account_closure_requests
+      (...)` + `ALTER TABLE accounts DROP COLUMN closure_workflow_id,
+      DROP COLUMN closure_requested_at, DROP COLUMN
+      closure_decision_comment, DROP COLUMN closure_decided_by, DROP
+      COLUMN closure_decided_at;` deliberately left as a later, separate
+      step (not run this session) — same "`db/schema.sql` isn't
+      deployed just because it's merged" gap `CLAUDE.md`'s Known Gaps
+      already documents; run it by hand once P22-2/P22-3's code is
+      ready to use the new table, not before.
+
+- [x] **P22-2** — `account/db.py`: replace `update_closure_request`/
+      `update_closure_decision` (both currently `UPDATE accounts SET
+      ...`) with `create_closure_request(...)` (inserts a new
+      `account_closure_requests` row, mints `closure_request_id` via
+      `idgen`, same PK-collision-retry pattern `create()` already uses)
+      and `update_closure_request_decision(closure_request_id, ...)`
+      (updates that one row by its own primary key, not by `account_id`
+      alone anymore). `list_by_status` moves to query the new table
+      (`WHERE status = 'PENDING'`) instead of `accounts`. Add
+      `list_closure_requests_for_account(account_id)` (ordered
+      `requested_at DESC`) for a history view. `accounts.status` writes
+      (`ACTIVE`→`CLOSURE_REQUESTED`→terminal) stay in this file too, now
+      as their own small `set_status(...)` update alongside the new
+      request-table insert/update, not folded into the same query
+      anymore.
+      DoD: unit tests (real Postgres, per this module's own existing
+      convention) cover a two-cycle scenario — request → reject →
+      request again → approve — asserting two distinct rows exist with
+      correct, independent history, and `accounts.status` correctly
+      cycles `ACTIVE → CLOSURE_REQUESTED → ACTIVE → CLOSURE_REQUESTED →
+      CLOSED`.
+      DONE: `set_status`, `create_closure_request` (idempotent on a
+      Temporal retry via a `workflow_run_id` match against the existing
+      `PENDING` row hit by `ux_closure_requests_account_pending`, not a
+      blanket "any conflict means retry" assumption — see its own
+      docstring for why a non-matching conflict is left to propagate
+      instead), `get_closure_request`, `get_pending_closure_request`,
+      `update_closure_request_decision`, `list_closure_requests_for_account`
+      all added; `list_by_status` now joins `account_closure_requests`
+      with `accounts` (a same-module join, not the cross-module kind
+      `CLAUDE.md`'s "no real FKs" rule is about) for the queue's
+      `customer_id`/`product_type` display fields. New
+      `tests/unit/account/test_db.py` (this module's first — previously
+      only covered indirectly via `test_service.py`) exercises the
+      two-cycle scenario directly against `db.py`, matching this task's
+      DoD literally; `conftest.py`'s cleanup fixture now also clears
+      `account_closure_requests` between tests. **Necessarily done in
+      the same pass, since `account/db.py`'s old functions were removed
+      outright rather than left dead (the columns they wrote no longer
+      exist per P22-1) and the codebase has to keep working**: all of
+      P22-3 except one explicitly-deferred piece — see P22-3's own DONE
+      note.
+
+- [x] **P22-3** — `account/service.py`/`account/activities.py`: thread
+      `closure_request_id` through `CloseAccountWorkflowInput`/
+      `PersistClosureRequestInput`/`PersistClosureDecisionInput`
+      (`workflow/workflows.py`) so `persist_closure_decision` updates
+      the correct row, not just the account's latest state.
+      `request_closure()` must also now surface a clean, existing-style
+      error (not a raw `asyncpg` exception) if the new partial unique
+      index's constraint is hit under a race — same "the pre-check
+      handles the normal path, the index is the last-resort backstop"
+      split `has_active_account_of_type`/`ux_accounts_customer_active_
+      product_type` already establishes elsewhere in this codebase.
+      DoD: unit tests updated for the new signatures; `lint-imports`
+      still green (no new cross-module import introduced — this stays
+      entirely inside `account/`).
+      DONE: `PersistClosureRequestInput` gained `workflow_run_id`
+      (captured from `workflow.info().run_id` at `run()` start, same
+      place `workflow_id` itself is already captured);
+      `PersistClosureDecisionInput` gained `closure_request_id`, set
+      from `persist_closure_request`'s own return value
+      (`self._closure_request_id`, captured once in `run()`, threaded
+      into both `submit_decision` and `cancel`'s activity calls).
+      `account/activities.py`'s `persist_closure_request` now returns
+      the `closure_request_id` string; `persist_closure_decision`'s
+      idempotency guard reads the closure request row's own status
+      (`PENDING` or not), not the account's. `account/service.py`
+      gained `get_pending_closure_request(account_id)` and
+      `list_closure_requests_for_account(account_id)`;
+      `list_pending_closure_requests()` now returns plain dicts (a
+      same-module *view*, not a persisted entity) joining closure-request
+      fields with the owning account's `customer_id`/`product_type`.
+      `Account` (the model) lost its five `closure_*` fields; new
+      `AccountClosureRequest` dataclass added, mapping 1:1 to
+      `account_closure_requests`. Necessary follow-on plumbing in
+      `bff_backoffice/routes.py` (resolves `workflow_id` via
+      `get_pending_closure_request` instead of a field on `Account`)
+      and `bff_customer/routes.py` (same, plus a new
+      `pending_closure_request` context var for the detail-page
+      "requested on \<date\>" line) and both templates
+      (`closures.html`, `application_detail.html`) — not a scope
+      choice, the old fields these read no longer exist.
+      **One piece of this task's own DoD deliberately NOT done, left
+      open rather than guessed at**: the "clean error on a race" half.
+      Tracing it found the actual reachable race is `Temporal`'s own
+      `WorkflowAlreadyStartedError` from `client.start_workflow` inside
+      `workflow_service.start_close_account_workflow` (two near-
+      simultaneous `request_closure()` calls for the same account both
+      pass the `ACTIVE` pre-check before either's workflow starts, but
+      the deterministic `account-closure-<account_id>` workflow id
+      means Temporal itself rejects the second `start_workflow` call
+      outright, before `persist_closure_request`/the new partial unique
+      index are ever reached) — not a Postgres constraint violation
+      surfacing through `request_closure()` at all, which is a
+      synchronous call; a constraint violation inside the *activity*
+      can't propagate back to it synchronously the way this task's
+      wording assumed. `create_closure_request`'s own
+      `workflow_run_id`-matching idempotency check (see P22-2's DONE
+      note) is the actual, correct backstop for the Postgres side of
+      this; catching `WorkflowAlreadyStartedError` in
+      `request_closure()` and converting it to `AccountNotActive` (or a
+      new, more precisely-named exception) is real, still-open work for
+      a future session — this is a pre-existing gap in
+      `request_closure()`'s own race-safety (the old schema's
+      `update_closure_request` had the identical caveat, "relies on the
+      pre-check, not race-safe on its own"), not something Phase 22
+      introduced.
+      Full unit suite (`pytest tests/unit`, 310 tests) and
+      `lint-imports` (10 contracts kept, 0 broken) both green.
+      **Not yet done**: the live stack's own `db` volume migration
+      (deliberately deferred to right before live-verification, not run
+      this session — see Current Status) and rebuilding
+      `app`/`worker-workflow`/`worker-activity` off this new code.
+
+- [x] **P22-4** — `bff_backoffice`'s closure-request queue and
+      `bff_customer`'s application/account detail page: render closure
+      *history* (every past request for this account, not just the
+      current one) somewhere reachable from the account, not only the
+      single pending request. Exact placement (a new section on the
+      existing detail page vs. a dedicated history view) is this
+      task's own judgment call — DoD is "a customer/staff member can
+      see that an account was closure-requested, rejected, and
+      requested again," not a specific layout.
+      DONE: a new "Closure history" section added to both surfaces —
+      `bff_backoffice/templates/_detail_dialog.html` (staff review
+      dialog, right after the existing Consent section) and
+      `bff_customer/templates/application_detail.html` (a standalone
+      card, rendered whenever history exists regardless of the
+      account's current status — a `CLOSED` account's past requests are
+      just as worth showing as an `ACTIVE` one's). Both context
+      builders (`bff_backoffice/routes.py`'s
+      `_application_detail_context`, `bff_customer/routes.py`'s
+      `_detail_context`) gained a `closure_history` var from
+      `account_service.list_closure_requests_for_account(...)`, newest
+      first. **Not a new list-view screen** — placement chosen was "a
+      section on the existing detail page," the DoD's own explicitly
+      allowed option, since a dedicated history view would be a second
+      screen for something this POC's own closure volume doesn't
+      justify (same "unpaginated, low-volume" framing
+      `list_pending_closure_requests` already carries).
+      Full unit suite (310 tests) and `lint-imports` (10/10) both green
+      after the change (no new tests added — this task is a rendering
+      change over data P22-2/P22-3's own tests already prove is
+      correct, not new business logic). Live-verified against the real
+      stack (rebuilt/restarted just `app`, no schema/worker change
+      needed): the customer detail page for A1's real, already-`CLOSED`
+      account (`APP-136620781`) correctly shows "Approved / Requested
+      Sep 9, 2026 / underwriter1: balance confirmed zero"; the staff
+      review dialog's own htmx fragment endpoint
+      (`/ui/underwriter/{id}/detail`, called directly with
+      `HX-Request: true` since that route only serves fragments to
+      real htmx requests — a plain browser navigation to it redirects
+      to the queue page, unrelated pre-existing behavior, not something
+      this task changed) confirmed to render the identical history.
+
+- [x] **P22-5** — Live-verify against the real stack: request closure
+      on a real `ACTIVE` account, reject it (staff), confirm the
+      account reverts to `ACTIVE` and its product-type-elimination
+      picker behavior is unaffected, request closure again on the
+      *same* account, approve it this time. Confirm via `psql` that
+      `account_closure_requests` holds exactly two rows for this
+      account with distinct `closure_request_id`/`workflow_run_id`
+      values and correct, independent `decision_comment`/`decided_by`
+      fields — not one row silently overwritten. Update `CLAUDE.md`'s
+      "Account closure" section and the `account-closure` skill to
+      describe the new 1:M shape (this phase's own design decisions
+      above become that section's "built" narrative, condensed — same
+      convention every prior phase's `CLAUDE.md` update already
+      follows), not deferred to a later session.
+      DONE: drove a genuinely fresh cycle through the real browser
+      against `ACC-342801103` (Customer B's `personal_loan` account,
+      previously `ACTIVE` with zero closure history) — customer-side
+      `POST .../closure/request` via `fetch()` (not the plain form, to
+      avoid the known `confirm()`-dialog browser-automation hang the
+      `gmail-smtp-delivery` skill already documents), staff-side
+      Reject/Approve via the real `/ui/underwriter/closures` UI.
+      Confirmed via `psql` at each step: `ACTIVE` →
+      `CLOSURE_REQUESTED` → `ACTIVE` (first request `REJECTED`,
+      `workflow_run_id` `01a0845e-...`) → `CLOSURE_REQUESTED` again
+      (second request, distinct `closure_request_id` `ACR-066053146`
+      and distinct `workflow_run_id` `01a0845f-...`, proving Temporal
+      really did start a new execution under the same deterministic
+      workflow id) → `CLOSED`. Final state: exactly two rows in
+      `account_closure_requests` for this account, fully independent
+      (`REJECTED`/"...first cycle, rejecting"/`underwriter1` and
+      `APPROVED`/"...second cycle, approving"/`underwriter1`). Confirmed
+      the actual payoff too: Customer B's product picker (`GET
+      /apply/new`) correctly re-offered `personal_loan` once this
+      account reached `CLOSED` via the *second* request's approval,
+      while `auto_loan`/`mortgage` stayed eliminated by this same
+      customer's other still-`ACTIVE` accounts — proving the redesign
+      didn't disturb the existing elimination logic. `CLAUDE.md`'s
+      "Account closure" section and the `account-closure` skill both
+      updated with the full 1:M design (new "Account closure request
+      history — 1:M" section in the skill; a new paragraph in
+      `CLAUDE.md` plus corrected two stale lines that still described
+      the old per-account idempotency guard). **Phase 22 (P22-1 through
+      P22-5) is now fully complete.**
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -5207,6 +5535,143 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P22-5 done — Phase 22 fully complete)** — Drove a
+  genuinely fresh request→reject→request→approve cycle through the real
+  browser against `ACC-342801103` (previously `ACTIVE`, zero prior
+  closure history), not reusing existing e2e data. Customer-side
+  requests via `fetch()` POST (avoids the known `confirm()`-dialog
+  browser-automation hang); staff-side Reject/Approve via the real
+  `/ui/underwriter/closures` UI, logging in fresh each time the
+  Keycloak-backed session had expired (an environmental quirk of this
+  session, not a code issue). Confirmed via `psql` at every transition;
+  final state exactly matches the DoD — two independent
+  `account_closure_requests` rows, distinct `closure_request_id`s
+  *and* distinct real Temporal `workflow_run_id`s (proof Temporal
+  actually started a second execution under the reused deterministic
+  workflow id), correct separate `decision_comment`/`decided_by` per
+  row. Also confirmed the actual product-picker payoff still works
+  correctly off the *second* request's approval specifically, with this
+  customer's other `ACTIVE` accounts (different product types) still
+  correctly eliminated — proving the redesign didn't disturb existing
+  behavior. Updated `CLAUDE.md`'s "Account closure" section (a new
+  paragraph plus fixing two now-stale lines that still described the
+  old per-account, not per-request, idempotency guard) and the
+  `account-closure` skill (a full new "Account closure request history
+  — 1:M" section, plus a correction to its own Phase 18 narrative
+  pointing at it). **Phase 22 is now fully complete — this plan's
+  backlog is empty again.**
+
+- **2026-09-09 (live stack migrated/rebuilt, P22-4 done)** — Two asks in
+  one session: migrate the live stack, then start P22-4. Migrated
+  `loan_onboarding` (the live `db` volume, not `loan_onboarding_test`)
+  to Phase 22's schema — found real, pre-existing closure data on it
+  first (6 rows from today's and a prior session's e2e runs) and
+  backfilled all of it into the new `account_closure_requests` table
+  (mapped `decided_by = 'customer'` → `CANCELLED`, `accounts.status =
+  'CLOSED'` → `APPROVED`, else `REJECTED` — verified correct via
+  `psql`) before dropping the old columns, rather than discarding it.
+  Rebuilt and restarted `app`/`worker-workflow`/`worker-activity`;
+  confirmed clean startup and a real closed account's detail page still
+  rendering correctly post-migration. Then P22-4: added a "Closure
+  history" section to both the customer detail page
+  (`application_detail.html`) and the staff review dialog
+  (`_detail_dialog.html`), backed by a new `closure_history` context var
+  in both route files' context builders. Chose "a section on the
+  existing detail page" over a dedicated history screen — the DoD's own
+  explicitly allowed option, proportionate to this POC's closure volume.
+  Full unit suite (310 tests) and `lint-imports` (10/10) green; live-
+  verified against the real, migrated stack — the customer page for a
+  real closed account (`APP-136620781`) shows its real backfilled
+  history correctly, and the staff dialog's own htmx endpoint (queried
+  directly with `HX-Request: true`, since a plain browser navigation to
+  a fragment route redirects elsewhere — unrelated pre-existing
+  behavior) renders the identical history. One real gotcha hit live,
+  not a code bug: the customer page's *first* post-rebuild load of an
+  already-visited URL rendered stale (pre-rebuild) content — an HTTP
+  caching artifact, resolved by cache-busting the URL; a genuinely fresh
+  request rendered correctly immediately. Next session: P22-5, the
+  phase's last task — a fresh request→reject→request→approve cycle
+  driven through the real browser (not reusing existing e2e data this
+  time), then update `CLAUDE.md`'s "Account closure" section and the
+  `account-closure` skill to describe the built 1:M shape.
+
+- **2026-09-09 (P22-2 and P22-3 done together, in one session)** —
+  Asked to "start P22-2"; found partway through that P22-2 (replacing
+  `account/db.py`'s update-in-place closure functions with insert-based
+  ones) can't land on its own without breaking the tree, since the
+  columns those old functions wrote no longer exist as of P22-1 — every
+  caller (`account/activities.py`, `account/service.py`,
+  `workflow/workflows.py`'s dataclasses, both BFFs' routes+templates)
+  had to move in the same pass. Did both P22-2 and P22-3's core wiring;
+  see each task's own DONE note above for the full list of what
+  changed. One real design decision made while implementing, not fully
+  specified in the plan: `create_closure_request`'s idempotency check
+  compares the conflicting row's `workflow_run_id` to the caller's own,
+  rather than assuming any hit on `ux_closure_requests_account_pending`
+  is automatically a safe retry — tracing the actual reachable race
+  (see P22-3's DONE note) found it can't currently happen through the
+  normal call path at all, but the check is correct defense-in-depth
+  either way. Full unit suite green (310 tests, including a new
+  `tests/unit/account/test_db.py` and an added two-request-cycle
+  activities test proving both a rejected and a later-approved request
+  against the same account keep independent history), `lint-imports`
+  clean (10/10 contracts kept). Verified against `loan_onboarding_test`
+  (migrated to the new schema this session, safe to do since it's the
+  test database, not the live stack's own `db` volume — deliberately
+  left unmigrated, see Current Status). Next session: migrate the live
+  `db` volume, rebuild `app`/`worker-workflow`/`worker-activity`, then
+  either live-verify this via the real UI or move on to P22-4 (the
+  history-view UI work) first — either order is fine, migration has to
+  happen before either.
+
+- **2026-09-09 (P22-1 done)** — Implemented and verified Phase 22's
+  schema change: `db/schema.sql` gained `account_closure_requests`
+  (one row per closure request, `workflow_run_id` added — not yet
+  captured by any code, that's P22-2/P22-3's job — plus the three
+  indexes described in the task list, including the partial unique
+  index that is the actual DB-level enforcement of "at most one
+  `PENDING` request per account"), and `accounts` lost its five
+  `closure_*` columns (`status` itself untouched). Verified against a
+  disposable scratch `postgres:16-alpine` container, removed after —
+  never the live stack's own `db` volume, per this task's own explicit
+  discipline: fresh schema applies cleanly; a duplicate `PENDING`
+  insert for the same account is rejected by
+  `ux_closure_requests_account_pending`; a second `PENDING` insert
+  succeeds once the first row moves to `REJECTED`; a `(account_id,
+  requested_at DESC)` query correctly returns full independent history
+  for both rows. **The live stack's own `db` volume has deliberately
+  NOT been migrated yet** — no code reads/writes the new table yet, so
+  running that `ALTER TABLE`/`CREATE TABLE` against the live volume now
+  would just leave `accounts.closure_*` gone with nothing yet using the
+  replacement; migrate it once P22-2/P22-3 land. Next session: P22-2
+  (`account/db.py`'s new insert-based functions).
+
+- **2026-09-09 (Phase 22 added, design-only, no code written)** —
+  Reviewed `db/schema.sql`'s own long-standing comment on `accounts`'
+  closure columns ("only the CURRENT request's data is kept") against a
+  real question raised by the user: since a rejected/cancelled closure
+  request reverts an account back to `ACTIVE`, a customer genuinely can
+  request closure again on the same account, and today that overwrites
+  the prior request's history rather than preserving it — a real 1:M
+  relationship collapsed into 1:1-overwritten. Confirmed the diagnosis
+  is correct (not a bug so much as a POC-scale simplification this file
+  already flags), then designed the fix with the user: a new
+  `account_closure_requests` table, one row per request,
+  `accounts.status` left untouched (current-state only). Surfaced one
+  real design gap along the way — `workflow_run_id` isn't captured
+  anywhere today, so a repeat request against the same account (same
+  deterministic `workflow_id`, different Temporal run) can't be
+  disambiguated without it. Wrote the full task breakdown as **Phase
+  22** below (P22-1 through P22-5) and updated **Current Status**'s
+  resume-point paragraph to point there — same "design written down
+  before implementation" convention Phase 21 already followed. **No
+  code changed this session** — `CLAUDE.md`'s "Account closure" section
+  and the `account-closure` skill still describe the current, 1:1
+  shape on purpose (P22-5 updates them once the redesign is actually
+  built, not ahead of the code). Next session: start at P22-1
+  (schema), verify against a scratch database per this file's own
+  standing discipline, not the live stack's `db` volume.
 
 - **2026-09-08 (live verification of the PENDING_MANAGER_APPROVAL fix,
   not a numbered phase)** — Follow-up to the entry just below (same

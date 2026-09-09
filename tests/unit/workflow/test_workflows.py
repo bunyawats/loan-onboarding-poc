@@ -693,10 +693,14 @@ async def test_two_concurrent_risk_decisions_only_write_once(env: WorkflowEnviro
 # ----------------------------------------------------------------------
 
 
+_FAKE_CLOSURE_REQUEST_ID = "ACR-000000001"
+
+
 def _make_fake_closure_activities(calls: list[_RecordedCall]):
     @activity.defn(name=ACTIVITY_PERSIST_CLOSURE_REQUEST)
-    async def persist_closure_request(inp: PersistClosureRequestInput) -> None:
+    async def persist_closure_request(inp: PersistClosureRequestInput) -> str:
         calls.append(_RecordedCall(ACTIVITY_PERSIST_CLOSURE_REQUEST, inp))
+        return _FAKE_CLOSURE_REQUEST_ID
 
     @activity.defn(name=ACTIVITY_PERSIST_CLOSURE_DECISION)
     async def persist_closure_decision(inp: PersistClosureDecisionInput) -> str:

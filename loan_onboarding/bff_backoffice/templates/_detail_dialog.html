@@ -100,6 +100,23 @@
         </button>
       </form>
     </div>
+
+    {% if closure_history %}
+    <div class="mb-4">
+      <label class="block text-xs font-semibold mb-1 text-gray-700">Closure history</label>
+      <table class="w-full text-xs">
+        {% for request in closure_history %}
+        <tr class="border-b border-gray-100 last:border-b-0">
+          <td class="py-1 pr-3 text-gray-500 whitespace-nowrap">{{ request.requested_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td class="py-1 pr-3 whitespace-nowrap">{{ request.status|title }}</td>
+          <td class="py-1">
+            {% if request.decided_by %}{{ request.decided_by }}{% if request.decision_comment %} -- {{ request.decision_comment }}{% endif %}{% else %}pending{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
     {% endif %}
 
     {% if a.underwriter_name %}

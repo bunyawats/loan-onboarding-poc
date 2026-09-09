@@ -163,7 +163,8 @@ async def test_request_closure_starts_workflow_and_waits_for_committed_status(mo
     # (shrunk) timeout, same pattern
     # application/test_service.py's fake_start_workflow_with_commit uses.
     async def fake_start_and_commit(client, account_id, applicant_identifier):
-        await db.update_closure_request(account_id, f"account-closure-{account_id}")
+        await db.create_closure_request(account_id, f"account-closure-{account_id}", "fake-run-id")
+        await db.set_status(account_id, "CLOSURE_REQUESTED")
         start_close_account_workflow_calls.append(
             dict(client=client, account_id=account_id, applicant_identifier=applicant_identifier)
         )
@@ -179,8 +180,11 @@ async def test_request_closure_starts_workflow_and_waits_for_committed_status(mo
 
     updated = await service.get(account.account_id)
     assert updated.status == "CLOSURE_REQUESTED"
-    assert updated.closure_workflow_id == workflow_id
-    assert updated.closure_requested_at is not None
+
+    pending = await service.get_pending_closure_request(account.account_id)
+    assert pending is not None
+    assert pending.workflow_id == workflow_id
+    assert pending.requested_at is not None
 
 
 async def test_request_closure_returns_last_read_record_even_on_wait_timeout(start_close_account_workflow_calls):
@@ -200,23 +204,38 @@ async def test_request_closure_returns_last_read_record_even_on_wait_timeout(sta
     assert still_active.status == "ACTIVE"
 
 
+async def _seed_pending_request(account_id: str, requested_at: str = "now()") -> None:
+    """Test-only helper -- inserts an account_closure_requests row
+    directly and flips accounts.status, bypassing the real
+    request_closure()/Temporal path the same way this file's other
+    tests bypass it via direct pool.execute() calls against `accounts`."""
+    pool = await db._get_pool()
+    await pool.execute(
+        f"""
+        INSERT INTO account_closure_requests (closure_request_id, account_id, workflow_id, requested_at)
+        VALUES ($1, $2, $3, {requested_at})
+        """,
+        f"ACR-{account_id[-9:]}",
+        account_id,
+        f"account-closure-{account_id}",
+    )
+    await pool.execute("UPDATE accounts SET status = 'CLOSURE_REQUESTED' WHERE account_id = $1", account_id)
+
+
 async def test_list_pending_closure_requests_returns_only_closure_requested_accounts():
     active = await service.create_account(_fake_customer_id(), "personal_loan", _fake_application_id())
     pending = await service.create_account(_fake_customer_id(), "auto_loan", _fake_application_id())
     closed = await service.create_account(_fake_customer_id(), "mortgage", _fake_application_id())
 
+    await _seed_pending_request(pending.account_id)
     pool = await db._get_pool()
-    await pool.execute(
-        "UPDATE accounts SET status = 'CLOSURE_REQUESTED', closure_requested_at = now() WHERE account_id = $1",
-        pending.account_id,
-    )
     await pool.execute("UPDATE accounts SET status = 'CLOSED' WHERE account_id = $1", closed.account_id)
 
     results = await service.list_pending_closure_requests()
 
-    assert [r.account_id for r in results] == [pending.account_id]
-    assert active.account_id not in [r.account_id for r in results]
-    assert closed.account_id not in [r.account_id for r in results]
+    assert [r["account_id"] for r in results] == [pending.account_id]
+    assert active.account_id not in [r["account_id"] for r in results]
+    assert closed.account_id not in [r["account_id"] for r in results]
 
 
 async def test_list_pending_closure_requests_empty_when_none_pending():
@@ -225,24 +244,17 @@ async def test_list_pending_closure_requests_empty_when_none_pending():
 
 
 async def test_list_pending_closure_requests_orders_oldest_request_first():
-    pool = await db._get_pool()
     first = await service.create_account(_fake_customer_id(), "personal_loan", _fake_application_id())
     second = await service.create_account(_fake_customer_id(), "auto_loan", _fake_application_id())
     # Insert in reverse chronological order so a naive "insertion order"
     # assumption would fail this test if list_by_status ever dropped its
-    # own ORDER BY closure_requested_at.
-    await pool.execute(
-        "UPDATE accounts SET status = 'CLOSURE_REQUESTED', closure_requested_at = now() WHERE account_id = $1",
-        second.account_id,
-    )
-    await pool.execute(
-        "UPDATE accounts SET status = 'CLOSURE_REQUESTED', closure_requested_at = now() - interval '1 hour' WHERE account_id = $1",
-        first.account_id,
-    )
+    # own ORDER BY requested_at.
+    await _seed_pending_request(second.account_id, requested_at="now()")
+    await _seed_pending_request(first.account_id, requested_at="now() - interval '1 hour'")
 
     results = await service.list_pending_closure_requests()
 
-    assert [r.account_id for r in results] == [first.account_id, second.account_id]
+    assert [r["account_id"] for r in results] == [first.account_id, second.account_id]
 
 
 async def test_wait_for_status_change_returns_updated_account():

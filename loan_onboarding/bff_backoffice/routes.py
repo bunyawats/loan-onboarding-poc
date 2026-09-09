@@ -237,6 +237,7 @@ async def _application_detail_context(application_id: str, role: str, user: dict
     account = await account_service.get_by_application_id(application_id)
 
     consent_document = None
+    closure_history = []
     if account is not None:
         # Consent is an account-level document (CLAUDE.md's "Document
         # metadata assignment lifecycle") -- same reason bff_customer's
@@ -244,6 +245,11 @@ async def _application_detail_context(application_id: str, role: str, user: dict
         # exists.
         account_documents = await document_service.list_account_documents(account.account_id)
         consent_document = next((d for d in account_documents if d.category == CATEGORY_CONSENT), None)
+        # Closure history (Phase 22, "Account closure request history
+        # (1:M)") -- every past request against this account, not just
+        # whichever one is currently PENDING (that's closures.html's own
+        # job, a separate screen). Newest first.
+        closure_history = await account_service.list_closure_requests_for_account(account.account_id)
 
     documents = await document_service.list_documents(application_id)
     permissions = await _user_permissions(user)
@@ -252,6 +258,7 @@ async def _application_detail_context(application_id: str, role: str, user: dict
         "customer": customer,
         "account": account,
         "consent_document": consent_document,
+        "closure_history": closure_history,
         "documents": documents,
         "role": role,
         "permissions": permissions,
@@ -829,7 +836,8 @@ async def _staff_closure_decision(
         account = await account_service.get(account_id)
     except AccountNotFound:
         raise HTTPException(status_code=404)
-    if account.status != STATUS_ACCOUNT_CLOSURE_REQUESTED or account.closure_workflow_id is None:
+    pending_request = await account_service.get_pending_closure_request(account_id)
+    if account.status != STATUS_ACCOUNT_CLOSURE_REQUESTED or pending_request is None:
         # Stale page (someone else already decided it, or it was
         # cancelled) -- re-render the queue with an explanation rather
         # than a raw error, same "the UI hides it, the route still
@@ -841,7 +849,7 @@ async def _staff_closure_decision(
 
     client = await _get_temporal_client()
     await workflow_service.signal_close_account_decision(
-        client, account.closure_workflow_id, role, decision, user["username"], comment
+        client, pending_request.workflow_id, role, decision, user["username"], comment
     )
     await account_service.wait_for_status_change(account_id, account.status)
 

@@ -546,11 +546,24 @@ class CloseAccountStatus:
 class PersistClosureRequestInput:
     account_id: str
     workflow_id: str
+    # This execution's own Temporal run id (Phase 22, "Account closure
+    # request history (1:M)" -- see CLAUDE.md / IMPLEMENTATION_PLAN.md).
+    # workflow_id alone can't disambiguate a repeat request against the
+    # same account -- _workflow_id_for_account_closure deterministically
+    # reuses the same workflow_id for every request against one account
+    # -- so this travels alongside it into the new
+    # account_closure_requests row.
+    workflow_run_id: str
 
 
 @dataclass
 class PersistClosureDecisionInput:
     account_id: str
+    # Which account_closure_requests row this decision applies to --
+    # captured once, from persist_closure_request's own return value, at
+    # run() start (Phase 22) -- not re-derived by querying "whichever
+    # row is PENDING for this account" at decision time.
+    closure_request_id: str
     applicant_identifier: str
     decision: str  # APPROVE | REJECT | CANCELLED
     actor_name: str
@@ -562,6 +575,7 @@ class PersistClosureDecisionInput:
 class CloseAccountWorkflow:
     def __init__(self) -> None:
         self._account_id: str = ""
+        self._closure_request_id: str = ""
         self._applicant_identifier: str = ""
         self._status = STATUS_ACCOUNT_CLOSURE_REQUESTED
         self._closed_by: Optional[str] = None
@@ -603,14 +617,16 @@ class CloseAccountWorkflow:
         self._account_id = req.account_id
         self._applicant_identifier = req.applicant_identifier
 
-        await workflow.execute_activity(
+        self._closure_request_id = await workflow.execute_activity(
             ACTIVITY_PERSIST_CLOSURE_REQUEST,
             PersistClosureRequestInput(
                 account_id=req.account_id,
                 workflow_id=workflow.info().workflow_id,
+                workflow_run_id=workflow.info().run_id,
             ),
             start_to_close_timeout=DEFAULT_ACTIVITY_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
+            result_type=str,
         )
 
         await workflow.wait_condition(self._is_final)
@@ -638,6 +654,7 @@ class CloseAccountWorkflow:
             ACTIVITY_PERSIST_CLOSURE_DECISION,
             PersistClosureDecisionInput(
                 account_id=self._account_id,
+                closure_request_id=self._closure_request_id,
                 applicant_identifier=self._applicant_identifier,
                 decision=decision,
                 actor_name=actor_name,
@@ -673,6 +690,7 @@ class CloseAccountWorkflow:
             ACTIVITY_PERSIST_CLOSURE_DECISION,
             PersistClosureDecisionInput(
                 account_id=self._account_id,
+                closure_request_id=self._closure_request_id,
                 applicant_identifier=self._applicant_identifier,
                 decision=DECISION_CANCELLED,
                 actor_name="customer",

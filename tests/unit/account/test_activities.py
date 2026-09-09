@@ -54,51 +54,61 @@ async def _seed_active_account(product_type: str = "personal_loan"):
     return await service.create_account(_fake_customer_id(), product_type, _fake_application_id())
 
 
-async def test_persist_closure_request_flips_status_and_records_workflow_id():
+async def test_persist_closure_request_flips_status_and_creates_a_request_row():
     account = await _seed_active_account()
     workflow_id = f"account-closure-{account.account_id}"
 
-    await activities.persist_closure_request(
-        PersistClosureRequestInput(account_id=account.account_id, workflow_id=workflow_id)
+    closure_request_id = await activities.persist_closure_request(
+        PersistClosureRequestInput(account_id=account.account_id, workflow_id=workflow_id, workflow_run_id="run-1")
     )
 
     updated = await service.get(account.account_id)
     assert updated.status == "CLOSURE_REQUESTED"
-    assert updated.closure_workflow_id == workflow_id
-    assert updated.closure_requested_at is not None
+
+    pending = await service.get_pending_closure_request(account.account_id)
+    assert pending is not None
+    assert pending.closure_request_id == closure_request_id
+    assert pending.workflow_id == workflow_id
+    assert pending.workflow_run_id == "run-1"
+    assert pending.requested_at is not None
 
 
 async def test_persist_closure_request_is_idempotent_on_retry():
-    """A Temporal retry re-runs this same activity -- the second call
-    must not fail, and must not slide closure_requested_at forward."""
+    """A Temporal retry re-runs this same activity, with the same
+    workflow_run_id (Temporal assigns run_id once, at workflow start,
+    unaffected by activity retries within that execution) -- the second
+    call must not fail, must not create a second row, and must not slide
+    requested_at forward."""
     account = await _seed_active_account()
     workflow_id = f"account-closure-{account.account_id}"
-    await activities.persist_closure_request(
-        PersistClosureRequestInput(account_id=account.account_id, workflow_id=workflow_id)
+    first_id = await activities.persist_closure_request(
+        PersistClosureRequestInput(account_id=account.account_id, workflow_id=workflow_id, workflow_run_id="run-1")
     )
-    first = await service.get(account.account_id)
+    first = await service.get_pending_closure_request(account.account_id)
 
-    await activities.persist_closure_request(
-        PersistClosureRequestInput(account_id=account.account_id, workflow_id=workflow_id)
+    second_id = await activities.persist_closure_request(
+        PersistClosureRequestInput(account_id=account.account_id, workflow_id=workflow_id, workflow_run_id="run-1")
     )
-    second = await service.get(account.account_id)
+    second = await service.get_pending_closure_request(account.account_id)
 
-    assert second.status == "CLOSURE_REQUESTED"
-    assert second.closure_requested_at == first.closure_requested_at
+    assert second_id == first_id
+    assert second.requested_at == first.requested_at
+    assert len(await service.list_closure_requests_for_account(account.account_id)) == 1
 
 
-async def _request_closure(account_id: str, workflow_id: str) -> None:
-    await activities.persist_closure_request(
-        PersistClosureRequestInput(account_id=account_id, workflow_id=workflow_id)
+async def _request_closure(account_id: str, workflow_id: str) -> str:
+    return await activities.persist_closure_request(
+        PersistClosureRequestInput(account_id=account_id, workflow_id=workflow_id, workflow_run_id="run-1")
     )
 
 
 async def test_persist_closure_decision_approve_closes_and_sends_email(_mock_notifications_service):
     account = await _seed_active_account("auto_loan")
-    await _request_closure(account.account_id, f"account-closure-{account.account_id}")
+    closure_request_id = await _request_closure(account.account_id, f"account-closure-{account.account_id}")
 
     inp = PersistClosureDecisionInput(
         account_id=account.account_id,
+        closure_request_id=closure_request_id,
         applicant_identifier="alice@example.com",
         decision=DECISION_APPROVE,
         actor_name="u1",
@@ -110,9 +120,13 @@ async def test_persist_closure_decision_approve_closes_and_sends_email(_mock_not
     assert result == "CLOSED"
     updated = await service.get(account.account_id)
     assert updated.status == "CLOSED"
-    assert updated.closure_decided_by == "u1"
-    assert updated.closure_decision_comment == "balance confirmed zero"
-    assert updated.closure_decided_at is not None
+
+    history = await service.list_closure_requests_for_account(account.account_id)
+    assert len(history) == 1
+    assert history[0].status == "APPROVED"
+    assert history[0].decided_by == "u1"
+    assert history[0].decision_comment == "balance confirmed zero"
+    assert history[0].decided_at is not None
 
     assert len(_mock_notifications_service) == 1
     sent = _mock_notifications_service[0]
@@ -124,10 +138,11 @@ async def test_persist_closure_decision_approve_closes_and_sends_email(_mock_not
 
 async def test_persist_closure_decision_reject_reverts_to_active_and_sends_email(_mock_notifications_service):
     account = await _seed_active_account("mortgage")
-    await _request_closure(account.account_id, f"account-closure-{account.account_id}")
+    closure_request_id = await _request_closure(account.account_id, f"account-closure-{account.account_id}")
 
     inp = PersistClosureDecisionInput(
         account_id=account.account_id,
+        closure_request_id=closure_request_id,
         applicant_identifier="bob@example.com",
         decision=DECISION_REJECT,
         actor_name="m1",
@@ -139,8 +154,11 @@ async def test_persist_closure_decision_reject_reverts_to_active_and_sends_email
     assert result == "ACTIVE"
     updated = await service.get(account.account_id)
     assert updated.status == "ACTIVE"
-    assert updated.closure_decided_by == "m1"
-    assert updated.closure_decision_comment == "balance not yet zero"
+
+    history = await service.list_closure_requests_for_account(account.account_id)
+    assert history[0].status == "REJECTED"
+    assert history[0].decided_by == "m1"
+    assert history[0].decision_comment == "balance not yet zero"
 
     assert len(_mock_notifications_service) == 1
     assert _mock_notifications_service[0]["decision"] == DECISION_REJECT
@@ -148,13 +166,15 @@ async def test_persist_closure_decision_reject_reverts_to_active_and_sends_email
 
 async def test_persist_closure_decision_is_idempotent_on_retry(_mock_notifications_service):
     """A Temporal retry of an already-decided execution must not
-    re-send the closure-decision email a second time -- the account's
-    own status (no longer CLOSURE_REQUESTED) is the marker."""
+    re-send the closure-decision email a second time -- the closure
+    request row's own status (no longer PENDING) is the marker now,
+    not the account's."""
     account = await _seed_active_account()
-    await _request_closure(account.account_id, f"account-closure-{account.account_id}")
+    closure_request_id = await _request_closure(account.account_id, f"account-closure-{account.account_id}")
 
     inp = PersistClosureDecisionInput(
         account_id=account.account_id,
+        closure_request_id=closure_request_id,
         applicant_identifier="alice@example.com",
         decision=DECISION_APPROVE,
         actor_name="u1",
@@ -167,3 +187,46 @@ async def test_persist_closure_decision_is_idempotent_on_retry(_mock_notificatio
     assert first_result == "CLOSED"
     assert second_result == "CLOSED"
     assert len(_mock_notifications_service) == 1  # not sent twice
+
+
+async def test_persist_closure_decision_then_second_request_and_decision_preserves_both_histories(
+    _mock_notifications_service,
+):
+    """The actual point of Phase 22: a rejected request doesn't erase
+    itself when the account is requested for closure again."""
+    account = await _seed_active_account()
+    first_closure_request_id = await _request_closure(account.account_id, f"account-closure-{account.account_id}")
+    await activities.persist_closure_decision(
+        PersistClosureDecisionInput(
+            account_id=account.account_id,
+            closure_request_id=first_closure_request_id,
+            applicant_identifier="alice@example.com",
+            decision=DECISION_REJECT,
+            actor_name="u1",
+            comment="balance not yet zero",
+            resulting_status="ACTIVE",
+        )
+    )
+
+    second_closure_request_id = await _request_closure(account.account_id, f"account-closure-{account.account_id}")
+    assert second_closure_request_id != first_closure_request_id
+    await activities.persist_closure_decision(
+        PersistClosureDecisionInput(
+            account_id=account.account_id,
+            closure_request_id=second_closure_request_id,
+            applicant_identifier="alice@example.com",
+            decision=DECISION_APPROVE,
+            actor_name="m1",
+            comment="balance confirmed zero",
+            resulting_status="CLOSED",
+        )
+    )
+
+    history = await service.list_closure_requests_for_account(account.account_id)
+    assert len(history) == 2
+    by_id = {r.closure_request_id: r for r in history}
+    assert by_id[first_closure_request_id].status == "REJECTED"
+    assert by_id[first_closure_request_id].decision_comment == "balance not yet zero"
+    assert by_id[second_closure_request_id].status == "APPROVED"
+    assert by_id[second_closure_request_id].decision_comment == "balance confirmed zero"
+    assert len(_mock_notifications_service) == 2

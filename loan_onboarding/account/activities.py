@@ -23,15 +23,37 @@ from loan_onboarding.notifications import service as notifications_service
 from loan_onboarding.workflow.workflows import (
     ACTIVITY_PERSIST_CLOSURE_DECISION,
     ACTIVITY_PERSIST_CLOSURE_REQUEST,
+    DECISION_APPROVE,
+    DECISION_CANCELLED,
+    DECISION_REJECT,
     PersistClosureDecisionInput,
     PersistClosureRequestInput,
     STATUS_ACCOUNT_CLOSURE_REQUESTED,
 )
 
+# The closure_request's own status vocabulary (Phase 22, "Account
+# closure request history (1:M)") is not the same as accounts.status
+# (ACTIVE/CLOSURE_REQUESTED/CLOSED) -- this maps the workflow's
+# decision string onto the row-level outcome recorded on this specific
+# request.
+_CLOSURE_REQUEST_STATUS_BY_DECISION = {
+    DECISION_APPROVE: "APPROVED",
+    DECISION_REJECT: "REJECTED",
+    DECISION_CANCELLED: "CANCELLED",
+}
+
 
 @activity.defn(name=ACTIVITY_PERSIST_CLOSURE_REQUEST)
-async def persist_closure_request(inp: PersistClosureRequestInput) -> None:
-    await account_db.update_closure_request(inp.account_id, inp.workflow_id)
+async def persist_closure_request(inp: PersistClosureRequestInput) -> str:
+    """Returns the newly-minted (or, on a Temporal retry, the
+    already-existing) `closure_request_id` -- `workflows.py`'s `run()`
+    captures this and threads it into every later
+    `PersistClosureDecisionInput` for this execution, since `workflow_id`
+    alone can't disambiguate a repeat request against the same account
+    (see `db/schema.sql`'s `account_closure_requests` comment)."""
+    record = await account_db.create_closure_request(inp.account_id, inp.workflow_id, inp.workflow_run_id)
+    await account_db.set_status(inp.account_id, STATUS_ACCOUNT_CLOSURE_REQUESTED)
+    return record["closure_request_id"]
 
 
 @activity.defn(name=ACTIVITY_PERSIST_CLOSURE_DECISION)
@@ -45,34 +67,39 @@ async def persist_closure_decision(inp: PersistClosureDecisionInput) -> str:
 
     Idempotency guard: a Temporal retry of an already-decided execution
     must not re-send the closure-decision email a second time.
-    `accounts.status` itself is the marker -- `CLOSURE_REQUESTED` is the
-    only status a decision is ever made from, so a record that's already
-    moved past it (a prior execution of this same activity already
-    committed) means the write and the email have already happened;
-    skip both, permanently. Same "check current state before redoing a
-    side effect" discipline `application/activities.py`'s own
-    `persist_decision` already uses for its account/document
+    `inp.closure_request_id`'s own row is the marker now (Phase 22) --
+    `PENDING` is the only status a decision is ever made from, so a row
+    that's already moved past it (a prior execution of this same
+    activity already committed) means the write and the email have
+    already happened; skip both, permanently, reading the account's
+    current status instead of re-deriving it. Same "check current state
+    before redoing a side effect" discipline `application/activities.py`'s
+    own `persist_decision` already uses for its account/document
     provisioning."""
-    record = await account_db.get(inp.account_id)
-    assert record is not None, f"account {inp.account_id} not found"
+    existing = await account_db.get_closure_request(inp.closure_request_id)
+    assert existing is not None, f"closure request {inp.closure_request_id} not found"
 
-    if record["status"] != STATUS_ACCOUNT_CLOSURE_REQUESTED:
-        return record["status"]
+    if existing["status"] != "PENDING":
+        current = await account_db.get(inp.account_id)
+        assert current is not None, f"account {inp.account_id} not found"
+        return current["status"]
 
-    updated = await account_db.update_closure_decision(
-        inp.account_id,
-        status=inp.resulting_status,
-        closure_decision_comment=inp.comment,
-        closure_decided_by=inp.actor_name,
-        closure_decided_at=datetime.now(timezone.utc),
+    await account_db.update_closure_request_decision(
+        inp.closure_request_id,
+        status=_CLOSURE_REQUEST_STATUS_BY_DECISION[inp.decision],
+        decision_comment=inp.comment,
+        decided_by=inp.actor_name,
+        decided_at=datetime.now(timezone.utc),
     )
-    assert updated is not None, f"account {inp.account_id} not found"
+
+    updated_account = await account_db.set_status(inp.account_id, inp.resulting_status)
+    assert updated_account is not None, f"account {inp.account_id} not found"
 
     notifications_service.send_account_closure_decision(
         applicant_identifier=inp.applicant_identifier,
         account_id=inp.account_id,
-        product_type=updated["product_type"],
+        product_type=updated_account["product_type"],
         decision=inp.decision,
         comment=inp.comment,
     )
-    return updated["status"]
+    return updated_account["status"]

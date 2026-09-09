@@ -69,27 +69,15 @@ CREATE TABLE accounts (
                         CHECK (product_type IN ('personal_loan', 'auto_loan', 'mortgage')),
     opened_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     status          TEXT NOT NULL DEFAULT 'ACTIVE'
-                        CHECK (status IN ('ACTIVE', 'CLOSURE_REQUESTED', 'CLOSED')),
+                        CHECK (status IN ('ACTIVE', 'CLOSURE_REQUESTED', 'CLOSED'))
 
-    -- Closure request/decision tracking (Phase 18, "Account closure" --
-    -- see CLAUDE.md). All nullable, all unset until a customer requests
-    -- closure. Only the CURRENT request's data is kept -- like
-    -- applications' own decision columns, a second request after a
-    -- rejection (which reverts status back to ACTIVE) overwrites these
-    -- rather than preserving history, same POC-scale simplification
-    -- this file already accepts elsewhere.
-    closure_workflow_id        TEXT,
-    closure_requested_at       TIMESTAMPTZ,
-    -- Staff attestation text (e.g. "balance confirmed zero") -- this POC
-    -- has no ledger, so this is a manual confirmation, not a computed
-    -- check. See CLAUDE.md "Account closure".
-    closure_decision_comment   TEXT,
-    -- Authenticated Keycloak preferred_username of the deciding staff
-    -- member (Underwriter or Manager, either role may decide -- no
-    -- escalation tier for closure) -- never client-submitted free text,
-    -- same discipline as applications.underwriter_name/manager_name.
-    closure_decided_by         TEXT,
-    closure_decided_at         TIMESTAMPTZ
+    -- Closure request/decision history used to live directly on this
+    -- row (Phase 18, "Account closure") -- a single current-request
+    -- shape that overwrote its own history on every repeat request.
+    -- Phase 22 ("Account closure request history (1:M)" -- see
+    -- CLAUDE.md / IMPLEMENTATION_PLAN.md) moved it to its own table,
+    -- account_closure_requests, below -- this column stays
+    -- current-state only, same as it always was.
 );
 
 -- Deliberately NOT unique on customer_id alone -- a customer can hold
@@ -120,6 +108,75 @@ CREATE UNIQUE INDEX ux_accounts_application_id
 CREATE UNIQUE INDEX ux_accounts_customer_active_product_type
     ON accounts (customer_id, product_type)
     WHERE status = 'ACTIVE';
+
+-- ---------------------------------------------------------------
+-- account_closure_requests -- owned exclusively by
+-- loan_onboarding.account.db, same as accounts itself (Phase 22,
+-- "Account closure request history (1:M)" -- see CLAUDE.md's "Account
+-- closure" / IMPLEMENTATION_PLAN.md's Phase 22). One row per closure
+-- request against an account -- a request and its eventual decision
+-- are the same row, updated in place once a decision lands, not a
+-- separate row. accounts.status stays current-state only
+-- (ACTIVE/CLOSURE_REQUESTED/CLOSED); this table is where the history
+-- across repeat requests (reject/cancel, then request again) lives.
+-- ---------------------------------------------------------------
+CREATE TABLE account_closure_requests (
+    closure_request_id  TEXT PRIMARY KEY,
+    account_id           TEXT NOT NULL,   -- opaque string, NOT a FK -- see accounts' own header
+    workflow_id          TEXT NOT NULL,
+
+    -- Temporal run id for the specific CloseAccountWorkflow execution
+    -- that handled this request. workflow_id ALONE is not enough to
+    -- disambiguate a repeat request against the same account --
+    -- workflow.service._workflow_id_for_account_closure deterministically
+    -- reuses the same workflow_id (`account-closure-<account_id>`) for
+    -- every request against that account, relying on Temporal's default
+    -- AllowDuplicate reuse policy (safe because a new request is only
+    -- reachable once the prior execution has already reached a terminal
+    -- state -- see account.service.request_closure's own docstring).
+    -- Nullable until the code that captures it is written (P22-2/P22-3).
+    workflow_run_id      TEXT,
+
+    requested_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status               TEXT NOT NULL DEFAULT 'PENDING'
+                              CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')),
+
+    -- Staff attestation text (e.g. "balance confirmed zero") -- this POC
+    -- has no ledger, so this is a manual confirmation, not a computed
+    -- check. NULL for a customer self-cancel (no staff decision made).
+    decision_comment     TEXT,
+    -- Authenticated Keycloak preferred_username of the deciding staff
+    -- member (Underwriter or Manager, either role may decide -- no
+    -- escalation tier for closure) -- never client-submitted free text,
+    -- same discipline as applications.underwriter_name/manager_name.
+    -- NULL for a customer self-cancel.
+    decided_by           TEXT,
+    decided_at           TIMESTAMPTZ
+);
+
+-- Per-account closure history view, newest first -- backs a
+-- customer/staff-facing "this account's closure history" screen
+-- (Phase 22, P22-4).
+CREATE INDEX ix_closure_requests_account_id_requested_at
+    ON account_closure_requests (account_id, requested_at DESC);
+
+-- The actual business rule this table enforces: an account may have at
+-- most one PENDING closure request outstanding at a time. A partial
+-- unique index is the authoritative, final enforcement of this -- same
+-- "a pre-check in service.py handles the normal path, this index is
+-- the last-resort backstop under a race" split
+-- ux_accounts_customer_active_product_type (above) already establishes
+-- for a different rule.
+CREATE UNIQUE INDEX ux_closure_requests_account_pending
+    ON account_closure_requests (account_id)
+    WHERE status = 'PENDING';
+
+-- Backs the staff-side closure-request queue
+-- (account.service.list_pending_closure_requests), ordered the same
+-- FIFO way that queue has always read it.
+CREATE INDEX ix_closure_requests_pending_requested_at
+    ON account_closure_requests (requested_at)
+    WHERE status = 'PENDING';
 
 -- ---------------------------------------------------------------
 -- applications -- owned exclusively by loan_onboarding.application.db

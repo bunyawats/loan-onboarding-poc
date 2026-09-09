@@ -9,7 +9,13 @@ import asyncpg
 from temporalio.client import Client
 
 from loan_onboarding.account import db
-from loan_onboarding.account.models import Account, AccountNotActive, AccountNotFound, AccountStatus
+from loan_onboarding.account.models import (
+    Account,
+    AccountClosureRequest,
+    AccountNotActive,
+    AccountNotFound,
+    AccountStatus,
+)
 from loan_onboarding.workflow import service as workflow_service
 from loan_onboarding.workflow.task_queues import DEFAULT_TEMPORAL_HOST, DEFAULT_TEMPORAL_NAMESPACE
 from loan_onboarding.workflow.workflows import (
@@ -149,13 +155,45 @@ async def request_closure(account_id: str, applicant_identifier: str) -> str:
     return workflow_id
 
 
-async def list_pending_closure_requests() -> list[Account]:
+async def list_pending_closure_requests() -> list[dict]:
     """Read-only. Backs `bff_backoffice`'s closure-request queue screen
     (P18-6) — see `account/db.py`'s `list_by_status` for why this is
     deliberately unpaginated, unlike `application.service.list_by_status`'s
-    own count-cache-backed queues."""
-    records = await db.list_by_status(STATUS_ACCOUNT_CLOSURE_REQUESTED)
-    return [Account.from_record(r) for r in records]
+    own count-cache-backed queues.
+
+    Returns plain dicts, not a dataclass (Phase 22) — this is a
+    same-module-joined *view* for one screen (closure-request fields
+    plus the owning account's `customer_id`/`product_type`), not a
+    persisted entity in its own right the way `Account`/
+    `AccountClosureRequest` are."""
+    records = await db.list_by_status("PENDING")
+    return [
+        {
+            "closure_request_id": r["closure_request_id"],
+            "account_id": r["account_id"],
+            "customer_id": r["customer_id"],
+            "product_type": r["product_type"],
+            "workflow_id": r["workflow_id"],
+            "requested_at": r["requested_at"],
+        }
+        for r in records
+    ]
+
+
+async def get_pending_closure_request(account_id: str) -> Optional[AccountClosureRequest]:
+    """Read-only. The single in-flight request for this account, if
+    any — callers that used to read `Account.closure_workflow_id`
+    directly (to know which Temporal workflow a decision/cancel signal
+    should target) call this instead."""
+    record = await db.get_pending_closure_request(account_id)
+    return AccountClosureRequest.from_record(record) if record is not None else None
+
+
+async def list_closure_requests_for_account(account_id: str) -> list[AccountClosureRequest]:
+    """Read-only. Full closure history for one account, newest first —
+    backs a customer/staff-facing history view (Phase 22, P22-4)."""
+    records = await db.list_closure_requests_for_account(account_id)
+    return [AccountClosureRequest.from_record(r) for r in records]
 
 
 async def wait_for_status_change(account_id: str, previous_status: str) -> Account:
