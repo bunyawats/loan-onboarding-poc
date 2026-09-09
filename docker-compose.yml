@@ -204,6 +204,32 @@ services:
       # port chosen here -- only a host-side smoke test needs 4223.
       - "4223:4222"
 
+  # --- Dev-only GUI for browsing/publishing NATS messages by hand
+  # (github.com/nats-nui/nui) -- not part of the risk-assessment design,
+  # just a debugging aid. Reaches `nats` over the internal hostname, same
+  # as risk-adapter; connect to it from the browser at
+  # http://localhost:31311 and add a connection using nats://nats:4222
+  # (the container-internal address, not localhost:4223 -- NUI runs
+  # inside this compose network, not on the host).
+  nui:
+    image: ghcr.io/nats-nui/nui:latest
+    # The image's own /entrypoint.sh chowns /db to the non-root `nui` user
+    # it execs as, but does nothing for --proto-schemas-path
+    # (/protoschemas/default) -- that dir is root-owned in the image, so
+    # the `nui` user gets a live "permission denied" on every request
+    # once a connection is open (found live: GET /api/proto -> 500).
+    # This override runs as the container's default root user (same as
+    # the image's own entrypoint) to chown a dedicated volume there
+    # first, then hands off to the real entrypoint unchanged.
+    entrypoint: ["sh", "-c", "mkdir -p /protoschemas && chown -R nui:nui /protoschemas && exec /entrypoint.sh"]
+    ports:
+      - "31311:31311"
+    volumes:
+      - nui_data:/db
+      - nui_protoschemas:/protoschemas
+    depends_on:
+      - nats
+
   # --- P21-4: the NATS Adapter -- a standalone service, NOT part of
   # the loan_onboarding Python package (its own Dockerfile/requirements,
   # own dependency set -- see risk_adapter/main.py's own docstring and
@@ -396,3 +422,5 @@ volumes:
   mayan_db_data:
   mayan_redis_data:
   mayan_app_data:
+  nui_data:
+  nui_protoschemas:
