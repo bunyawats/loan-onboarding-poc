@@ -879,42 +879,40 @@ project's Known Gaps already documents for other sessions) and why it
 didn't block finishing the verification. Full unit suite (329 tests)
 and `lint-imports` (10/10) green throughout every task.
 
-**Phase 25 (Track Mayan's real UUID alongside its integer id) added
-after Phase 24 closed — design-only, no code written yet.** Requested
-by the user directly ("use mayan UUID property for mayan_document_id
-in all 3 tables"). Verified against the real, live Mayan instance
-before designing anything: every document does carry a real `uuid`
-(confirmed on both the detail and, usefully, the list endpoint — no
-extra per-document fetch needed for the P25-5 backfill), but Mayan's
-REST API is entirely id-addressed for actual operations —
-`GET /documents/<uuid>/` 404s, `?uuid=` as a list filter is silently
-ignored — both confirmed live, meaning the integer id can't be
-dropped, only supplemented. Confirmed the exact column shape with the
-user via `AskUserQuestion`: `mayan_document_id` renamed to
-`mayan_document_uuid TEXT` (repurposed to literally hold the uuid, as
-asked), plus a new `mayan_id INTEGER` column for the id every real
-Mayan call still needs. **P25-1 through P25-4 are now done** —
-`db/schema.sql` has `mayan_document_uuid`/`mayan_id` in all three
-tables, `document/db.py`/`document/service.py` both updated to match
-(the latter capturing `document["uuid"]` at every Mayan
-`create_document` call site and threading it through, with
-`upload_consent`'s true-versioning re-upload branch correctly reusing
-the existing row's own uuid instead), and `CLAUDE.md`/`docs/diagrams/er-diagram.md`
-now describe the actually-built two-identifier shape. `grep` confirms
-zero remaining references to the old `mayan_document_id` name anywhere
-in `loan_onboarding/`, `tests/`, `CLAUDE.md`, or the ER diagram. Full
-unit suite (333 tests, up from 324 pre-Phase-25) and `lint-imports`
-(10/10) both green throughout. The live stack's own `db` volume is
-still on the pre-Phase-25 shape — real migration deferred to P25-5.
-**Next: P25-5** — the live migration (`ALTER TABLE` all three tables,
-backfill `mayan_id` from the existing values and `mayan_document_uuid`
-from a live Mayan `list_documents` scan) and live-verification
-(upload/list/preview/`upload_consent` re-upload all still work, and a
-couple of the newly-backfilled `mayan_document_uuid` values spot-checked
-against Mayan's own live `uuid` field). See Phase 25's own preamble for
-the full research and design.
+**Phase 25 (Track Mayan's real UUID alongside its integer id) is now
+fully complete (P25-1 through P25-5).** Requested by the user directly
+("use mayan UUID property for mayan_document_id in all 3 tables").
+Verified against the real, live Mayan instance before designing
+anything: every document does carry a real `uuid` (also present on the
+list endpoint, not just the detail one — no extra per-document fetch
+needed for the live backfill), but Mayan's REST API is entirely
+id-addressed for actual operations — `GET /documents/<uuid>/` 404s,
+`?uuid=` as a list filter is silently ignored — both confirmed live,
+meaning the integer id couldn't be dropped, only supplemented.
+Confirmed the exact column shape with the user via `AskUserQuestion`:
+`mayan_document_id` renamed to `mayan_document_uuid TEXT` (repurposed
+to literally hold the uuid, as asked), plus a new `mayan_id INTEGER`
+column for the id every real Mayan call still needs — both `UNIQUE`.
+Schema, `document/db.py`, `document/service.py` (capturing
+`document["uuid"]` at every Mayan `create_document` call site and
+threading it through, with `upload_consent`'s true-versioning
+re-upload branch correctly reusing the existing row's own uuid
+instead), `CLAUDE.md`/ER diagram, and — the live migration — all 128
+real Mayan documents' rows backfilled with a correct `mayan_document_uuid`
+(one paginated Mayan scan, zero missing, three values independently
+spot-checked against fresh live `get_document(...)` calls) are all
+done. Live-verified through the real browser (a real approved
+application's document list and preview both render correctly on the
+migrated schema) and via script (`upload`/`check_completeness`/
+`list_documents`/`preview` and an `upload_consent` re-upload all
+confirmed working, test data cleaned up afterward — table counts back
+to exactly 96/26/6). Full unit suite (333 tests) and `lint-imports`
+(10/10) green throughout every task; `grep` confirms zero remaining
+references to the old `mayan_document_id` name anywhere in the
+codebase or docs.
 
-Two small, non-blocking items remain from earlier phases, neither urgent: the
+**Next: this plan's own backlog is empty again.** Two small,
+non-blocking items remain from earlier phases, neither urgent: the
 `WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
 added to `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill;
 `reconcile.py` doesn't yet cross-check the three new Phase 24 tables
@@ -923,7 +921,7 @@ against Mayan (a deliberately deferred follow-up, documented in both
 preamble, not an oversight). The live `nats`/`temporal`/`db`/
 `mayan`/`risk-adapter`/`krakend`/`mock-risk-engine`/`worker-workflow`/
 `worker-activity`/`app` containers were all left running, all on
-current Phase 24 code, live database fully migrated and backfilled — a
+current Phase 25 code, live database fully migrated and backfilled — a
 fresh session can pick up any future phase directly against this
 already-current stack.
 
@@ -6598,7 +6596,7 @@ separate, later decision.
       `mayan_document_id` name in either file. `lint-imports`
       reconfirmed green (10/10, no code changed this task).
 
-- [ ] **P25-5** — Live migration + live-verification. Migrate the live
+- [x] **P25-5** — Live migration + live-verification. Migrate the live
       stack's `db` volume: add `mayan_id INTEGER`/`mayan_document_uuid
       TEXT` to all three tables, backfill `mayan_id` from the existing
       `mayan_document_id` values (a plain column copy, no Mayan call
@@ -6618,6 +6616,37 @@ separate, later decision.
       `mayan_document_uuid`; `app`/`worker-workflow`/`worker-activity`
       running current code against the migrated volume; full
       upload/list/preview/re-upload cycle confirmed working live.
+      DONE: migrated the live `loan_onboarding` database in the exact
+      designed order — added `mayan_id`/`mayan_document_uuid` (nullable
+      initially) to all three tables; backfilled `mayan_id` from the
+      existing `mayan_document_id` values (a plain column copy, no
+      Mayan call, 96/26/6 rows); backfilled `mayan_document_uuid` via a
+      one-off script (scratchpad, not committed) that built a
+      `{mayan_id: uuid}` map from one paginated `list_documents` scan
+      (confirmed in this phase's own research to already return `uuid`
+      per document — no per-document fetch needed) and `UPDATE`d all
+      128 rows by their `mayan_id`, zero missing; then set both columns
+      `NOT NULL`, dropped `mayan_document_id`, and added the two new
+      `UNIQUE` indexes per table — final live schema confirmed via
+      `\d` to match `db/schema.sql` exactly on all three tables. Spot
+      cross-checked three backfilled `mayan_document_uuid` values
+      against a *fresh, independent* live `get_document(...)` call for
+      each (not the same list scan used for the backfill) — all three
+      matched exactly. Rebuilt and recreated
+      `app`/`worker-workflow`/`worker-activity` — clean startup, no
+      errors. Live-verified through the real browser: a real approved
+      mortgage application's detail page rendered all 5 documents
+      correctly, and its document preview returned `200 OK` — proving
+      the by-`mayan_id` ownership lookup works on the migrated schema.
+      Live-verified the full write/re-upload path via script against a
+      throwaway test application/account: `upload` →
+      `check_completeness` → `list_documents` → `preview` all correct,
+      and an `upload_consent` re-upload confirmed to reuse the exact
+      same Mayan document id (true versioning) rather than creating a
+      new one — then cleaned up both the Mayan-side test documents and
+      their Postgres rows, table counts confirmed back to exactly
+      96/26/6 afterward, no pollution left behind. **Phase 25 (P25-1
+      through P25-5) is now fully complete.**
 
 ---
 
@@ -6629,6 +6658,34 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P25-5 done — Phase 25 fully complete)** — Migrated the
+  live `loan_onboarding` database in the exact designed order: added
+  `mayan_id`/`mayan_document_uuid` (nullable) to all three tables;
+  backfilled `mayan_id` from the existing `mayan_document_id` values (a
+  plain column copy, 96/26/6 rows, no Mayan call); backfilled
+  `mayan_document_uuid` via a one-off script (scratchpad, not
+  committed) that built a `{mayan_id: uuid}` map from a single
+  paginated `list_documents` scan and `UPDATE`d all 128 rows by their
+  `mayan_id`, zero missing; then set both columns `NOT NULL`, dropped
+  `mayan_document_id`, and added the two new `UNIQUE` indexes per table
+  — final schema confirmed via `\d` to match `db/schema.sql` exactly.
+  Spot-checked three backfilled uuids against *fresh, independent* live
+  `get_document(...)` calls (not the same scan used for the backfill)
+  — all three matched exactly. Rebuilt and recreated
+  `app`/`worker-workflow`/`worker-activity` — clean startup.
+  Live-verified through the real browser: a real approved application's
+  document list and preview both render correctly on the migrated
+  schema (`200 OK`). Live-verified the full write/re-upload path via
+  script against a throwaway test application/account:
+  `upload`/`check_completeness`/`list_documents`/`preview` all correct,
+  and an `upload_consent` re-upload confirmed to reuse the exact same
+  Mayan document id (true versioning), then cleaned up both the
+  Mayan-side test documents and their Postgres rows — table counts back
+  to exactly 96/26/6, no pollution left behind. **Phase 25 (P25-1
+  through P25-5) is now fully complete** — this plan's backlog is empty
+  again, save for the two small, non-blocking items already noted in
+  Current Status.
 
 - **2026-09-09 (P25-4 done)** — Documentation-only task, no code
   changed. `CLAUDE.md`'s `document/` module section: the Phase 24
