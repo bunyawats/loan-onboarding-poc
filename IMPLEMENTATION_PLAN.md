@@ -893,25 +893,26 @@ dropped, only supplemented. Confirmed the exact column shape with the
 user via `AskUserQuestion`: `mayan_document_id` renamed to
 `mayan_document_uuid TEXT` (repurposed to literally hold the uuid, as
 asked), plus a new `mayan_id INTEGER` column for the id every real
-Mayan call still needs. **P25-1 through P25-3 are now done** —
+Mayan call still needs. **P25-1 through P25-4 are now done** —
 `db/schema.sql` has `mayan_document_uuid`/`mayan_id` in all three
-tables, `document/db.py`'s every insert/upsert/by-id-lookup function
-matches, and `document/service.py` captures `document["uuid"]` at
-every Mayan `create_document` call site (`upload`,
-`promote_government_id_to_customer_photo`, `generate_welcome_letter`)
-and threads it through — `upload_consent`'s true-versioning re-upload
-branch reuses the existing row's own uuid instead, proven by a
-dedicated test that it stays identical across re-uploads while
-`promote_government_id_to_customer_photo`'s own repeat-call test proves
-the opposite (a genuinely new uuid each time, since that path always
-creates a new Mayan document). `grep` confirms zero remaining
-references to the old `mayan_document_id` name anywhere in
-`loan_onboarding/` or `tests/`. Full unit suite (333 tests, up from
-324 pre-Phase-25) and `lint-imports` (10/10) both green. The live
-stack's own `db` volume is still on the pre-Phase-25 shape — real
-migration deferred to P25-5. **Next: P25-4** (`CLAUDE.md`/ER diagram —
-document the built shape). See Phase 25's own preamble for the full
-research and design.
+tables, `document/db.py`/`document/service.py` both updated to match
+(the latter capturing `document["uuid"]` at every Mayan
+`create_document` call site and threading it through, with
+`upload_consent`'s true-versioning re-upload branch correctly reusing
+the existing row's own uuid instead), and `CLAUDE.md`/`docs/diagrams/er-diagram.md`
+now describe the actually-built two-identifier shape. `grep` confirms
+zero remaining references to the old `mayan_document_id` name anywhere
+in `loan_onboarding/`, `tests/`, `CLAUDE.md`, or the ER diagram. Full
+unit suite (333 tests, up from 324 pre-Phase-25) and `lint-imports`
+(10/10) both green throughout. The live stack's own `db` volume is
+still on the pre-Phase-25 shape — real migration deferred to P25-5.
+**Next: P25-5** — the live migration (`ALTER TABLE` all three tables,
+backfill `mayan_id` from the existing values and `mayan_document_uuid`
+from a live Mayan `list_documents` scan) and live-verification
+(upload/list/preview/`upload_consent` re-upload all still work, and a
+couple of the newly-backfilled `mayan_document_uuid` values spot-checked
+against Mayan's own live `uuid` field). See Phase 25's own preamble for
+the full research and design.
 
 Two small, non-blocking items remain from earlier phases, neither urgent: the
 `WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
@@ -6571,12 +6572,31 @@ separate, later decision.
       full unit suite (333 tests, up from 329) both green;
       `lint-imports` unaffected (10/10, no new imports this task).
 
-- [ ] **P25-4** — `CLAUDE.md`/`docs/diagrams/er-diagram.md`: update the
+- [x] **P25-4** — `CLAUDE.md`/`docs/diagrams/er-diagram.md`: update the
       three `*_DOCUMENT` table descriptions/entity blocks for the
       `mayan_document_uuid`/`mayan_id` split, and the reasoning
       (Mayan's API being id-only, confirmed live) for why both columns
       exist rather than just the uuid.
       DoD: both docs describe the actually-built shape.
+      DONE: `CLAUDE.md`'s `document/` module section rewritten — the
+      Phase 24 paragraph describing `mayan_document_id` replaced with a
+      new "Two Mayan identifiers, both kept (Phase 25)" paragraph
+      covering both columns, the live-confirmed id-only-API reasoning,
+      and the write-capture/re-upload-reuse mechanics; the
+      `upload_consent`/`preview`/`preview_account_document` bullets
+      gained `(Phase 25, built)` notes for their own specific behavior
+      changes. "Data storage"'s collision-handling paragraph updated
+      (now names both `mayan_id`/`mayan_document_uuid` instead of the
+      single old column, doubled from "one new wrinkle" to "doubled in
+      Phase 25"). `docs/diagrams/er-diagram.md`: all three
+      `*_DOCUMENT` entity blocks now show `mayan_document_uuid`/
+      `mayan_id` instead of the single old field; the
+      `APPLICATION_DOCUMENT` relationship bullet and the closing
+      "primary source of truth" bullet updated, with a new dedicated
+      bullet explaining the two-identifier design and its live-verified
+      reasoning. `grep` confirmed zero remaining references to the old
+      `mayan_document_id` name in either file. `lint-imports`
+      reconfirmed green (10/10, no code changed this task).
 
 - [ ] **P25-5** — Live migration + live-verification. Migrate the live
       stack's `db` volume: add `mayan_id INTEGER`/`mayan_document_uuid
@@ -6609,6 +6629,24 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P25-4 done)** — Documentation-only task, no code
+  changed. `CLAUDE.md`'s `document/` module section: the Phase 24
+  paragraph describing a single `mayan_document_id` column replaced
+  with a new "Two Mayan identifiers, both kept (Phase 25)" paragraph
+  covering `mayan_document_uuid`/`mayan_id`, the live-confirmed
+  id-only-API reasoning behind keeping both, and the write-capture/
+  re-upload-reuse mechanics; `upload_consent`/`preview`/
+  `preview_account_document`'s own bullets gained `(Phase 25, built)`
+  notes. "Data storage"'s collision-handling paragraph updated to name
+  both columns instead of the old single one. `docs/diagrams/er-diagram.md`:
+  all three `*_DOCUMENT` entity blocks now show both fields; the
+  `APPLICATION_DOCUMENT` relationship bullet and the closing "primary
+  source of truth" bullet updated, plus a new dedicated bullet
+  explaining the two-identifier design. `grep` confirmed zero remaining
+  references to the old `mayan_document_id` name in either file.
+  `lint-imports` reconfirmed green. Next session: P25-5 — the live
+  migration and live-verification, the last task in this phase.
 
 - **2026-09-09 (P25-3 done)** — `document/service.py`'s every
   document-creating call site (`upload`,

@@ -101,7 +101,8 @@ erDiagram
 
     APPLICATION_DOCUMENT {
         string application_document_id PK "APD- + random 9-digit number, app-assigned via idgen (Phase 24)"
-        int mayan_document_id UK "Mayan's own plain integer document id -- NOT a real UUID, see CLAUDE.md's document/ section"
+        text mayan_document_uuid UK "Mayan's real uuid field (Phase 25)"
+        int mayan_id UK "Mayan's own plain integer document id -- the id every real Mayan API call still needs (Phase 25)"
         string application_id "opaque, NOT a FK -- unlimited rows per (application_id, category), no uniqueness here"
         text applicant_identifier
         text category "Government ID | Proof of Income | Bank Statements | Credit Report | product-specific"
@@ -114,7 +115,8 @@ erDiagram
 
     ACCOUNT_DOCUMENT {
         string account_document_id PK "ACD- + random 9-digit number, app-assigned via idgen (Phase 24)"
-        int mayan_document_id UK "Mayan's own plain integer document id"
+        text mayan_document_uuid UK "Mayan's real uuid field (Phase 25)"
+        int mayan_id UK "Mayan's own plain integer document id (Phase 25)"
         string account_id "opaque, NOT a FK -- UNIQUE together with category (at most one current copy per category)"
         text applicant_identifier
         text customer_id "opaque, NOT a FK"
@@ -126,7 +128,8 @@ erDiagram
 
     CUSTOMER_DOCUMENT {
         string customer_document_id PK "CUD- + random 9-digit number, app-assigned via idgen (Phase 24)"
-        int mayan_document_id UK "Mayan's own plain integer document id"
+        text mayan_document_uuid UK "Mayan's real uuid field (Phase 25)"
+        int mayan_id UK "Mayan's own plain integer document id (Phase 25)"
         string customer_id "opaque, NOT a FK -- UNIQUE together with category (at most one current copy per category)"
         text applicant_identifier
         text category UK "always 'Government ID' today, kept general -- UNIQUE together with customer_id"
@@ -198,9 +201,9 @@ erDiagram
 - **`APPLICATIONS ||..o{ APPLICATION_DOCUMENT` (built, Phase 24)** —
   one application, zero or many uploaded documents (Government ID,
   Proof of Income, Bank Statements, Credit Report, product-specific
-  categories). **No uniqueness beyond `mayan_document_id`** — a
-  category is satisfied by one or more documents (three separate Bank
-  Statement PDFs all count), matching `document.service.check_completeness`'s
+  categories). **No uniqueness beyond `mayan_id`/`mayan_document_uuid`**
+  — a category is satisfied by one or more documents (three separate
+  Bank Statement PDFs all count), matching `document.service.check_completeness`'s
   own rule; `account_id`/`customer_id` start `NULL` and are set on
   every row for the application at once, in bulk, on approval
   (`tag_application_documents`).
@@ -227,9 +230,17 @@ erDiagram
   separate, purely-visual Index Template tree staff browse (still not
   expressible in this diagram — a document's *placement in that tree*
   has no Postgres row of its own, only its existence and ownership
-  do). `mayan_document_id` is deliberately Mayan's own plain integer
-  `id`, not a real UUID — this codebase has never captured Mayan's
-  actual `uuid` field anywhere.
+  do).
+- **Two Mayan identifiers per document row, both kept (built, Phase
+  25)**: `mayan_document_uuid` is Mayan's real `uuid` field;
+  `mayan_id` is its plain integer id. Confirmed live against the real
+  Mayan instance that its REST API is entirely id-addressed for actual
+  operations (`GET /documents/<uuid>/` returns a real `404`, and
+  `?uuid=<value>` as a list-endpoint filter is silently ignored) — so
+  `mayan_id` can't be dropped in favor of the uuid; every caller
+  (including every `preview(...)` route) is still built around the
+  integer id, and there is no Mayan-side way to resolve a uuid back to
+  one, so these rows are the only place that mapping lives.
 - **`ACCOUNTS.product_type` isn't just descriptive — it's constrained.**
   A customer's `ACTIVE` accounts may never repeat a `product_type` (a
   `CLOSED` and a new `ACTIVE` `personal_loan` account can coexist, two
