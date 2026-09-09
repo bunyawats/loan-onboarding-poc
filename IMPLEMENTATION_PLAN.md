@@ -879,8 +879,24 @@ project's Known Gaps already documents for other sessions) and why it
 didn't block finishing the verification. Full unit suite (329 tests)
 and `lint-imports` (10/10) green throughout every task.
 
-**Next: this plan's own backlog is empty again.** Two small,
-non-blocking items remain from earlier phases, neither urgent: the
+**Phase 25 (Track Mayan's real UUID alongside its integer id) added
+after Phase 24 closed — design-only, no code written yet.** Requested
+by the user directly ("use mayan UUID property for mayan_document_id
+in all 3 tables"). Verified against the real, live Mayan instance
+before designing anything: every document does carry a real `uuid`
+(confirmed on both the detail and, usefully, the list endpoint — no
+extra per-document fetch needed for the P25-5 backfill), but Mayan's
+REST API is entirely id-addressed for actual operations —
+`GET /documents/<uuid>/` 404s, `?uuid=` as a list filter is silently
+ignored — both confirmed live, meaning the integer id can't be
+dropped, only supplemented. Confirmed the exact column shape with the
+user via `AskUserQuestion`: `mayan_document_id` renamed to
+`mayan_document_uuid TEXT` (repurposed to literally hold the uuid, as
+asked), plus a new `mayan_id INTEGER` column for the id every real
+Mayan call still needs. **Next: P25-1** (`db/schema.sql`). See Phase
+25's own preamble for the full research and design.
+
+Two small, non-blocking items remain from earlier phases, neither urgent: the
 `WorkflowAlreadyStartedError` gap Phase 22 left open still hasn't been
 added to `CLAUDE.md`'s Known Gaps / the `known-gaps-and-gotchas` skill;
 `reconcile.py` doesn't yet cross-check the three new Phase 24 tables
@@ -6364,6 +6380,144 @@ own scope.
 
 ---
 
+## Phase 25 — Track Mayan's real UUID alongside its integer id
+
+**Depends on:** Phase 24 (`application_document`/`account_document`/
+`customer_document`, `document/db.py`/`service.py`, all touched here).
+**Not part of the original build-out** — requested directly by the
+user ("use mayan UUID property for mayan_document_id in all 3
+tables"), a direct revisit of a design point Phase 24 itself already
+flagged: that phase deliberately chose Mayan's plain integer `id` over
+its real `uuid` field, reasoning at the time that nothing in this
+codebase had ever captured the `uuid`. This phase closes that gap for
+real, once actually asked for.
+
+**Verified against the real, live Mayan instance before designing
+anything** (not assumed from documentation): every real document
+*does* carry a genuine `uuid` field (e.g.
+`287e5db0-20f3-4404-8073-51faddd01dd0`), confirmed on both
+`GET /documents/{id}/` and, usefully, already present on every result
+of the paginated `GET /documents/` list endpoint too (no extra
+per-document fetch needed to backfill it later). **But Mayan's REST
+API is entirely id-addressed for actual operations, not
+uuid-addressable at all** — `GET /documents/<uuid>/` returns a real
+`404`, and `?uuid=<value>` as a list-endpoint filter is silently
+ignored (returns the full unfiltered page) — both confirmed live, not
+assumed. So the integer id can't be dropped: every real Mayan call
+this codebase makes (file streaming, metadata attach, file upload) still
+needs it, and there is no Mayan-side way to resolve a UUID back to an
+id — this app's own Postgres row is the only place that mapping can
+live.
+
+**Design, confirmed with the user via `AskUserQuestion` (recommended
+option chosen)**: `mayan_document_id` is renamed to
+`mayan_document_uuid TEXT NOT NULL` and repurposed to literally hold
+Mayan's `uuid` field, exactly as asked; a **new** `mayan_id INTEGER
+NOT NULL` column is added alongside it to hold the integer id every
+real Mayan API call still requires. Both stay `UNIQUE` per table (each
+still identifies exactly one Mayan document). `mayan_client.create_document(...)`'s
+own POST response already includes `uuid` (confirmed live) — every
+write path that creates a *new* Mayan document (`upload`,
+`promote_government_id_to_customer_photo`'s copy-creation,
+`generate_welcome_letter`, `upload_consent`'s create-first-version
+branch) captures it from that same response, no second Mayan call
+added. `upload_consent`'s re-upload branch creates no new Mayan
+document (true file-versioning, same document id) — its
+`mayan_document_uuid` comes from the *existing* Postgres row, not a
+fresh Mayan fetch, since the document's identity (and therefore its
+uuid) hasn't changed.
+
+**Deliberately out of scope, per the literal request**: `DocumentRef`
+(`document/models.py`) is not changed — `document_id` stays Mayan's
+integer id, unchanged public meaning, since every existing caller
+(every `preview(...)` route, every URL) is built around it and nothing
+asked for that to change. The new UUID is stored, not yet surfaced
+anywhere outside `document/db.py`'s own rows — a real, deliberate
+scope boundary, not an oversight; surfacing it publicly (e.g. in
+preview URLs, to stop them being sequentially guessable) would be a
+separate, later decision.
+
+- [ ] **P25-1** — `db/schema.sql`: in all three tables
+      (`application_document`, `account_document`, `customer_document`),
+      rename `mayan_document_id INTEGER NOT NULL` to
+      `mayan_document_uuid TEXT NOT NULL`, add `mayan_id INTEGER NOT
+      NULL`, and rename/add the two matching unique indexes per table
+      (`ux_<table>_mayan_document_uuid`, `ux_<table>_mayan_id`). Same
+      "no migration tooling, verify against a scratch database" —
+      the live stack's own `db` volume gets a real backfill in P25-5,
+      not here (128 real documents to account for).
+      DoD: schema applies cleanly to a fresh database; both new/renamed
+      columns reject a raw duplicate insert via their own unique index.
+
+- [ ] **P25-2** — `document/db.py`: every insert/upsert function
+      (`insert_application_document`, `upsert_account_document`,
+      `upsert_customer_document`) takes `mayan_document_uuid: str` and
+      `mayan_id: int` instead of a single `mayan_document_id: int`;
+      `upsert_*`'s `ON CONFLICT ... DO UPDATE SET` also updates
+      `mayan_document_uuid` alongside `mayan_id`. The by-id lookup
+      functions (`get_application_document_by_mayan_id`,
+      `get_account_document_by_mayan_id`) keep their names (still look
+      up by the integer id — `preview`/`preview_account_document`'s
+      ownership check still receives an int from the URL, unaffected by
+      this phase) but query the renamed `mayan_id` column.
+      DoD: `tests/unit/document/test_db.py` updated for the new
+      parameter shape; new coverage proves a re-upload
+      (`upsert_account_document`/`upsert_customer_document` called
+      twice for the same `(reference_id, category)`) updates both
+      `mayan_id` *and* `mayan_document_uuid` on the same row.
+
+- [ ] **P25-3** — `document/service.py`: every call site that creates a
+      new Mayan document (`upload`, `promote_government_id_to_customer_photo`,
+      `generate_welcome_letter`, `upload_consent`'s create branch)
+      captures `document["uuid"]` from `create_document(...)`'s own
+      response and passes it through to the matching `document_db`
+      call; `upload_consent`'s re-upload branch reuses the existing
+      Postgres row's own `mayan_document_uuid` instead. The three
+      `_application_document_ref`/`_account_document_ref`/
+      `_customer_document_ref` helpers read `record["mayan_id"]` for
+      `DocumentRef.document_id` (unchanged public meaning — see this
+      phase's preamble). `tests/unit/document/fake_mayan_client.py`'s
+      `create_document` gains a fake `uuid` in its returned dict (and
+      stores it on `_StoredDocument`) so `FakeMayanClient`-backed tests
+      exercise the same shape the real API returns.
+      DoD: `tests/unit/document/test_service.py`'s existing suite passes
+      with the new parameter/column shape; new coverage proves a real
+      `mayan_document_uuid` lands in Postgres after `upload`/
+      `generate_welcome_letter`/`upload_consent`'s first call, and that
+      a `upload_consent` re-upload keeps the *same* `mayan_document_uuid`
+      (proving the re-upload branch doesn't fabricate a new one). Full
+      unit suite green, `lint-imports` unaffected (no new imports).
+
+- [ ] **P25-4** — `CLAUDE.md`/`docs/diagrams/er-diagram.md`: update the
+      three `*_DOCUMENT` table descriptions/entity blocks for the
+      `mayan_document_uuid`/`mayan_id` split, and the reasoning
+      (Mayan's API being id-only, confirmed live) for why both columns
+      exist rather than just the uuid.
+      DoD: both docs describe the actually-built shape.
+
+- [ ] **P25-5** — Live migration + live-verification. Migrate the live
+      stack's `db` volume: add `mayan_id INTEGER`/`mayan_document_uuid
+      TEXT` to all three tables, backfill `mayan_id` from the existing
+      `mayan_document_id` values (a plain column copy, no Mayan call
+      needed) and `mayan_document_uuid` from a live Mayan
+      `list_documents` pass (already returns `uuid` per document,
+      confirmed in this phase's own research — one paginated scan
+      backfills all 128 rows, no per-document fetch needed), *then*
+      drop the old `mayan_document_id` column and add the two new
+      unique indexes. Rebuild/restart `app`/`worker-workflow`/
+      `worker-activity`. Live-verify through the real browser and a
+      direct script (same shape P24-5 already used): upload, list,
+      preview, and a `upload_consent` re-upload all still work
+      correctly, and the newly-backfilled `mayan_document_uuid` values
+      are spot-checked via `psql` against a couple of real documents'
+      actual Mayan `uuid` fields (fetched live, not assumed).
+      DoD: all 128 real rows carry a correct, live-verified
+      `mayan_document_uuid`; `app`/`worker-workflow`/`worker-activity`
+      running current code against the migrated volume; full
+      upload/list/preview/re-upload cycle confirmed working live.
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -6372,6 +6526,35 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (Phase 25 added, design-only, no code written)** —
+  Requested directly by the user: "use mayan UUID property for
+  mayan_document_id in all 3 tables." Before designing anything,
+  verified two real facts against the live Mayan instance rather than
+  assuming: (1) every real document does carry a genuine `uuid` field,
+  present on both the document-detail endpoint and, usefully, already
+  on every result of the paginated list endpoint too (no extra
+  per-document fetch needed for the eventual live backfill); (2)
+  Mayan's REST API is entirely id-addressed for real operations —
+  `GET /documents/<uuid>/` returned a real `404`, and `?uuid=<value>`
+  as a list-endpoint filter was silently ignored (returned the full
+  unfiltered page) — both confirmed live via direct requests, not
+  assumed from docs. This meant the literal request (repurpose the
+  `mayan_document_id` column to hold the uuid) couldn't simply replace
+  the integer id — every real Mayan call this codebase makes still
+  needs it, and there's no Mayan-side way to resolve a uuid back to an
+  id. Raised the resulting design fork back to the user via
+  `AskUserQuestion` rather than guessing: they picked the recommended
+  option — rename `mayan_document_id` to `mayan_document_uuid TEXT`
+  (repurposed to literally hold the uuid, matching the literal
+  request) and add a new `mayan_id INTEGER` column alongside it for
+  the id every real API call still needs. Also confirmed
+  `mayan_client.create_document(...)`'s own POST response already
+  includes `uuid` live, so no second Mayan call is needed on any write
+  path. Five-task breakdown (P25-1 schema, P25-2 `document/db.py`,
+  P25-3 `document/service.py` + `FakeMayanClient`, P25-4 `CLAUDE.md`/ER
+  diagram, P25-5 live migration + live-verification) written into this
+  file. Next session: P25-1.
 
 - **2026-09-09 (P24-5 done — Phase 24 fully complete)** — Migrated the
   live `loan_onboarding` database (`CREATE TABLE` for all three new
