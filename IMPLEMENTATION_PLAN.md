@@ -860,23 +860,25 @@ accumulation per category (matching today's multi-document behavior);
 id stored as a separate `mayan_document_id UNIQUE` column — corrected
 from the user's original "document UUID" phrasing after confirming by
 grep that this codebase has never captured Mayan's real `uuid` field
-anywhere, only its plain integer `id`. **P24-1 and P24-2 are now done**
-— `db/schema.sql` has all three new tables (verified against a
-disposable scratch container: schema applies cleanly, the two
-update-in-place unique indexes fire correctly, `application_document`'s
-deliberate lack of uniqueness confirmed too), and `document/db.py` (new
-file) has every insert/upsert/read function this phase's preamble
-designed, backed by 13 new tests against the real `loan_onboarding_test`
-database (now migrated with the three new tables — the live stack's own
-`db` volume is still untouched, real backfill deferred to P24-5). Full
-unit suite (324 tests) and `lint-imports` (10/10) both green — see
-P24-1/P24-2's own DONE notes for the full verification trace. **Next:
-P24-3** (`document/service.py` — rewrite every read function to query
-`document/db.py` only, add the Postgres-mirror write after each
-existing Mayan write, per this phase's Mayan-first write-ordering
-rule). See Phase 24's own preamble for the full design, including the
-new dual-write consistency risk this phase deliberately accepts and
-defers to a future `reconcile.py` extension.
+anywhere, only its plain integer `id`. **P24-1 through P24-3 are now
+done** — `db/schema.sql` has all three new tables, `document/db.py`
+(new file) has every insert/upsert/read function this phase's preamble
+designed (13 new tests, real Postgres), and `document/service.py` has
+been rewritten so every read function (`list_documents`,
+`check_completeness`, `list_account_documents`, `list_customer_documents`,
+`has_id_photo`) genuinely queries Postgres only — proven with a
+Mayan-client double that raises on any attribute access, not just
+asserted — while every write function still calls Mayan first, then
+mirrors into Postgres. Full unit suite (329 tests) and `lint-imports`
+(10/10) both green; a full-codebase grep confirmed zero files outside
+`document/` needed any change. The live stack's own `db` volume is
+still untouched — real backfill deferred to P24-5. **Next: P24-4**
+(`CLAUDE.md`/`docs/diagrams/er-diagram.md` — document the built shape:
+`document/` no longer "no Postgres of its own," the eight-table "Data
+storage" section, the new `idgen`-importer, the three new ER
+relationships). See Phase 24's own preamble for the full design,
+including the new dual-write consistency risk this phase deliberately
+accepts and defers to a future `reconcile.py` extension.
 
 Two small, non-blocking items remain from earlier phases, neither
 urgent: the `WorkflowAlreadyStartedError` gap Phase 22 left open (see
@@ -6106,7 +6108,7 @@ own scope.
       (10/10, `document/` → `idgen/` the only new edge, already an
       explicitly allowed exception) both green.
 
-- [ ] **P24-3** — `document/service.py`: rewrite `list_documents`/
+- [x] **P24-3** — `document/service.py`: rewrite `list_documents`/
       `check_completeness`/`list_account_documents`/
       `list_customer_documents`/`has_id_photo` to read `document/db.py`
       only, zero Mayan calls. `upload` gains a `document/db.py` insert
@@ -6145,6 +6147,61 @@ own scope.
       Postgres, not just Mayan's metadata; `upload_consent` called twice
       for the same account keeps one `account_document` row (same PK,
       updated `mayan_document_id`/`filename`).
+      DONE: every read function rewritten exactly as designed —
+      `list_documents`/`check_completeness`/`list_account_documents`/
+      `list_customer_documents` now call `document_db.get_*` directly,
+      zero Mayan calls; `has_id_photo` needed no code change at all
+      (already delegated to `list_customer_documents`, which now reads
+      Postgres for free). `upload` gains one `insert_application_document`
+      call after its Mayan sequence. `tag_application_documents` keeps
+      its Mayan metadata loop unchanged and adds one
+      `set_application_document_provisioning` call.
+      `promote_government_id_to_customer_photo`'s two `_documents_matching`
+      lookups (source document, existing customer copy) both became
+      Postgres reads (`get_application_documents` filtered to category,
+      `get_customer_document_by_category`); the Mayan trash-then-create
+      sequence is unchanged, with one `upsert_customer_document` call at
+      the end. `generate_welcome_letter` gains one `upsert_account_document`
+      call. `upload_consent` was restructured the most — both branches
+      (re-upload / create-first-version) now converge on a single
+      `upsert_account_document` call, replacing the old two-different-
+      return-shapes design (`dataclasses.replace(...)` vs. a fresh
+      `DocumentRef(...)`) with one shared `_account_document_ref(...)`
+      conversion; the `import dataclasses` this replaced is gone.
+      `list_all_documents` and `tag_application_documents`' own Mayan
+      metadata loop are untouched, exactly per this phase's own
+      preamble. `tests/unit/document/test_service.py`'s existing 18
+      tests all pass unmodified except one
+      (`test_preview_raises_when_document_has_no_uploaded_file`, which
+      used to bypass `service.upload` entirely to construct a
+      metadata-only Mayan document — now needs a real Postgres row to
+      get past the ownership check at all, so it uploads normally
+      first and then strips the fake client's file version out from
+      under it) — the file also gained a `pytestmark`
+      (`_clean_document_tables`, real Postgres, same shape
+      `tests/unit/application/`'s own exception already uses) and a
+      docstring documenting this directory-scoped testing exception,
+      matching that file's own precedent. Five new tests added, all
+      DoD-required: a real `application_document` row exists after
+      `upload`; `tag_application_documents` updates every row's
+      `account_id`/`customer_id` in Postgres, not just Mayan's fake
+      metadata (a different application's own row proven untouched);
+      `upload_consent` called twice keeps exactly one `account_document`
+      row (`get_account_documents` returns one, `filename` updated); and
+      two tests proving `list_documents`/`check_completeness`/
+      `list_account_documents`/`list_customer_documents`/`has_id_photo`
+      genuinely never touch Mayan anymore — a new `_ExplodingMayanClient`
+      double (any attribute access raises) is swapped in after seeding
+      real data through the normal upload path, and every one of these
+      five reads still returns correct results with zero exceptions
+      raised. Full unit suite (329 tests, up from 324 — 13 in
+      `test_db.py` from P24-2 plus these 5) and `lint-imports` (10/10)
+      both green; a full-codebase grep confirmed zero files outside
+      `document/` and its own tests needed any change (`reconcile.py`,
+      `bff_customer/routes.py`, `bff_backoffice/routes.py`,
+      `application/activities.py`, `application/service.py` all call
+      `document.service` with unchanged signatures and unchanged
+      `DocumentRef` return shape).
 
 - [ ] **P24-4** — `CLAUDE.md`: update `document/` module section (no
       longer "No Postgres of its own" — describe the three new tables,
@@ -6206,6 +6263,42 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P24-3 done)** — Rewrote `document/service.py`: every
+  read function (`list_documents`/`check_completeness`/
+  `list_account_documents`/`list_customer_documents`) now calls
+  `document_db.get_*` directly, zero Mayan calls;
+  `has_id_photo` needed no code change (already delegated to
+  `list_customer_documents`). `upload`/`generate_welcome_letter` each
+  gained one Postgres mirror call after their existing Mayan sequence;
+  `tag_application_documents` kept its Mayan metadata loop and added
+  one `set_application_document_provisioning` call;
+  `promote_government_id_to_customer_photo`'s two Mayan-scan lookups
+  became Postgres reads, Mayan trash-then-create sequence unchanged;
+  `upload_consent` was restructured the most — both branches now
+  converge on one `upsert_account_document` call, replacing the old
+  two-different-return-shapes design and dropping the now-unused
+  `dataclasses` import. `tests/unit/document/test_service.py` gained a
+  `pytestmark` opting into real Postgres (`_clean_document_tables`,
+  same non-autouse shape `tests/unit/application/`'s own exception
+  uses) — its existing 18 tests all pass unmodified except one, which
+  used to bypass `service.upload` to build a metadata-only Mayan
+  document directly and needed reworking to get a real Postgres row
+  first. Five new tests prove every DoD claim for real, including two
+  that swap in a new `_ExplodingMayanClient` double (any attribute
+  access raises) after seeding data through the normal upload path,
+  confirming every rewritten read function returns correct results
+  with zero exceptions raised — i.e. genuinely touches no Mayan call,
+  not just "happens to still pass" with the fake present. Full unit
+  suite (329 tests, up from 324) and `lint-imports` (10/10) both green;
+  grepped the whole codebase for every external caller of
+  `document.service` (`reconcile.py`, both BFFs' routes,
+  `application/activities.py`/`service.py`) and confirmed none needed
+  any change — same "narrower blast radius, confirmed not just
+  assumed" discipline Phase 23 established. Next session: P24-4
+  (`CLAUDE.md`/ER diagram updates), then P24-5 (the live migration +
+  the actual point of this whole phase — stopping the real `mayan`
+  container and confirming document listings still work).
 
 - **2026-09-09 (P24-2 done)** — Built `document/db.py` (this module's
   first-ever `db.py`): `insert_application_document` (idgen-mint +

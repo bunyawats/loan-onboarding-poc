@@ -1,9 +1,25 @@
+"""**Phase 24, "Document metadata persistence in Postgres"** (see
+CLAUDE.md / IMPLEMENTATION_PLAN.md): these tests now hit a real
+Postgres too, not just the `FakeMayanClient` double below -- the same
+deliberate exception `tests/unit/application/conftest.py` already
+documents for its own directory, applied here for the first time.
+Every read function this phase rewrote (`list_documents`,
+`check_completeness`, `list_customer_documents`, `list_account_documents`)
+reads `document/db.py` directly now, so a test that only stubs Mayan
+can no longer prove those functions behave correctly -- the real
+`_clean_document_tables` fixture (`conftest.py`, opt-in, same
+non-autouse shape `tests/unit/application/`'s own fixture uses) is
+required package-wide in this file via `pytestmark` below."""
+
 import pytest
 
+from loan_onboarding.document import db as document_db
 from loan_onboarding.document import service
 from loan_onboarding.document.models import UploadedFile
 
 from .fake_mayan_client import FakeMayanClient
+
+pytestmark = pytest.mark.usefixtures("_clean_document_tables")
 
 
 @pytest.fixture(autouse=True)
@@ -11,6 +27,15 @@ def fake_client(monkeypatch):
     fake = FakeMayanClient()
     monkeypatch.setattr(service, "mayan_client", fake)
     return fake
+
+
+class _ExplodingMayanClient:
+    """Any attribute access raises -- used to prove a service function
+    genuinely doesn't call into Mayan anymore (Phase 24), not just that
+    it happens to still pass with `FakeMayanClient` present."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"document.service unexpectedly touched mayan_client.{name}")
 
 
 async def test_upload_attaches_all_three_metadata_fields_and_rebuilds(fake_client):
@@ -149,15 +174,16 @@ async def test_preview_raises_when_document_belongs_to_different_application(fak
 
 
 async def test_preview_raises_when_document_has_no_uploaded_file(fake_client):
-    # Directly create a document with metadata but no file version, to
-    # exercise the file_latest-missing branch.
-    doc_type_ids = await fake_client.document_type_ids()
-    metadata_type_ids = await fake_client.metadata_type_ids()
-    document = await fake_client.create_document(doc_type_ids["Application Document"], "empty.pdf")
-    await fake_client.attach_metadata(document["id"], metadata_type_ids["application_id"], "app-1")
+    """Exercises `_stream_document`'s own `file_latest`-missing branch.
+    Phase 24: the ownership check itself now reads Postgres, not Mayan
+    metadata, so this needs a real `application_document` row to get
+    past that check at all -- upload normally, then strip the Mayan
+    file version out from under it directly on the fake double."""
+    ref = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("empty.pdf", b"content"))
+    fake_client.documents[ref.document_id].file_versions = []
 
     with pytest.raises(service.DocumentNotFound):
-        await service.preview("app-1", document["id"])
+        await service.preview("app-1", ref.document_id)
 
 
 async def test_preview_account_document_streams_matching_document(fake_client):
@@ -397,3 +423,87 @@ async def test_list_customer_documents_and_list_account_documents(fake_client):
     account_docs = await service.list_account_documents("acct-1")
     assert len(account_docs) == 1
     assert account_docs[0].category == "Welcome Letter"
+
+
+# ---------------------------------------------------------------
+# Phase 24 -- new coverage proving the primary-source-of-truth switch
+# is real, not just that the existing suite happens to still pass.
+# ---------------------------------------------------------------
+
+
+async def test_upload_writes_a_real_application_document_row(fake_client):
+    ref = await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"content"))
+
+    records = await document_db.get_application_documents("app-1")
+    assert len(records) == 1
+    assert records[0]["mayan_document_id"] == ref.document_id
+    assert records[0]["filename"] == "id.pdf"
+    assert records[0]["category"] == "Government ID"
+    assert records[0]["account_id"] is None
+
+
+async def test_tag_application_documents_updates_postgres_rows_too(fake_client):
+    """Distinct from test_tag_application_documents_tags_every_category_and_rebuilds_once
+    above, which only checks Mayan's own fake metadata -- this checks
+    the new Postgres side of the same call."""
+    await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))
+    await service.upload("alice@example.com", "app-1", "Proof of Income", UploadedFile("inc.pdf", b"2"))
+    await service.upload("bob@example.com", "app-2", "Government ID", UploadedFile("b.pdf", b"3"))
+
+    await service.tag_application_documents("app-1", "acct-1", "cust-1")
+
+    app1_records = await document_db.get_application_documents("app-1")
+    assert len(app1_records) == 2
+    for record in app1_records:
+        assert record["account_id"] == "acct-1"
+        assert record["customer_id"] == "cust-1"
+
+    # A different application's own row is untouched.
+    app2_records = await document_db.get_application_documents("app-2")
+    assert app2_records[0]["account_id"] is None
+    assert app2_records[0]["customer_id"] is None
+
+
+async def test_upload_consent_reupload_keeps_one_postgres_row(fake_client):
+    """The actual point of account_document's uniqueness -- a second
+    upload_consent call for the same account updates the SAME row
+    (same account_document_id), not a second one."""
+    first = await service.upload_consent("alice@example.com", "acct-1", "cust-1", UploadedFile("consent_v1.pdf", b"v1"))
+    second = await service.upload_consent("alice@example.com", "acct-1", "cust-1", UploadedFile("consent_v2.pdf", b"v2"))
+
+    records = await document_db.get_account_documents("acct-1")
+    assert len(records) == 1
+    assert records[0]["filename"] == "consent_v2.pdf"
+    assert records[0]["mayan_document_id"] == first.document_id == second.document_id
+
+
+async def test_list_documents_and_check_completeness_never_touch_mayan(fake_client, monkeypatch):
+    """Proves the read path really doesn't call into Mayan anymore
+    (Phase 24), not just that it happens to still pass with
+    FakeMayanClient present -- swaps in a double that raises on any
+    attribute access after seeding real data through the normal
+    (Mayan-touching) upload path."""
+    for category in ["Government ID", "Proof of Income", "Bank Statements", "Credit Report"]:
+        await service.upload("alice@example.com", "app-1", category, UploadedFile(f"{category}.pdf", b"x"))
+
+    monkeypatch.setattr(service, "mayan_client", _ExplodingMayanClient())
+
+    docs = await service.list_documents("app-1")
+    assert len(docs) == 4
+
+    missing = await service.check_completeness("app-1", "personal_loan")
+    assert missing == []
+
+
+async def test_list_account_and_customer_documents_never_touch_mayan(fake_client, monkeypatch):
+    await service.generate_welcome_letter("alice@example.com", "acct-1", "cust-1", "Alice", "personal_loan", "10000")
+    await service.promote_government_id_to_customer_photo(
+        (await service.upload("alice@example.com", "app-1", "Government ID", UploadedFile("id.pdf", b"1"))).application_id,
+        "cust-1",
+    )
+
+    monkeypatch.setattr(service, "mayan_client", _ExplodingMayanClient())
+
+    assert len(await service.list_account_documents("acct-1")) == 1
+    assert len(await service.list_customer_documents("cust-1")) == 1
+    assert await service.has_id_photo("cust-1") is True

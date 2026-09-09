@@ -2,6 +2,26 @@
 Mayan EDMS (CLAUDE.md's module dependency graph: `document/` is a leaf,
 never imports `application/` or `workflow/`).
 
+**Phase 24, "Document metadata persistence in Postgres"** (see
+CLAUDE.md / IMPLEMENTATION_PLAN.md): every read function below
+(`list_documents`, `check_completeness`, `list_account_documents`,
+`list_customer_documents`, `has_id_photo`) now queries `document/db.py`
+directly -- the new `application_document`/`account_document`/
+`customer_document` tables are the PRIMARY source of truth for "what
+documents exist," not a fallback cache, and zero Mayan calls happen on
+these paths anymore. Every write function still calls Mayan first
+(create/upload/attach-metadata, unchanged -- Mayan is still the system
+of record for actual file bytes and the visual Index Template tree
+staff browse), *then* writes the Postgres mirror -- this ordering is
+deliberate, see `document/db.py`'s own module docstring for the
+accepted dual-write risk it trades for. `list_all_documents()` is the
+one deliberate exception -- it keeps scanning Mayan directly (via
+`_documents_matching`, `_fetch_all_documents`, `_metadata_map_for_id`,
+still used for that and by `tag_application_documents`' own Mayan
+metadata loop), since its entire job (backing `reconcile.py`'s
+cross-system orphan scan) only makes sense comparing Mayan's own truth
+against Postgres, not reading the mirror it's checking.
+
 Per-product-type required-category table (PRD §6.4) is owned here as a
 plain hardcoded dict, not imported from `workflow.task_queues` --
 `document/` never imports `workflow/`, even for a registry, so this is a
@@ -20,11 +40,12 @@ if that assumption stops holding.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from typing import Any
 
+import asyncpg
 import httpx
 
+from . import db as document_db
 from .mayan_client import (
     DOCUMENT_TYPE_ACCOUNT,
     DOCUMENT_TYPE_APPLICATION,
@@ -80,6 +101,39 @@ _MAX_SEARCH_CANDIDATES = 1000
 
 class DocumentNotFound(Exception):
     pass
+
+
+def _application_document_ref(record: asyncpg.Record) -> DocumentRef:
+    return DocumentRef(
+        document_id=record["mayan_document_id"],
+        filename=record["filename"],
+        category=record["category"],
+        applicant_identifier=record["applicant_identifier"],
+        application_id=record["application_id"],
+        account_id=record["account_id"],
+        customer_id=record["customer_id"],
+    )
+
+
+def _account_document_ref(record: asyncpg.Record) -> DocumentRef:
+    return DocumentRef(
+        document_id=record["mayan_document_id"],
+        filename=record["filename"],
+        category=record["category"],
+        applicant_identifier=record["applicant_identifier"],
+        account_id=record["account_id"],
+        customer_id=record["customer_id"],
+    )
+
+
+def _customer_document_ref(record: asyncpg.Record) -> DocumentRef:
+    return DocumentRef(
+        document_id=record["mayan_document_id"],
+        filename=record["filename"],
+        category=record["category"],
+        applicant_identifier=record["applicant_identifier"],
+        customer_id=record["customer_id"],
+    )
 
 
 async def _fetch_all_documents(cap: int = _MAX_SEARCH_CANDIDATES) -> list[dict[str, Any]]:
@@ -200,6 +254,18 @@ async def upload(
 
     await mayan_client.rebuild_index()
 
+    # Postgres mirror, written only after Mayan succeeds (Phase 24's
+    # write-ordering rule -- see this module's own docstring and
+    # document/db.py's).
+    await document_db.insert_application_document(
+        mayan_document_id=document_id,
+        application_id=application_id,
+        applicant_identifier=applicant_identifier,
+        category=category,
+        filename=file.filename,
+        customer_id=customer_id,
+    )
+
     return DocumentRef(
         document_id=document_id,
         filename=file.filename,
@@ -211,7 +277,9 @@ async def upload(
 
 
 async def list_documents(application_id: str) -> list[DocumentRef]:
-    return await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id})
+    """Reads `document/db.py` only (Phase 24) -- zero Mayan calls."""
+    records = await document_db.get_application_documents(application_id)
+    return [_application_document_ref(r) for r in records]
 
 
 async def list_all_documents() -> list[DocumentRef]:
@@ -229,11 +297,13 @@ async def list_all_documents() -> list[DocumentRef]:
 async def check_completeness(
     application_id: str, product_type: str, exclude_categories: list[str] | None = None
 ) -> list[str]:
-    """Missing required categories, empty if satisfied. Queries Mayan's
-    document/metadata search directly (via `_documents_matching`) --
-    never the Index Template tree, whose rebuild is async and would risk
-    a false "still missing" result immediately after the customer's last
-    upload (CLAUDE.md's "Document hierarchy").
+    """Missing required categories, empty if satisfied. Reads
+    `document/db.py` only (Phase 24) -- zero Mayan calls, and no risk of
+    the Index Template tree's async rebuild lag producing a false "still
+    missing" result immediately after the customer's last upload
+    (CLAUDE.md's "Document hierarchy") -- that risk only ever applied to
+    reading the *tree*, never applied to Mayan's own document/metadata
+    search either, and doesn't apply to a direct Postgres read.
 
     `exclude_categories` is a small, general parameter rather than a
     Government-ID-specific special case, even though Government ID is
@@ -241,8 +311,8 @@ async def check_completeness(
     returning-customer reuse path excludes today (CLAUDE.md's
     "Returning-customer profile refresh and ID reuse")."""
     required = [c for c in REQUIRED_CATEGORIES[product_type] if c not in (exclude_categories or [])]
-    documents = await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id})
-    present = {doc.category for doc in documents}
+    records = await document_db.get_application_documents(application_id)
+    present = {record["category"] for record in records}
     return [category for category in required if category not in present]
 
 
@@ -265,12 +335,13 @@ async def _stream_document(document_id: int) -> DocumentStream:
 
 
 async def preview(application_id: str, document_id: int) -> DocumentStream:
-    """Streams the file from Mayan for in-app viewing -- verifies
-    `document_id` actually belongs to `application_id` first (via its
-    real metadata, not trust in the caller's URL) so neither BFF needs
-    its own Mayan credentials nor exposes an arbitrary document by id."""
-    metadata = await _metadata_map_for_id(document_id)
-    if metadata is None or metadata.get(METADATA_FIELD_APPLICATION_ID) != application_id:
+    """Streams the file from Mayan for in-app viewing (file bytes still
+    only live there) -- verifies `document_id` actually belongs to
+    `application_id` first via `document/db.py` (Phase 24 -- Postgres
+    now, replacing a live Mayan metadata fetch) so neither BFF needs its
+    own Mayan credentials nor exposes an arbitrary document by id."""
+    record = await document_db.get_application_document_by_mayan_id(document_id)
+    if record is None or record["application_id"] != application_id:
         raise DocumentNotFound(f"document {document_id} not found for application {application_id}")
     return await _stream_document(document_id)
 
@@ -280,8 +351,8 @@ async def preview_account_document(account_id: str, document_id: int) -> Documen
     `account_id` instead -- needed for account-level documents (Consent,
     Welcome Letter) that carry no `application_id` at all, so `preview`
     itself can never authorize them."""
-    metadata = await _metadata_map_for_id(document_id)
-    if metadata is None or metadata.get(METADATA_FIELD_ACCOUNT_ID) != account_id:
+    record = await document_db.get_account_document_by_mayan_id(document_id)
+    if record is None or record["account_id"] != account_id:
         raise DocumentNotFound(f"document {document_id} not found for account {account_id}")
     return await _stream_document(document_id)
 
@@ -302,7 +373,17 @@ async def tag_application_documents(application_id: str, account_id: str, custom
     carries is a real 400 (confirmed live in P16-4, corrected from an
     earlier draft of this docstring that assumed otherwise without
     testing it), so both attaches here go through `_set_metadata`
-    (update-in-place if already present)."""
+    (update-in-place if already present).
+
+    **Phase 24**: still keeps this exact Mayan metadata loop (the
+    visual Index Template tree still needs it -- CLAUDE.md's "Document
+    hierarchy") and additionally calls
+    `document_db.set_application_document_provisioning` once, after the
+    Mayan side succeeds -- one `UPDATE` touching every
+    `application_document` row for this application at once, rather
+    than a per-document Mayan-metadata-style loop, since Postgres has
+    no equivalent per-document `attach_metadata` friction to work
+    around."""
     matches = await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id})
     if not matches:
         return
@@ -312,6 +393,8 @@ async def tag_application_documents(application_id: str, account_id: str, custom
         await _set_metadata(doc.document_id, METADATA_FIELD_ACCOUNT_ID, account_id, metadata_type_ids[METADATA_FIELD_ACCOUNT_ID])
         await _set_metadata(doc.document_id, METADATA_FIELD_CUSTOMER_ID, customer_id, metadata_type_ids[METADATA_FIELD_CUSTOMER_ID])
     await mayan_client.rebuild_index()
+
+    await document_db.set_application_document_provisioning(application_id, account_id, customer_id)
 
 
 async def promote_government_id_to_customer_photo(application_id: str, customer_id: str) -> None:
@@ -339,26 +422,39 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
     copy (if any) is trashed first (`DELETE /documents/{id}/`, Mayan's
     own soft-delete -- reversible, same convention this project already
     uses elsewhere) before the new copy is created, so there's still
-    never more than one at a time."""
-    matches = await _documents_matching({METADATA_FIELD_APPLICATION_ID: application_id, METADATA_FIELD_CATEGORY: CATEGORY_GOVERNMENT_ID})
-    if not matches:
+    never more than one at a time.
+
+    **Phase 24**: the "does a Government ID document exist under this
+    application" and "does the customer already have a copy" lookups
+    both now read `document/db.py` (Postgres) instead of
+    `_documents_matching` (a live Mayan scan) -- `get_application_documents`
+    filtered to this category for the source,
+    `get_customer_document_by_category` (backed by the real
+    `(customer_id, category)` unique index) for the existing copy. The
+    Mayan-side trash-then-recreate sequence below is otherwise
+    unchanged; the Postgres mirror is written once at the end, via
+    `document_db.upsert_customer_document` -- its own `ON CONFLICT
+    (customer_id, category) DO UPDATE` is what actually replaces the
+    old copy's row in place, so there's no separate Postgres delete
+    call needed the way there is on the Mayan side."""
+    application_documents = await document_db.get_application_documents(application_id)
+    source_record = next(
+        (record for record in application_documents if record["category"] == CATEGORY_GOVERNMENT_ID), None
+    )
+    if source_record is None:
         return
 
-    source = matches[0]
+    source = _application_document_ref(source_record)
     content = await mayan_client.download_file(source.document_id)
 
-    # The customer-level copy is identified by carrying customer_id but
-    # neither application_id nor account_id -- the one shape no other
-    # document in this codebase ever has (every real Application/Account
-    # Document is owned by at least one of the two). Scoped to
-    # category=Government ID too, though that's redundant in practice
-    # (a copy is never created under any other category) -- cheap and
-    # matches this function's own creation logic below.
-    existing_copies = await _documents_matching({METADATA_FIELD_CUSTOMER_ID: customer_id, METADATA_FIELD_CATEGORY: CATEGORY_GOVERNMENT_ID})
-    for doc in existing_copies:
-        if doc.application_id is None and doc.account_id is None:
-            response = await mayan_client.delete(f"/documents/{doc.document_id}/")
-            response.raise_for_status()
+    # The customer-level copy is identified by the (customer_id,
+    # category) unique index on customer_document -- at most one row,
+    # by construction (see db/schema.sql's
+    # ux_customer_document_customer_category).
+    existing_copy = await document_db.get_customer_document_by_category(customer_id, CATEGORY_GOVERNMENT_ID)
+    if existing_copy is not None:
+        response = await mayan_client.delete(f"/documents/{existing_copy['mayan_document_id']}/")
+        response.raise_for_status()
 
     doc_type_ids, metadata_type_ids = await asyncio.gather(
         mayan_client.document_type_ids(), mayan_client.metadata_type_ids()
@@ -375,6 +471,14 @@ async def promote_government_id_to_customer_photo(application_id: str, customer_
         await mayan_client.attach_metadata(copy_document_id, metadata_type_ids[field], value)
 
     await mayan_client.rebuild_index()
+
+    await document_db.upsert_customer_document(
+        mayan_document_id=copy_document_id,
+        customer_id=customer_id,
+        applicant_identifier=source.applicant_identifier,
+        category=CATEGORY_GOVERNMENT_ID,
+        filename=source.filename,
+    )
 
 
 async def has_id_photo(customer_id: str) -> bool:
@@ -431,6 +535,20 @@ async def generate_welcome_letter(
         await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
     await mayan_client.rebuild_index()
+
+    # Postgres mirror (Phase 24), written only after Mayan succeeds.
+    # Always the insert branch in practice (exactly one Welcome Letter
+    # per account, never re-generated) -- the upsert's ON CONFLICT DO
+    # UPDATE path exists for account_document's uniqueness rule
+    # generally, not because this call is expected to hit it.
+    await document_db.upsert_account_document(
+        mayan_document_id=document_id,
+        account_id=account_id,
+        applicant_identifier=applicant_identifier,
+        customer_id=customer_id,
+        category="Welcome Letter",
+        filename=filename,
+    )
 
     return DocumentRef(
         document_id=document_id,
@@ -506,56 +624,73 @@ async def upload_consent(
     actually behaves like "this is now the current version", matching
     what `upload_consent` needs). CLAUDE.md's original placeholder
     (`action_name="new"*`, flagged "confirm during this task") was
-    wrong and has been corrected in place."""
-    existing = await _documents_matching({METADATA_FIELD_ACCOUNT_ID: account_id, METADATA_FIELD_CATEGORY: CATEGORY_CONSENT})
+    wrong and has been corrected in place.
 
-    if existing:
-        document_id = existing[0].document_id
+    **Phase 24**: the "does a document already exist" check reads
+    `document_db.get_account_document_by_category` (Postgres) instead
+    of `_documents_matching` (a live Mayan scan). Both branches below
+    now converge on one `document_db.upsert_account_document` call at
+    the end, written only after Mayan succeeds -- on the re-upload
+    branch this is genuinely an update-in-place (same
+    `account_document_id`, same `mayan_document_id` since Mayan
+    versioned the *existing* document rather than creating a new one,
+    new `filename`/`updated_at`); on the create-first-version branch
+    it's the insert path. Replaces the old two-different-return-shapes
+    design (`dataclasses.replace(...)` on the re-upload branch, a fresh
+    `DocumentRef(...)` on the other) with one shared
+    `_account_document_ref(...)` conversion of whichever row the upsert
+    returns."""
+    existing = await document_db.get_account_document_by_category(account_id, CATEGORY_CONSENT)
+
+    if existing is not None:
+        document_id = existing["mayan_document_id"]
         await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
-        return dataclasses.replace(existing[0], filename=file.filename)
+    else:
+        doc_type_ids, metadata_type_ids = await asyncio.gather(
+            mayan_client.document_type_ids(), mayan_client.metadata_type_ids()
+        )
+        document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_ACCOUNT], file.filename)
+        document_id = document["id"]
 
-    doc_type_ids, metadata_type_ids = await asyncio.gather(
-        mayan_client.document_type_ids(), mayan_client.metadata_type_ids()
-    )
-    document = await mayan_client.create_document(doc_type_ids[DOCUMENT_TYPE_ACCOUNT], file.filename)
-    document_id = document["id"]
+        await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
 
-    await mayan_client.upload_file(document_id, file.filename, file.content, action_name="replace")
+        for field, value in [
+            (METADATA_FIELD_APPLICANT_IDENTIFIER, applicant_identifier),
+            (METADATA_FIELD_ACCOUNT_ID, account_id),
+            (METADATA_FIELD_CATEGORY, CATEGORY_CONSENT),
+            (METADATA_FIELD_CUSTOMER_ID, customer_id),
+        ]:
+            await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
 
-    for field, value in [
-        (METADATA_FIELD_APPLICANT_IDENTIFIER, applicant_identifier),
-        (METADATA_FIELD_ACCOUNT_ID, account_id),
-        (METADATA_FIELD_CATEGORY, CATEGORY_CONSENT),
-        (METADATA_FIELD_CUSTOMER_ID, customer_id),
-    ]:
-        await mayan_client.attach_metadata(document_id, metadata_type_ids[field], value)
+        await mayan_client.rebuild_index()
 
-    await mayan_client.rebuild_index()
-
-    return DocumentRef(
-        document_id=document_id,
-        filename=file.filename,
-        category=CATEGORY_CONSENT,
-        applicant_identifier=applicant_identifier,
+    record = await document_db.upsert_account_document(
+        mayan_document_id=document_id,
         account_id=account_id,
+        applicant_identifier=applicant_identifier,
         customer_id=customer_id,
+        category=CATEGORY_CONSENT,
+        filename=file.filename,
     )
+    return _account_document_ref(record)
 
 
 async def list_customer_documents(customer_id: str) -> list[DocumentRef]:
-    """The customer-level Government ID copy specifically -- documents
-    carrying `customer_id` but neither `application_id` nor `account_id`
-    (see `promote_government_id_to_customer_photo`). **Not** "every
-    document tagged with this customer_id" -- that would also match
-    every document under any of this customer's approved applications
-    (`tag_application_documents` tags all of them, not just Government
-    ID) and every Welcome Letter (`generate_welcome_letter`), neither of
-    which is "the customer's photo". At most one match at any time
-    (`promote_government_id_to_customer_photo` enforces this by trashing
-    the old copy before creating a new one)."""
-    matches = await _documents_matching({METADATA_FIELD_CUSTOMER_ID: customer_id})
-    return [doc for doc in matches if doc.application_id is None and doc.account_id is None]
+    """The customer-level Government ID copy specifically. **Phase 24**:
+    reads the `customer_document` table directly -- table identity
+    itself is now the disambiguator (a customer-level copy is a
+    `customer_document` row, full stop), replacing the old "carries
+    `customer_id` but neither `application_id` nor `account_id`"
+    heuristic `_documents_matching` needed when every document type
+    shared one flat Mayan metadata search. At most one row at any time
+    (`promote_government_id_to_customer_photo`'s `upsert_customer_document`
+    call enforces this via the real `(customer_id, category)` unique
+    index)."""
+    records = await document_db.get_customer_documents(customer_id)
+    return [_customer_document_ref(r) for r in records]
 
 
 async def list_account_documents(account_id: str) -> list[DocumentRef]:
-    return await _documents_matching({METADATA_FIELD_ACCOUNT_ID: account_id})
+    """Reads `document/db.py` only (Phase 24) -- zero Mayan calls."""
+    records = await document_db.get_account_documents(account_id)
+    return [_account_document_ref(r) for r in records]
