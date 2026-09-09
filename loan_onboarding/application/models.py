@@ -10,6 +10,24 @@ import asyncpg
 
 @dataclass(frozen=True, slots=True)
 class Application:
+    """The real loan application (`application_id`/`applicant_identifier`/
+    `customer_id`/`product_type`/`payload`/`applicant_*`/`amount`/
+    `status`/`created_at`) plus onboarding-workflow tracking, joined in
+    from a separate table (Phase 23, "Split loan application request
+    data (1:1)" -- see CLAUDE.md / IMPLEMENTATION_PLAN.md).
+
+    `status` is the one field guaranteed present regardless: it's
+    mirrored onto `applications` itself, so it survives even if
+    `loan_apply_requests` (the table every field below `status` in this
+    list actually lives on) is ever truncated. Every other field here
+    --- `workflow_id`, `underwriter_*`, `manager_*`, `updated_at` --- is
+    `None` in that degraded case (a `LEFT JOIN`, not a missing row --
+    see `application/db.py`'s own `_SELECT_JOINED`), not just "possibly
+    unset yet" the way they already could be pre-decision. `risk_tier`
+    is deliberately not a field here at all -- write-only via
+    `application/db.py`'s `update_decision`, never read back through
+    this model, unaffected by this split."""
+
     application_id: str
     applicant_identifier: str
     customer_id: str | None
@@ -28,7 +46,12 @@ class Application:
     manager_comment: str | None
     manager_decided_at: datetime | None
     created_at: datetime
-    updated_at: datetime
+    # Optional (Phase 23) -- this column now lives only on
+    # loan_apply_requests, so it's None whenever that row is missing
+    # (truncated), same as workflow_id/underwriter_*/manager_* above.
+    # Was NOT NULL pre-Phase-23; every other moved field was already
+    # Optional and is unaffected by this change.
+    updated_at: datetime | None
 
     @classmethod
     def from_record(cls, record: asyncpg.Record) -> "Application":

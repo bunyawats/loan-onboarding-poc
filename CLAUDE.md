@@ -730,12 +730,45 @@ doubles as `persist_decision`'s idempotency guard).
 
 ### 5. `application/` — Application module
 
-Owns the loan application entity, its `applications` table
-exclusively, and the **submission business rule** (the document-
+Owns the loan application entity, its `applications`/
+`loan_apply_requests` tables exclusively (two tables, one module — see
+below), and the **submission business rule** (the document-
 completeness gate, PRD §6.4) — the direct successor to
 `review-approval-temporal`'s `workflow/service.py`, scoped to the
 application domain specifically now that other domains have their own
 modules.
+
+**Split into two tables, 1:1 (built and live-verified — Phase 23).**
+`applications` holds the real loan application — `applicant_identifier`,
+`customer_id`, `product_type`, `payload`, `applicant_name`/`email`/
+`phone`, `amount` — plus a **mirrored** `status` column. A new
+`loan_apply_requests` table (`application_id` as its own PK — genuinely
+1:1, not 1:M like `account_closure_requests`; an application is
+submitted once, and a resubmission overwrites this row in place, same
+as it always has) holds onboarding-workflow tracking: `workflow_id`,
+the operational `status`, `underwriter_*`/`manager_*` decision columns,
+`risk_tier`, `created_at`/`updated_at`. **`status` deliberately lives on
+both** — `applications.status` is kept in sync with
+`loan_apply_requests.status` on every write (same transaction, never
+one without the other), so `applications` alone can always answer
+"what happened to this loan" even if `loan_apply_requests` is ever
+truncated — the same "denormalize on purpose" philosophy this file
+already documents for `applicant_name`/`email`/`phone`, just for
+`status` too. Every read (`get`/`list_for_applicant`/`list_by_status`)
+`LEFT JOIN`s the two tables — deliberately `LEFT`, not `JOIN`, since an
+inner join would make an application vanish from every list the moment
+its `loan_apply_requests` row is gone, defeating the entire point of
+the mirror; live-verified directly (not just in a unit test): a real,
+already-`REJECTED` application's `loan_apply_requests` row was deleted
+outright, and its outcome still rendered correctly — "Rejected", full
+document history intact — on both the customer detail page and the
+staff review dialog, then restored. `application/service.py`,
+`application/activities.py`, and both BFFs needed **zero code
+changes** for this split — confirmed by grep before the phase even
+started, then confirmed again by `git status` after: `application/db.py`
+already the sole code touching either table (this module's own
+`CLAUDE.md` discipline), and its functions keep returning the exact
+same merged record shape they always did.
 
 - `service.get_available_product_types(applicant_identifier) ->
   list[str]` — **read-only**, the proactive half of the
@@ -1269,29 +1302,41 @@ purpose-built identity problem — PRD §7.1).
 
 *(ER diagram: [`docs/diagrams/er-diagram.md`](docs/diagrams/er-diagram.md).)*
 
-**One application database, `loan_onboarding`**, holding all three
-domain tables — `customers` (owned by `customer/`), `accounts` (owned
-by `account/`), `applications` (owned by `application/`) — plus a
-separate `temporal` database for Temporal's own persistence, both in
-the **same Postgres container**. This is exactly
+**One application database, `loan_onboarding`**, holding all five
+domain tables — `customers` (owned by `customer/`), `accounts` +
+`account_closure_requests` (both owned by `account/`, Phase 22),
+`applications` + `loan_apply_requests` (both owned by `application/`,
+Phase 23) — plus a separate `temporal` database for Temporal's own
+persistence, both in the **same Postgres container**. This is exactly
 `review-approval-temporal`'s own two-database-one-container pattern
-(`db/init/*.sh` creates both), just with three app tables instead of
-one.
+(`db/init/*.sh` creates both), just with five app tables instead of
+one. Two of those five tables (`account_closure_requests`,
+`loan_apply_requests`) are 1:M/1:1 splits of another table *within the
+same owning module* — see each module's own section above for why;
+they still follow the "no real FKs" discipline below even though a
+cross-module coupling concern doesn't strictly apply to them.
 
-**No foreign keys between `accounts.customer_id` /
-`accounts.application_id` / `applications.customer_id` and the tables
-they reference**, even though they're physically in the same database
-now — deliberately, to keep the module boundary meaningful. A same-
-database FK would make it trivially easy (and someday tempting, under
-deadline pressure) to write a query that joins across module
-boundaries directly, silently reintroducing exactly the coupling the
-module split exists to prevent. Treat the three tables as if they were
-in separate databases even though they aren't; the only sanctioned way
-to resolve a `customer_id` into a name is a call to
+**No foreign keys anywhere in this schema** — not just between
+`accounts.customer_id`/`accounts.application_id`/
+`applications.customer_id` and the tables they reference (the
+cross-module case), but also `account_closure_requests.account_id` and
+`loan_apply_requests.application_id` (same-module links to
+`accounts`/`applications` respectively) — deliberately, for a uniform
+reason even though only the cross-module case is about preventing
+coupling: a same-database FK would make it trivially easy (and someday
+tempting, under deadline pressure) to write a query that joins across
+module boundaries directly, silently reintroducing exactly the
+coupling the module split exists to prevent, and a single uniform "no
+FKs, anywhere" rule is far easier to hold onto under pressure than
+"FKs are fine within a module, just not across one." Treat every table
+as if it were in a separate database even though none of them are; the
+only sanctioned way to resolve a `customer_id` into a name is a call to
 `customer.service.get(...)`. (`accounts.application_id` still gets a
 plain `UNIQUE` index — enforcing "at most one account per application"
 is a within-table constraint, not a cross-module join, so it doesn't
-raise the same concern a real FK would.)
+raise the same concern a real FK would; `loan_apply_requests.application_id`
+is its own `PRIMARY KEY` for the same reason, a 1:1 constraint, not a
+join-enabling one.)
 
 **Primary keys are short, human-readable, application-assigned
 strings — not database-generated `UUID`s.** Each entity type gets its
@@ -1436,7 +1481,8 @@ loan-onboarding-poc/
     │   ├── activities.py        # concrete Temporal activities -- see "Breaking
     │   │                        # the cycle"
     │   ├── models.py
-    │   └── db.py               # the ONLY code touching the `applications` table
+    │   └── db.py               # the ONLY code touching the `applications`/
+    │                          # `loan_apply_requests` tables (Phase 23)
     ├── document/
     │   ├── mayan_client.py
     │   └── service.py

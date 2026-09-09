@@ -20,4 +20,8 @@ from loan_onboarding.application import db
 async def _clean_applications_table():
     pool = await db._get_pool()
     yield
+    # loan_apply_requests has no real FK to applications (CLAUDE.md's
+    # "no real FKs between tables" rule, Phase 23) -- clean both
+    # explicitly, not relying on a cascade that doesn't exist.
+    await pool.execute("DELETE FROM loan_apply_requests")
     await pool.execute("DELETE FROM applications")

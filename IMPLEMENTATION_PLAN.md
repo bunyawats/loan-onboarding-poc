@@ -824,15 +824,39 @@ is unchanged from before Phase 22 — it relies on Temporal's own
 Postgres constraint (see P22-3's DONE note for the full trace); nothing
 today catches that exception and converts it to a clean error.
 
-**Next: this plan's own backlog is empty again.** Remaining work is
-only the Known Gaps in `CLAUDE.md` / the `known-gaps-and-gotchas` skill
-(now including the `WorkflowAlreadyStartedError` gap above, not yet
-added there — a future session should add it), plus whatever future
-work the user brings. The live `nats`/`temporal`/`db`/`risk-adapter`/
-`krakend`/`mock-risk-engine`/`worker-workflow`/`worker-activity`/`app`
-containers were all left running, all on current Phase 22 code, live
-database migrated — a fresh session can pick up any future phase
-directly against this already-current stack.
+**Phase 23 (Split loan application request data — 1:1) is complete —
+all four tasks (P23-1 through P23-4) done.** Schema, `application/db.py`'s
+dual-table writes/`LEFT JOIN` reads, `application/models.py`'s
+`updated_at` → `Optional[datetime]`, and a full live migration +
+live-verification of the truncation-survival property (a real
+already-`REJECTED` application's `loan_apply_requests` row was actually
+deleted through the real browser and both surfaces still rendered its
+outcome correctly, then the row was restored) — see each task's own
+DONE note. The phase's own preamble claim ("narrower blast radius than
+Phase 22") held all the way through: only `db/schema.sql`,
+`application/db.py`, `application/models.py`, and their own tests ever
+changed — `application/service.py`, `application/activities.py`, and
+both BFFs needed zero edits, confirmed by `git status`, not just
+asserted in the plan. The live stack's `db` volume is fully migrated
+(all 21 real applications' workflow data backfilled before the old
+columns were dropped) and `app`/`worker-workflow`/`worker-activity` are
+rebuilt and running current code. `CLAUDE.md`'s `application/` module
+section and "Data storage" are both updated to describe the built
+split.
+
+**Next: this plan's own backlog is empty again.** Two small,
+non-blocking items remain from earlier phases, neither urgent: the
+`WorkflowAlreadyStartedError` gap Phase 22 left open (see just above)
+still hasn't been added to `CLAUDE.md`'s Known Gaps / the
+`known-gaps-and-gotchas` skill; no dedicated `application/` skill exists
+the way `account-closure` does for Phase 22's own design (deliberate —
+this phase's narrative lives directly in `CLAUDE.md`, proportionate to
+a change with no new UI surface). The live `nats`/`temporal`/`db`/
+`risk-adapter`/`krakend`/`mock-risk-engine`/`worker-workflow`/
+`worker-activity`/`app` containers were all left running, all on
+current Phase 23 code, live database fully migrated — a fresh session
+can pick up any future phase directly against this already-current
+stack.
 
 **A later session split `CLAUDE.md`'s deep, phase-specific design
 narratives out into project-local skills under `.claude/skills/`**
@@ -5527,6 +5551,280 @@ gets captured and stored is decided for real, not just noted here.
 
 ---
 
+## Phase 23 — Split loan application request data (1:1)
+
+**Depends on:** Phase 6 (`application/` module — `db.py`/`models.py`/
+`service.py`/`activities.py`, all being split or touched here). **Not
+part of the original build-out** — a design change requested and
+confirmed by the user, following the same pattern Phase 22 established
+for `accounts`/`account_closure_requests`: separate a domain table's
+"core entity" data from its "transaction"/tracking data. **The key
+difference from Phase 22, twice over**: this split is **1:1**, not
+1:M (an application is submitted once; a resubmission overwrites the
+existing request data in place, same as today — no history is being
+added here), and it deliberately introduces a **mirrored column**
+(`applications.status`) rather than eliminating one, for a reason
+Phase 22 never needed: resilience against `loan_apply_requests` itself
+being truncated.
+
+**The split, confirmed with the user across several rounds**:
+`applications` keeps the real loan application data — `application_id`
+(PK), `applicant_identifier`, `customer_id`, `product_type`, `payload`,
+`applicant_name`/`applicant_email`/`applicant_phone`, `amount`, and
+**`status`** — plus `created_at`. A new `loan_apply_requests` table
+(`application_id` as its own PK — genuinely 1:1, no separate id the way
+`account_closure_requests` needed for its 1:M case) holds the
+onboarding-workflow tracking data: `workflow_id`, **`status`** (the
+operational source of truth day to day), `underwriter_name`/
+`underwriter_comment`/`underwriter_decided_at`,
+`manager_name`/`manager_comment`/`manager_decided_at`, `risk_tier`,
+`created_at`, `updated_at`. **`status` deliberately lives on both** —
+`applications.status` is kept in sync with `loan_apply_requests.status`
+on every write, so `applications` alone can always answer "what
+happened to this loan" even if `loan_apply_requests` is ever wiped;
+this is the same "denormalize on purpose, source of truth stays
+resolvable elsewhere" philosophy `CLAUDE.md`'s "Denormalized applicant
+fields, on purpose" already documents for `applicant_name`/`email`/
+`phone`, just applied to `status` too. `customer_id` stays on
+`applications` (confirmed explicitly) even though it's resolved
+*during* the workflow — it's "who this loan is for," not
+workflow-tracking machinery.
+
+**Reads must `LEFT JOIN`, not `JOIN`** — this is what actually makes
+the truncation-survival property real rather than aspirational: an
+`INNER JOIN` would make an application vanish from every list/lookup
+the moment its `loan_apply_requests` row is gone, defeating the entire
+point of mirroring `status` onto `applications` in the first place.
+`get`/`list_for_applicant`/`list_by_status` all need this; `workflow_id`-
+tracking fields simply come back `NULL` post-truncation, same as they
+already can today for other reasons (e.g. a not-yet-committed
+`persist_application`).
+
+**Real, verified narrower blast radius than Phase 22 had — checked by
+grep before writing this plan, not assumed**: `application/db.py` is
+already the *sole* code touching the `applications` table (`CLAUDE.md`'s
+module dependency graph) — neither `application/service.py` nor
+`application/activities.py` nor either BFF's routes/templates issues
+raw SQL or reaches past `db.py`'s own functions. As long as `db.py`'s
+functions keep returning the exact same merged record shape they do
+today (via the `LEFT JOIN`), **no code changes are needed outside
+`db/schema.sql`, `application/db.py`, and `application/models.py`** —
+confirmed the one field whose non-`NULL` guarantee is changing here
+(`updated_at`; every other moved field was already `Optional`) is read
+nowhere else in this codebase (`grep -rn "\.updated_at"` outside
+`application/db.py` returns nothing). P23-3's own DoD is *proving* this
+claim stays true, not writing new code in those other files.
+
+- [x] **P23-1** — `db/schema.sql`: add `loan_apply_requests`
+      (`application_id TEXT PRIMARY KEY` — opaque, not a real FK, same
+      uniform "no FKs anywhere in this schema" discipline
+      `account_closure_requests` already follows even though both new
+      and old table are owned by the same module; `workflow_id TEXT`;
+      `status TEXT NOT NULL DEFAULT 'PENDING_UNDERWRITING'` with the
+      *identical* `CHECK` enum `applications.status` already has —
+      copy it verbatim, don't let the two drift; `underwriter_name`/
+      `underwriter_comment`/`underwriter_decided_at`; `manager_name`/
+      `manager_comment`/`manager_decided_at`; `risk_tier` with its own
+      existing `CHECK`; `created_at`; `updated_at`). Move
+      `ix_applications_workflow_id` to the new table (`workflow_id` no
+      longer lives on `applications`). Drop from `applications`:
+      `workflow_id`, `underwriter_name`/`underwriter_comment`/
+      `underwriter_decided_at`, `manager_name`/`manager_comment`/
+      `manager_decided_at`, `risk_tier`, `updated_at` — **keep**
+      `status` and `created_at`. `ix_applications_status_created_at`/
+      `ix_applications_customer_id_created_at`/
+      `ix_applications_applicant_identifier_created_at` all stay on
+      `applications` unchanged (every column they reference stays put).
+      Same "no migration tooling" discipline every prior schema change
+      here has hit — verify against a scratch database, not the live
+      stack; the live stack's own `db` volume needs a manual backfill +
+      `ALTER TABLE` as a separate, later step (P23-4), same "check for
+      real data before dropping columns" discipline Phase 22's own live
+      migration established.
+      DoD: schema applies cleanly to a fresh database; an `applications`
+      row with no matching `loan_apply_requests` row is a valid,
+      insertable state (proves the split is real, no implicit FK
+      relationship); a duplicate-PK insert into `loan_apply_requests`
+      is rejected by its own primary key alone (1:1 needs no separate
+      unique index the way `account_closure_requests`' 1:M case needed
+      `ux_closure_requests_account_pending`).
+      DONE: `loan_apply_requests` added exactly as designed
+      (`application_id` PK, `workflow_id`, `status` with the verbatim
+      `CHECK` enum copy, `underwriter_*`/`manager_*`/`risk_tier`,
+      `created_at`/`updated_at`), `ix_loan_apply_requests_workflow_id`
+      moved from `applications`; `applications` lost `workflow_id`/
+      `underwriter_*`/`manager_*`/`risk_tier`/`updated_at`, kept
+      `status`/`created_at` and its three existing indexes unchanged.
+      Verified against a disposable scratch `postgres:16-alpine`
+      container (port `15434`, removed after — not the live stack's
+      `db` volume): fresh schema applies cleanly; a `LEFT JOIN` read of
+      an `applications` row with zero `loan_apply_requests` rows
+      correctly returns `status` intact and `workflow_id` `NULL` rather
+      than no row at all — the actual property this whole phase exists
+      for; a second `INSERT` into `loan_apply_requests` for the same
+      `application_id` is rejected by `loan_apply_requests_pkey` alone,
+      confirming 1:1 needs no extra unique index the way
+      `account_closure_requests`' 1:M case did. `\d applications`/
+      `\d loan_apply_requests` confirmed the exact column/index/CHECK
+      shape by hand, including both `status_check` constraints matching
+      verbatim.
+
+- [x] **P23-2** — `application/db.py`: `insert`/`update_decision`/
+      `clear_risk_assessment`/`update_resubmission` all become explicit
+      two-table transactions (`conn.transaction()`) — write whichever
+      `applications`-side columns each function already owns (`status`
+      mirror always; `payload` for `update_resubmission`; `customer_id`
+      for `update_decision`) and the `loan_apply_requests`-side columns
+      (`status` as the operational source of truth, plus that
+      function's own workflow-tracking columns) atomically, then return
+      the same merged record shape every caller already expects (a
+      `LEFT JOIN` re-fetch inside the same transaction, not two
+      separately-timed reads). `get`/`get_by_workflow_id`/
+      `list_for_applicant`/`list_by_status` all move to `LEFT JOIN
+      loan_apply_requests` reads — **`LEFT`, deliberately, not `JOIN`**,
+      see this phase's own preamble for why a plain inner join would
+      defeat the mirrored `status` column's entire purpose.
+      `count_by_status`/`count_for_applicant` **stay single-table
+      reads against `applications` alone** — no join needed at all,
+      since every column either one filters on (`status`,
+      `applicant_identifier`) now lives there; a real query-cost win
+      the mirrored `status` column earns beyond just truncation-
+      survival, worth calling out explicitly since it's easy to
+      over-join out of habit once every other read function needs one.
+      DoD: unit tests (real Postgres, `tests/unit/application/test_db.py`'s
+      existing convention) prove: a normal insert → decision → resubmit
+      cycle produces a merged record identical in shape to before this
+      split; a row manually `DELETE`d from `loan_apply_requests`
+      (simulating a real truncation) still returns from `get`/
+      `list_for_applicant`/`list_by_status` with `status` intact and
+      every workflow-tracking field `None`, rather than vanishing or
+      raising — this is the one test that actually proves the feature
+      works, not just that the schema applies.
+      DONE: all four write functions rewritten as
+      `pool.acquire()`/`conn.transaction()` two-statement writes (both
+      tables always committed together, atomically, so a Temporal
+      retry never finds one table's row present without the other's —
+      both `INSERT`s already used `ON CONFLICT DO NOTHING`, now inside
+      one transaction instead of one each); `get`/`get_by_workflow_id`/
+      `list_for_applicant`/`list_by_status` rewritten against a shared
+      `_SELECT_JOINED` `LEFT JOIN` fragment (explicit column list, not
+      `a.*, r.*`, so `application_id`/`status` are never ambiguous
+      between the two tables); `count_by_status`/`count_for_applicant`
+      deliberately left as single-table reads. Every existing test in
+      `tests/unit/application/test_db.py` (already asserting on
+      `record["field"]`, unaffected by the schema split since the
+      merged shape is unchanged) passed with zero edits — confirmed the
+      "same public shape" claim this phase's preamble made without
+      writing a single new test to prop it up; added exactly one new
+      test, `test_survives_loan_apply_requests_truncation`, that
+      manually `DELETE`s a real `loan_apply_requests` row and asserts
+      `get`/`list_for_applicant`/`list_by_status` all still return the
+      application with `status` intact and every workflow-tracking
+      field `None` — the one test that actually proves the feature,
+      not just that the schema applies. `tests/unit/application/
+      conftest.py`'s cleanup fixture now also clears
+      `loan_apply_requests` between tests. Migrated `loan_onboarding_test`
+      (empty at the time — no backfill needed, unlike the live stack)
+      to run these against. Full unit suite (311 tests) and
+      `lint-imports` (10/10) both green — **with zero changes outside
+      `application/db.py` and its own tests**, already confirming
+      P23-3's own claim ahead of that task even starting.
+
+- [x] **P23-3** — `application/models.py`: `Application.updated_at`
+      becomes `Optional[datetime]` (every other moved field —
+      `workflow_id`, `underwriter_*`, `manager_*` — was already
+      `Optional`, unaffected by this split); `from_record` updated for
+      the new joined shape. Document on the dataclass itself that
+      `status` is the durable, truncation-surviving field and every
+      other workflow-tracking field may be `None` once
+      `loan_apply_requests` has been cleared. **Prove, don't assume, that
+      no other file needs changes** — this task's actual DoD is running
+      the full test suite and confirming `application/service.py`,
+      `application/activities.py`, and both BFFs' routes/templates
+      needed zero edits, per this phase's own preamble's grep-verified
+      claim.
+      DoD: full unit suite green with the *only* files touched outside
+      `db/schema.sql`/`application/db.py`/`application/models.py` being
+      those files' own tests; `lint-imports` still green (no new
+      cross-module import — this stays entirely inside `application/`).
+      DONE: `updated_at: datetime | None`, plus a new class docstring
+      explaining the two-table join and the truncation-degrades-to-`None`
+      semantics. **One correction found while doing this task**: this
+      task's own wording above (written during Phase 23's planning
+      session) claimed `risk_tier` was already an `Optional` field on
+      `Application` — false. `risk_tier` was never a field on this
+      dataclass at all (write-only, via `update_decision`'s own
+      parameter, never read back through `Application`) — a planning-doc
+      inaccuracy, not a code gap; noted here rather than silently
+      corrected, since the plan's own job is to be an accurate record.
+      Re-confirmed via a second grep pass (`grep -rn "\.updated_at"`
+      across the whole codebase) that this field is read nowhere outside
+      `application/db.py`'s own SQL text — no attribute access anywhere
+      that a `None` could break. Full unit suite (311 tests, unchanged
+      from P23-2) and `lint-imports` (10/10) both green; `git status`
+      confirmed the *only* files touched across all of P23-1 through
+      P23-3 are `db/schema.sql`, `application/db.py`,
+      `application/models.py`, and those files' own tests — the phase's
+      "narrower blast radius than Phase 22" preamble claim, now actually
+      verified rather than just asserted.
+
+- [x] **P23-4** — Live-verify against the real stack: confirm a real
+      application's full lifecycle (submit → risk assessment/decision →
+      terminal) reads and renders identically to before the split on
+      both BFFs, then deliberately `DELETE FROM loan_apply_requests
+      WHERE application_id = '...'` for one real, already-terminal
+      application and confirm its status/outcome still renders
+      correctly on both the customer detail page and the staff queue —
+      this is what actually proves the truncation-survival property
+      live, not just in a unit test. Migrate the live stack's `db`
+      volume: backfill every existing application's `workflow_id`/
+      `underwriter_*`/`manager_*`/`risk_tier`/`updated_at` into a new
+      `loan_apply_requests` row per application *before* dropping those
+      columns from `applications` (same "check for real data before
+      dropping it" discipline Phase 22's own live migration
+      established — do not skip this because the columns are "just
+      going to move," the live stack already has real rows), then
+      rebuild/restart `app`/`worker-workflow`/`worker-activity`. Update
+      `CLAUDE.md`'s `application/` module section and "Data storage" to
+      describe the split (no dedicated `application/` skill exists the
+      way `account-closure` does — this phase's narrative stays in
+      `CLAUDE.md` directly, proportionate to a change with no new UI
+      surface).
+      DONE: migrated the live `loan_onboarding` database — created
+      `loan_apply_requests`, backfilled **all 21 real existing
+      applications'** workflow-tracking data into it (spot-checked
+      several rows via `psql`: `applications.status`/
+      `loan_apply_requests.status` matched exactly, `underwriter_name`/
+      `workflow_id` intact) *before* dropping the old columns from
+      `applications`, then rebuilt and restarted `app`/`worker-workflow`/
+      `worker-activity` — clean startup, no errors, `curl` confirmed
+      `200` immediately. Live-verified through the real browser (not
+      curl simulation): `list_for_applicant` (the customer's own "My
+      Applications" list) and the full application detail page both
+      render real, post-migration data correctly; the staff review
+      dialog (queried via its real htmx endpoint with `HX-Request: true`,
+      since a plain navigation to a fragment route redirects elsewhere)
+      correctly shows a real underwriter's real decision. **Then the
+      actual point of this whole phase, proven live**: captured a real,
+      already-`REJECTED` application's full `loan_apply_requests` row,
+      `DELETE`d it outright, and confirmed — through the real browser,
+      both surfaces — that the outcome still rendered correctly
+      ("Rejected", full document/timeline history intact, no crash, no
+      missing page) on the customer detail page and that the staff
+      dialog degraded gracefully (`status` still `REJECTED`,
+      `underwriter_name` correctly gone rather than stale). Restored the
+      captured row afterward — confirmed byte-for-byte identical to the
+      original via `psql`. Updated `CLAUDE.md`: a new paragraph in the
+      `application/` module section describing the split (mirrored
+      `status`, `LEFT JOIN` reads, the zero-other-file-changes finding,
+      the live truncation-verification just performed) plus rewrote
+      "Data storage"'s now-stale "three domain tables"/"no FKs between
+      X/Y/Z" paragraphs to describe all five current tables and a
+      uniform "no FKs anywhere" rule instead of the old cross-module-only
+      framing. **Phase 23 (P23-1 through P23-4) is now fully complete.**
+
+---
+
 ## Session Log
 
 *(Newest entry at the top. Each entry: date, tasks touched, what
@@ -5535,6 +5833,139 @@ what the next session should know. Keep entries factual and specific —
 "worked on Phase 6" is not useful to a future session; "P6-4 done,
 P6-5 blocked on Phase 7 not existing yet, see note in Decisions Needed"
 is.)*
+
+- **2026-09-09 (P23-4 done — Phase 23 fully complete)** — Migrated the
+  live `loan_onboarding` database (21 real applications), backfilling
+  every one's `workflow_id`/`underwriter_*`/`manager_*`/`risk_tier`/
+  `updated_at` into a new `loan_apply_requests` row before dropping
+  those columns from `applications` — spot-checked several via `psql`
+  post-migration, `status` matched exactly on both tables. Rebuilt and
+  restarted `app`/`worker-workflow`/`worker-activity` — clean startup.
+  Live-verified through the real browser: `list_for_applicant` and the
+  full application detail page render real data correctly; the staff
+  review dialog (via its real htmx endpoint) shows a real underwriter's
+  real decision. **Then drove the actual point of this whole phase**:
+  captured a real, already-`REJECTED` application's full
+  `loan_apply_requests` row, deleted it outright, and confirmed through
+  the real browser — both the customer detail page and the staff
+  dialog — that the outcome still rendered correctly (status intact,
+  decision detail gone gracefully, no crash, no missing page), then
+  restored the row and confirmed it matched the original byte-for-byte.
+  Updated `CLAUDE.md`: a new paragraph in the `application/` module
+  section, plus a rewrite of "Data storage"'s stale "three domain
+  tables" framing to describe all five current tables and a uniform
+  "no FKs anywhere" rule instead of the old cross-module-only one.
+  **Phase 23 is now fully complete — this plan's backlog is empty
+  again**, save for the small non-blocking Known Gaps note Phase 22
+  left open.
+
+- **2026-09-09 (P23-3 done)** — `Application.updated_at` →
+  `datetime | None`, plus a new class docstring on `Application`
+  explaining the two-table join and truncation semantics. Found and
+  corrected one real inaccuracy in Phase 23's own planning-session
+  wording along the way: P23-3's task text (written before any code
+  existed) claimed `risk_tier` was already an `Optional` field on
+  `Application` — it was never a field on that dataclass at all
+  (write-only via `update_decision`, never read back through the
+  model). Re-verified via a second, broader grep
+  (`grep -rn "\.updated_at"` across the whole codebase, not just
+  `application/`) that this field is read nowhere a `None` could break
+  anything. Full unit suite (311 tests, unchanged from P23-2) and
+  `lint-imports` (10/10) both green. `git status` after all of P23-1
+  through P23-3: only `db/schema.sql`, `application/db.py`,
+  `application/models.py`, and their own tests touched — the phase's
+  own "narrower blast radius than Phase 22" claim is now actually
+  verified, not just asserted in the plan. Next session: P23-4, the
+  phase's last task — migrate the live `db` volume (with backfill, real
+  data exists there this time, unlike the empty `loan_onboarding_test`),
+  rebuild/restart `app`/`worker-workflow`/`worker-activity`, then
+  live-verify the truncation-survival property for real (not just in a
+  unit test) and update `CLAUDE.md`.
+
+- **2026-09-09 (P23-2 done)** — Rewrote all four `application/db.py`
+  write functions (`insert`/`update_decision`/`clear_risk_assessment`/
+  `update_resubmission`) as `pool.acquire()`/`conn.transaction()`
+  two-table writes, and all four reads (`get`/`get_by_workflow_id`/
+  `list_for_applicant`/`list_by_status`) against a shared
+  `_SELECT_JOINED` `LEFT JOIN` fragment; left `count_by_status`/
+  `count_for_applicant` as single-table reads, deliberately, since
+  `status`/`applicant_identifier` both still live on `applications`
+  alone. Every pre-existing test in `tests/unit/application/test_db.py`
+  passed unmodified — real, checked evidence (not just an assumption)
+  that the merged record shape callers see is unchanged by this split.
+  Added one new test proving the actual feature (not just that the
+  schema applies): deleting a real `loan_apply_requests` row and
+  confirming `get`/`list_for_applicant`/`list_by_status` all still
+  return the application with `status` intact and every
+  workflow-tracking field `None`. Migrated `loan_onboarding_test`
+  (empty — no real data to backfill there, unlike what P23-4 will need
+  for the live stack) to the Phase 23 schema so these tests could
+  actually run. Full unit suite (311 tests, one new) and `lint-imports`
+  (10/10) both green, with zero files touched outside
+  `application/db.py` and its own tests/conftest — already satisfying
+  what P23-3 exists to formally confirm. **The live stack's `db`
+  volume is now actively incompatible with this session's code** (new
+  queries reference a table the live database doesn't have yet) — do
+  not rebuild/restart `app`/`worker-workflow`/`worker-activity` against
+  it before P23-4's own migration runs. Next session: P23-3
+  (`application/models.py`'s `Optional[datetime]` typing + confirming
+  no other files need changes), then P23-4 (the live migration and
+  end-to-end verification).
+
+- **2026-09-09 (P23-1 done)** — Implemented and verified Phase 23's
+  schema change: `db/schema.sql` gained `loan_apply_requests`
+  (`application_id` as its own PK — genuinely 1:1, no separate id) with
+  `workflow_id`/`underwriter_*`/`manager_*`/`risk_tier`/`created_at`/
+  `updated_at`, plus a `status` column carrying the *exact same* `CHECK`
+  enum `applications.status` already has (copied verbatim, not
+  re-derived, so the two can't silently diverge). `applications` lost
+  `workflow_id`/`underwriter_*`/`manager_*`/`risk_tier`/`updated_at`,
+  kept `status`/`created_at` and every existing index unchanged.
+  Verified against a disposable scratch `postgres:16-alpine` container,
+  removed after — never the live stack's own `db` volume: fresh schema
+  applies cleanly; the actual point of this whole phase — an
+  `applications` row with zero matching `loan_apply_requests` rows
+  still reads correctly via `LEFT JOIN` (`status` intact, `workflow_id`
+  `NULL`, not a missing row) — confirmed directly, not just asserted in
+  the plan; a duplicate-PK insert into `loan_apply_requests` is
+  rejected by its own primary key, no extra unique index needed (unlike
+  Phase 22's 1:M case). **The live stack's own `db` volume has
+  deliberately NOT been migrated** — no code reads/writes the new table
+  yet, and `application/db.py`'s existing functions still reference the
+  now-schema-mismatched columns directly, so migrating the live volume
+  now would break the running stack rather than help it; migrate only
+  once P23-2/P23-3 are ready to use the new shape. Next session: P23-2
+  (`application/db.py`'s dual-table transactional writes and `LEFT
+  JOIN` reads).
+
+- **2026-09-09 (Phase 23 added, design-only, no code written)** —
+  Requested by the user as the same pattern Phase 22 established,
+  applied to `applications` this time. Took several rounds of back-and-
+  forth to converge on the actual split (the user's own domain framing
+  — "applications = real loan application info," "loan_apply_requests =
+  onboarding workflow transaction info" — inverted my own first guess,
+  which had the identity/lifecycle fields staying and the submission
+  snapshot moving out; the real intent was the other way around).
+  Two real design decisions surfaced and confirmed directly with the
+  user, not guessed at: (1) `customer_id`/`applicant_identifier` both
+  stay on `applications`, not the new table; (2) `status` is
+  **deliberately duplicated** on both tables — not the redundancy-to-
+  eliminate I first assumed, but a resilience feature: `applications`
+  should still know a loan's final outcome even if `loan_apply_requests`
+  is truncated. That requirement is what drove the rest of the design
+  (a `LEFT JOIN` read shape, not `JOIN`, and `count_by_status`/
+  `count_for_applicant` staying single-table reads once `status` no
+  longer requires the join to filter on). Grepped the codebase before
+  writing the plan to verify a real, reassuring claim: because
+  `application/db.py` already the sole code touching `applications`
+  (this codebase's own module discipline), and its functions will keep
+  returning the same merged shape via the join, **no changes are needed
+  in `application/service.py`, `application/activities.py`, or either
+  BFF** — confirmed the one field losing its non-`NULL` guarantee
+  (`updated_at`) is read nowhere else. Wrote the full four-task
+  breakdown as **Phase 23** below and updated **Current Status**'s
+  resume-point paragraph to point there. **No code changed this
+  session** — start at P23-1.
 
 - **2026-09-09 (P22-5 done — Phase 22 fully complete)** — Drove a
   genuinely fresh request→reject→request→approve cycle through the real

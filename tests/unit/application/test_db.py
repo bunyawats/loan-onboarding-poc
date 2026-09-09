@@ -275,6 +275,40 @@ async def test_list_for_applicant_pagination():
     assert len(page2) == 1
 
 
+async def test_survives_loan_apply_requests_truncation():
+    """The actual point of Phase 23: applications.status is a durable,
+    mirrored copy -- get()/list_for_applicant()/list_by_status() must
+    keep returning the application (status intact) even after its
+    loan_apply_requests row is gone, not vanish or raise. This is what
+    a LEFT JOIN (not JOIN) actually buys over the old single-table
+    shape."""
+    application_id = _new_application_id()
+    await _insert_sample(application_id=application_id, applicant_identifier="carol@example.com")
+    await db.update_decision(
+        application_id,
+        status="APPROVED",
+        underwriter_name="u1",
+        underwriter_comment="ok",
+        underwriter_decided_at=datetime.now(timezone.utc),
+    )
+
+    pool = await db._get_pool()
+    await pool.execute("DELETE FROM loan_apply_requests WHERE application_id = $1", application_id)
+
+    fetched = await db.get(application_id)
+    assert fetched["status"] == "APPROVED"
+    assert fetched["workflow_id"] is None
+    assert fetched["underwriter_name"] is None
+    assert fetched["updated_at"] is None
+
+    listed = await db.list_for_applicant("carol@example.com", limit=10, offset=0)
+    assert len(listed) == 1
+    assert listed[0]["status"] == "APPROVED"
+
+    by_status = await db.list_by_status("APPROVED", limit=10, offset=0)
+    assert application_id in [r["application_id"] for r in by_status]
+
+
 async def test_list_by_status_filters_and_counts():
     await _insert_sample()
     await _insert_sample()

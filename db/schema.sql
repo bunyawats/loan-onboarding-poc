@@ -179,7 +179,16 @@ CREATE INDEX ix_closure_requests_pending_requested_at
     WHERE status = 'PENDING';
 
 -- ---------------------------------------------------------------
--- applications -- owned exclusively by loan_onboarding.application.db
+-- applications -- owned exclusively by loan_onboarding.application.db.
+-- The REAL loan application (Phase 23, "Split loan application request
+-- data (1:1)" -- see CLAUDE.md / IMPLEMENTATION_PLAN.md): what was
+-- requested, by whom, for how much. Onboarding-workflow tracking
+-- (Temporal linkage, staff decisions, risk tier) lives in
+-- loan_apply_requests below, 1:1 via application_id -- NOT folded back
+-- in here, even though the two are read together via a LEFT JOIN on
+-- almost every path. See that table's own header for why the split
+-- runs this way and why `status` is the one column deliberately kept
+-- on BOTH tables.
 -- ---------------------------------------------------------------
 CREATE TABLE applications (
     application_id          TEXT PRIMARY KEY,
@@ -189,6 +198,8 @@ CREATE TABLE applications (
     -- is what the customer-facing visibility filter
     -- (list_for_applicant) is keyed on, NOT customer_id -- it has to
     -- work identically for a first-time applicant and a returning one.
+    -- Confirmed staying on THIS table (Phase 23) -- it's who's
+    -- applying, not onboarding-workflow machinery.
     applicant_identifier      TEXT NOT NULL,
 
     -- Opaque reference, NOT a FK -- see header. Nullable: set at
@@ -198,20 +209,10 @@ CREATE TABLE applications (
     -- customer.service.get() when a name/detail is needed -- never
     -- joined here. There is no account_id column here -- see
     -- accounts.application_id above for why the pointer runs the other
-    -- direction.
+    -- direction. Confirmed staying on THIS table (Phase 23), same
+    -- reasoning as applicant_identifier -- resolved DURING the
+    -- workflow, but it's "who this loan is for," not tracking data.
     customer_id               TEXT,
-
-    -- Nullable: unset until persist_application (the workflow's first
-    -- activity) commits. **Never cleared afterward by any code in this
-    -- codebase** -- corrected in P12-1 from an earlier draft of this
-    -- comment, which claimed it gets cleared "if a Temporal admin
-    -- deletes the execution out from under a row"; no such
-    -- reconciliation job was ever built (confirmed by grepping for any
-    -- write to this column outside persist_application -- there is
-    -- none), so a terminated workflow or a deleted execution leaves
-    -- this value pointing at a Temporal execution that no longer
-    -- exists, permanently. See CLAUDE.md's "Known gaps".
-    workflow_id               TEXT,
 
     product_type              TEXT NOT NULL
                                    CHECK (product_type IN ('personal_loan', 'auto_loan', 'mortgage')),
@@ -227,6 +228,19 @@ CREATE TABLE applications (
     applicant_phone            TEXT NOT NULL,
     amount                     NUMERIC(14, 2) NOT NULL CHECK (amount > 0),
 
+    -- DELIBERATELY DUPLICATED on loan_apply_requests too (Phase 23) --
+    -- this is NOT the redundancy-to-eliminate an earlier draft of this
+    -- schema assumed; it's a resilience feature, same "denormalize on
+    -- purpose, source of truth stays resolvable elsewhere" philosophy
+    -- CLAUDE.md's "Denormalized applicant fields, on purpose" already
+    -- documents for applicant_name/email/phone above. This column is
+    -- what lets `applications` alone answer "what happened to this
+    -- loan" even if loan_apply_requests is ever truncated --
+    -- application/db.py's own write functions keep the two in sync on
+    -- every transition (same transaction, never one without the
+    -- other). loan_apply_requests.status is the day-to-day operational
+    -- source of truth; this copy is the durable one.
+    --
     -- DEFAULT 'PENDING_UNDERWRITING' is now unreachable in practice --
     -- Phase 21's application/db.py's insert() always passes an explicit
     -- status (PENDING_RISK_ASSESSMENT, workflows.py's own new initial
@@ -245,27 +259,7 @@ CREATE TABLE applications (
                                        'CANCELLED'
                                    )),
 
-    -- underwriter_name/manager_name are authenticated Keycloak usernames
-    -- (preferred_username), never client-submitted free text -- see
-    -- CLAUDE.md "Identity".
-    underwriter_name           TEXT,
-    underwriter_comment        TEXT,
-    underwriter_decided_at     TIMESTAMPTZ,
-
-    manager_name               TEXT,
-    manager_comment            TEXT,
-    manager_decided_at         TIMESTAMPTZ,
-
-    -- Written only by a risk-driven persist_decision (Phase 21, "Automated
-    -- risk assessment via NATS" -- see CLAUDE.md / the risk-assessment-nats
-    -- skill), never by a human decision, which leaves this NULL forever.
-    -- NULL also covers every application that predates this column and
-    -- every application still awaiting a decision of any kind.
-    risk_tier                  TEXT
-                                   CHECK (risk_tier IN ('LOW', 'MEDIUM', 'HIGH')),
-
-    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 
     -- No chk_approved_has_account CHECK anymore -- that invariant
     -- ("an APPROVED application has a matching account") now spans two
@@ -290,12 +284,82 @@ CREATE INDEX ix_applications_customer_id_created_at
     WHERE customer_id IS NOT NULL;
 
 -- list_by_status(status, page, ...) -- Underwriter/Manager queues.
+-- Reads this column alone now (Phase 23) -- no join needed just to
+-- filter/count by status, since the mirrored copy above already lives
+-- here; a real query-cost win the mirrored column earns beyond just
+-- truncation-survival.
 CREATE INDEX ix_applications_status_created_at
     ON applications (status, created_at DESC);
 
+-- ---------------------------------------------------------------
+-- loan_apply_requests -- owned exclusively by
+-- loan_onboarding.application.db, same as applications itself (Phase
+-- 23, "Split loan application request data (1:1)" -- see CLAUDE.md /
+-- IMPLEMENTATION_PLAN.md). Onboarding-workflow TRACKING data for one
+-- application -- genuinely 1:1 (an application is submitted once; a
+-- resubmission overwrites this row's status/decision fields in place,
+-- same as it always has, no history added here) -- unlike
+-- account_closure_requests' own 1:M shape, so application_id itself is
+-- this table's PK, no separate id needed.
+-- ---------------------------------------------------------------
+CREATE TABLE loan_apply_requests (
+    application_id  TEXT PRIMARY KEY,   -- opaque string, NOT a FK -- see applications' own header
+
+    -- Nullable: unset until persist_application (the workflow's first
+    -- activity) commits. **Never cleared afterward by any code in this
+    -- codebase** -- corrected in P12-1 from an earlier draft of this
+    -- comment, which claimed it gets cleared "if a Temporal admin
+    -- deletes the execution out from under a row"; no such
+    -- reconciliation job was ever built (confirmed by grepping for any
+    -- write to this column outside persist_application -- there is
+    -- none), so a terminated workflow or a deleted execution leaves
+    -- this value pointing at a Temporal execution that no longer
+    -- exists, permanently. See CLAUDE.md's "Known gaps".
+    workflow_id     TEXT,
+
+    -- The day-to-day operational source of truth -- applications.status
+    -- (above) is kept in sync with this column on every write, not the
+    -- other way around. Same CHECK enum, deliberately copied verbatim
+    -- rather than left to drift.
+    status          TEXT NOT NULL DEFAULT 'PENDING_UNDERWRITING'
+                        CHECK (status IN (
+                            'PENDING_RISK_ASSESSMENT',
+                            'PENDING_UNDERWRITING',
+                            'MORE_INFO_REQUESTED',
+                            'PENDING_MANAGER_APPROVAL',
+                            'APPROVED',
+                            'REJECTED',
+                            'CANCELLED'
+                        )),
+
+    -- underwriter_name/manager_name are authenticated Keycloak usernames
+    -- (preferred_username), never client-submitted free text -- see
+    -- CLAUDE.md "Identity".
+    underwriter_name        TEXT,
+    underwriter_comment     TEXT,
+    underwriter_decided_at  TIMESTAMPTZ,
+
+    manager_name            TEXT,
+    manager_comment         TEXT,
+    manager_decided_at      TIMESTAMPTZ,
+
+    -- Written only by a risk-driven persist_decision (Phase 21, "Automated
+    -- risk assessment via NATS" -- see CLAUDE.md / the risk-assessment-nats
+    -- skill), never by a human decision, which leaves this NULL forever.
+    -- NULL also covers every application that predates this column and
+    -- every application still awaiting a decision of any kind.
+    risk_tier               TEXT
+                                CHECK (risk_tier IN ('LOW', 'MEDIUM', 'HIGH')),
+
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- signal_decision/signal_resubmit resolve workflow_id -> application_id
 -- (e.g. to double check state after a signal) via this index; also
--- lets a reconciliation job find rows by workflow_id directly.
-CREATE INDEX ix_applications_workflow_id
-    ON applications (workflow_id)
+-- lets a reconciliation job find rows by workflow_id directly. Moved
+-- here from applications (Phase 23) -- workflow_id no longer lives
+-- there.
+CREATE INDEX ix_loan_apply_requests_workflow_id
+    ON loan_apply_requests (workflow_id)
     WHERE workflow_id IS NOT NULL;
