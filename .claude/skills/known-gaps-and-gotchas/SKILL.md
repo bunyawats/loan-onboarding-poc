@@ -1,6 +1,6 @@
 ---
 name: known-gaps-and-gotchas
-description: Accepted limitations and real operational gotchas hit while building loan-onboarding-poc -- no schema migration tooling (db/schema.sql changes don't apply to an existing volume), local-vs-dockerized worker races, the active-account-per-product-type race window, Temporal terminate-vs-cancel, stale image/config drift, two live-hit testing hazards (wrong DATABASE_URL wiping the live stack, asyncpg connection-pool exhaustion from one-off docker exec scripts), and the now-fixed Phase 21 risk-tier/manager-escalation threshold overlap that used to make PENDING_MANAGER_APPROVAL unreachable. Read before touching schema, workers, or running ad hoc scripts against the local stack. Triggers on "known gaps", "schema migration", "ALTER TABLE accounts", "worker race", "TooManyConnectionsError", "asyncpg pool exhaustion", "docker exec asyncio.run", "temporal workflow terminate", "loan_onboarding_test", "stuck workflow", "KeyError closure_workflow_id", "manager escalation", "PENDING_MANAGER_APPROVAL", "MANAGER_ESCALATION_THRESHOLD_USD".
+description: Accepted limitations and real operational gotchas hit while building loan-onboarding-poc -- no schema migration tooling (db/schema.sql changes don't apply to an existing volume), local-vs-dockerized worker races, the active-account-per-product-type race window, Temporal terminate-vs-cancel, stale image/config drift, two live-hit testing hazards (wrong DATABASE_URL wiping the live stack, asyncpg connection-pool exhaustion from one-off docker exec scripts), the now-fixed Phase 21 risk-tier/manager-escalation threshold overlap that used to make PENDING_MANAGER_APPROVAL unreachable, and the still-open, separate question of whether the risk-tier threshold values themselves ($15,000/$100,000) are correct. Read before touching schema, workers, or running ad hoc scripts against the local stack. Triggers on "known gaps", "schema migration", "ALTER TABLE accounts", "worker race", "TooManyConnectionsError", "asyncpg pool exhaustion", "docker exec asyncio.run", "temporal workflow terminate", "loan_onboarding_test", "stuck workflow", "KeyError closure_workflow_id", "manager escalation", "PENDING_MANAGER_APPROVAL", "MANAGER_ESCALATION_THRESHOLD_USD", "risk tier threshold", "LOW_THRESHOLD", "HIGH_THRESHOLD".
 ---
 
 ## Known gaps to state explicitly once built
@@ -240,6 +240,21 @@ entry, unless a more specific pointer is given.)*
   updated, since wiring a real escalation scenario into that script's
   own committed scenario lists is a separate scope decision, not
   required to close or verify the threshold-overlap bug itself.
+- **Still open, not settled by the overlap-bug fix just above**: the
+  mock Risk Engine's risk-tier threshold *values* themselves
+  (`mock_risk_engine/main.py`'s `LOW_THRESHOLD` = $15,000,
+  `HIGH_THRESHOLD` = $100,000) were picked so the mock is trivially
+  testable, not to simulate a real scoring model, and have never been
+  confirmed correct by an actual human/product owner — `PRD.md` §6.7
+  doesn't specify exact numbers, and `IMPLEMENTATION_PLAN.md`'s own
+  Decisions Needed section still tracks this as an open question with
+  only an "assumed default." The 2026-09-08 fix above only closed the
+  *relationship* between `HIGH_THRESHOLD` and
+  `MANAGER_ESCALATION_THRESHOLD_USD` (the overlap that made
+  `PENDING_MANAGER_APPROVAL` unreachable) — it says nothing about
+  whether $15,000/$100,000 are the right thresholds in the first place.
+  Don't conflate "the overlap bug is resolved" with "the thresholds are
+  confirmed correct."
 - No timeout on "wait for Underwriter/Manager decision."
 - **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to
