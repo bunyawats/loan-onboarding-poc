@@ -17,6 +17,16 @@ name: loan-onboarding-poc
 services:
   db:
     image: postgres:16-alpine
+    # Default max_connections=100 is too low for this app's actual
+    # connection footprint: customer/account/application/document each
+    # lazily open their own asyncpg pool (default min_size=10), and both
+    # `app` and `worker-activity` touch all four -- up to 80 connections
+    # from this app alone, plus Temporal's own ~35-40 against the same
+    # container/`temporal` database (see "Data storage" in CLAUDE.md).
+    # Hit for real (TooManyConnectionsError, including inside a running
+    # Temporal activity) generating a fresh batch of E2E data right after
+    # a from-scratch schema recreate, when every pool cold-starts at once.
+    command: postgres -c max_connections=200
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
