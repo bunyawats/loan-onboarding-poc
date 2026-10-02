@@ -254,7 +254,35 @@ entry, unless a more specific pointer is given.)*
   `PENDING_MANAGER_APPROVAL` unreachable) — it says nothing about
   whether $15,000/$100,000 are the right thresholds in the first place.
   Don't conflate "the overlap bug is resolved" with "the thresholds are
-  confirmed correct."
+  confirmed correct." **Since 2026-10-02 the values the running stack
+  actually uses live in the real engine's decision table**
+  (loan-risk-engine's `rules/risk_tier.v1.json`, same $15,000/$100,000
+  numbers, parity-tested against the mock) — that's where a confirmed
+  set of thresholds would go, as a new rules version, not in
+  `mock_risk_engine/main.py`. The question itself is no closer to
+  answered; the engine's `v2` thresholds (LTV 0.97, loan-to-income 1.0,
+  AI cut-offs) are equally unconfirmed placeholders.
+- **The Risk Engine is now a second repo this stack can't start
+  without (2026-10-02).** `docker compose up` builds `risk-engine` from
+  a local checkout of loan-risk-engine at `RISK_ENGINE_BUILD_CONTEXT`
+  (default `../../Rust/loan-risk-engine`); on a machine without it the
+  build fails. Either clone it there, set the variable, or roll back to
+  the mock (`krakend.json` host + `--profile mock` — see the
+  `risk-assessment-nats` skill).
+- **Jev (Typesafe AI) is a new external dependency, off by default.**
+  The engine's rules `v2` call Jev for signals over the payload's free
+  text. It's only used with `RISK_ENGINE_RULES_VERSION=v2` and
+  `JEV_ENABLED=true` (needs `TYPESAFE_API_KEY`). By design an outage
+  can't auto-approve or auto-reject anything: on timeout/error, or with
+  Jev disabled under `v2`, every would-be `LOW` becomes `MEDIUM`, so the
+  cost of a Jev outage is a fuller Underwriter queue, not a wrong
+  decision. Not yet run live in this stack.
+- **`scripts/generate_real_e2e_data.py`'s documented `.venv` command
+  can break silently**: a `.venv` created from a Python install that's
+  since been removed leaves dangling `python3` symlinks (`no such file
+  or directory`). The script needs only `httpx`, so
+  `uv run --no-project --with httpx python scripts/generate_real_e2e_data.py`
+  works without rebuilding the venv.
 - No timeout on "wait for Underwriter/Manager decision."
 - **A Temporal *terminate* (vs. *cancel*) still can't be recovered from
   inside the workflow, structurally — no event is ever delivered to

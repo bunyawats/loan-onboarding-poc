@@ -419,6 +419,20 @@ KrakenD up (a `depends_on` cycle in the original task wording; KrakenD
 rejecting a `202` response by default) and why NATS connectivity was
 moved entirely out of this codebase's own process.
 
+**The Risk Engine behind KrakenD is now the real one (2026-10-02), not
+the mock.** KrakenD's `/assess` backend points at `risk-engine:8000`, a
+separate Rust service built from its own repo
+(github.com/bunyawats/loan-risk-engine) — nothing in `loan_onboarding/`,
+`risk_adapter/`, NATS, or the workflow changed, since it speaks the
+same two-endpoint HTTP contract the mock did. It runs its rules `v1` by
+default, which reproduces the mock's amount thresholds exactly;
+`mock-risk-engine` stays in the repo behind the Compose `mock` profile
+as the rollback. Live-verified with `scripts/generate_real_e2e_data.py`
+(10 applications: $5,000/$8,000 auto-approved, $60,000 through
+Underwriter → Manager, $150,000 auto-rejected). See the
+`risk-assessment-nats` skill's "The real Risk Engine" section for the
+engine's own guarantees, config, and rollback steps.
+
 ## Modules, in detail
 
 ### 1. `bff_customer/` — Customer BFF
@@ -1683,7 +1697,9 @@ loan-onboarding-poc/
 
 **Also sitting outside the `loan_onboarding` Python package entirely,
 built in Phase 21**: `mock_risk_engine/` (the standalone simulated
-external Risk Engine, HTTP-only) and `risk_adapter/` (the NATS Adapter
+external Risk Engine, HTTP-only — since 2026-10-02 only the rollback
+for the real engine, which lives in its own repo, loan-risk-engine,
+and isn't in this tree at all) and `risk_adapter/` (the NATS Adapter
 — the sole owner of NATS connectivity in this whole system, plus its
 own small Temporal client) — both deliberately not part of this
 package, same "a real external system this codebase doesn't own"
@@ -1752,12 +1768,15 @@ image instead of seven:
   "Automated risk assessment via NATS"), `risk-adapter` (the NATS
   Adapter — sole owner of NATS connectivity, `depends_on: [nats,
   temporal]`), `krakend` (fronting the Risk-Engine boundary,
-  `depends_on: [risk-adapter]`), `mock-risk-engine` (HTTP-only, no NATS
-  — `depends_on: [krakend]`, since it calls the Adapter's webhook
-  *through* KrakenD). **`depends_on` deliberately doesn't match a
+  `depends_on: [risk-adapter]`), `risk-engine` (the real Risk Engine,
+  built from the separate loan-risk-engine checkout named by
+  `RISK_ENGINE_BUILD_CONTEXT`; HTTP-only, no NATS — `depends_on:
+  [krakend]`, since it calls the Adapter's webhook *through* KrakenD),
+  and `mock-risk-engine` (the Phase 21 mock, same shape, now started
+  only with `--profile mock` as the rollback). **`depends_on` deliberately doesn't match a
   literal reading of "each service depends on the other two it talks
-  to"** — `risk-adapter`↔`krakend` and `krakend`↔`mock-risk-engine`
-  would each form a real cycle Docker Compose rejects outright; every
+  to"** — `risk-adapter`↔`krakend` and `krakend`↔`risk-engine` (or
+  `mock-risk-engine`) would each form a real cycle Docker Compose rejects outright; every
   cross-service call here is lazy (made well after startup), so neither
   direction was functionally needed anyway. See the `risk-assessment-nats`
   skill for the full story.

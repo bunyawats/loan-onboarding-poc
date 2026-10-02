@@ -17,6 +17,52 @@ system — a Risk Engine — consulted over a message broker (NATS) rather
 than a synchronous HTTP call, and let it auto-decide the easy cases
 (very low or very high risk) without a human ever touching them.
 
+#### The real Risk Engine (2026-10-02) — replaces the mock behind KrakenD
+
+Everything below still describes the design accurately, with one swap:
+wherever it says the mock Risk Engine receives `/assess` and calls
+`/decisions`, the service now doing that in the running stack is
+`risk-engine`, built from a separate repo
+(github.com/bunyawats/loan-risk-engine, Rust/Axum). `mock_risk_engine/`
+is unchanged and kept as the rollback.
+
+- **What changed here**: `krakend/krakend.json`'s `/assess` host
+  (`http://risk-engine:8000`) and `docker-compose.yml` (a `risk-engine`
+  service; `mock-risk-engine` behind `profiles: ["mock"]`). No Python,
+  NATS, Temporal, or schema change — the HTTP contract is identical.
+- **Build**: `risk-engine` builds from a local checkout of the other
+  repo. `RISK_ENGINE_BUILD_CONTEXT` defaults to
+  `../../Rust/loan-risk-engine` (the author's layout); set it for any
+  other. Without that checkout `docker compose up` fails to build.
+- **Rules**: `RISK_ENGINE_RULES_VERSION=v1` (default) is exact parity
+  with the mock — `< $15,000 → LOW`, `< $100,000 → MEDIUM`, else
+  `HIGH`, enforced there by a test against this repo's own
+  `mock_risk_engine/tests/test_main.py` boundary table. `v2` adds
+  deterministic ratios (loan-to-income, LTV) and Jev (Typesafe AI)
+  signals over the payload's free text; its thresholds are
+  placeholders and it has not been run live here yet.
+- **Guarantees the engine keeps** (its invariants I1–I5): `risk_tier`
+  is always one of `LOW`/`MEDIUM`/`HIGH` (any internal error →
+  `MEDIUM`), so the unvalidated forward into `signal_risk_decision`
+  can't be crashed by it; AI signals can only turn `LOW` into `MEDIUM`,
+  never produce `LOW` or `HIGH`; with Jev off or unavailable under
+  `v2`, nothing is auto-approved; some amounts `≥ $50,000` always stay
+  `MEDIUM`, keeping `PENDING_MANAGER_APPROVAL` reachable; invalid input
+  → `MEDIUM`.
+- **Two behaviours that differ from the mock**: a malformed `/assess`
+  body gets a `MEDIUM` decision (the mock answered 500 and sent
+  nothing, leaving the workflow in `PENDING_RISK_ASSESSMENT`); and
+  there's no simulated ~1s delay by default — decisions arrive in
+  milliseconds. The engine keeps its whole request under 4s because
+  `risk_adapter`'s `httpx` client times out at 5s.
+- **Rollback**: set `krakend.json`'s `/assess` host back to
+  `http://mock-risk-engine:8000`, then
+  `docker compose --profile mock up -d` and restart `krakend`.
+- **Live-verified**: `scripts/generate_real_e2e_data.py` against the
+  real engine on `v1` — 10 applications, including $5,000 → APPROVED,
+  $60,000 → PENDING_UNDERWRITING → PENDING_MANAGER_APPROVAL →
+  APPROVED, $150,000 → REJECTED.
+
 **Revised after a second design pass, once `docs/research-krakend.md`
 existed to inform it**: the first draft of this section had the mock
 Risk Engine speak NATS directly and left the real-engine/HTTP-gateway

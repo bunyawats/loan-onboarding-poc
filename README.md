@@ -1,12 +1,14 @@
 # loan-onboarding-poc
 
 A loan onboarding proof of concept: a customer applies for a loan
-themself from a mobile-first web app, a standalone mock Risk Engine
+themself from a mobile-first web app, a standalone Risk Engine
 auto-decides the clear-cut cases over NATS, and an Underwriter reviews
 anything left over — with a Manager giving final sign-off on larger
 loans. Built with Python FastAPI, HTMX, Mayan EDMS, Temporal,
 PostgreSQL, and Keycloak (staff auth), plus a NATS/KrakenD-fronted
-mock Risk Engine for the automated assessment step — as a **modular
+Risk Engine for the automated assessment step (a separate Rust
+service, [loan-risk-engine](https://github.com/bunyawats/loan-risk-engine),
+with the original mock kept as a rollback) — as a **modular
 monolith**: one deployable Python codebase, organized into seven core
 modules plus a few small supporting leaf modules (see `CLAUDE.md`'s
 module dependency graph), with the standalone Risk Engine/NATS
