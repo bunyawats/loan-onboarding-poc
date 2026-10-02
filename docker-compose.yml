@@ -282,8 +282,9 @@ services:
   # repo file" treatment this file already gives Mayan/Keycloak, not a
   # custom Dockerfile.
   #
-  # depends_on deliberately omits `mock-risk-engine`, unlike the task's
-  # own original wording -- `mock-risk-engine` (below) itself
+  # depends_on deliberately omits the Risk Engine (`risk-engine`, or
+  # `mock-risk-engine` under the `mock` profile), unlike the task's
+  # own original wording -- the engine service (below) itself
   # depends_on `krakend`, so declaring both directions is a real
   # dependency cycle docker compose rejects outright (confirmed live
   # while wiring this up), the same class of design-only-session gap
@@ -307,7 +308,14 @@ services:
   # ordering convenience only (this service's own outbound webhook call
   # to KRAKEND_URL happens lazily too, inside /assess's own handler, not
   # at startup).
+  #
+  # Kept as the rollback for the real engine below, behind the `mock`
+  # profile so a plain `docker compose up` no longer starts it. To roll
+  # back: point krakend/krakend.json's /assess host at
+  # http://mock-risk-engine:8000 again and run
+  # `docker compose --profile mock up -d`.
   mock-risk-engine:
+    profiles: ["mock"]
     build:
       context: .
       dockerfile: mock_risk_engine/Dockerfile
@@ -315,6 +323,29 @@ services:
       - krakend
     environment:
       KRAKEND_URL: http://krakend:8080
+
+  # --- The real Risk Engine (github.com/bunyawats/loan-risk-engine), a
+  # separate repo this codebase doesn't own -- same "genuinely external
+  # system" treatment as Mayan/Keycloak, same two-endpoint HTTP contract
+  # as the mock it replaces (POST /assess in, POST KRAKEND_URL/decisions
+  # out). Built from a local checkout; the default path matches the
+  # author's layout (Projects/Python/loan-onboarding-poc next to
+  # Projects/Rust/loan-risk-engine), override RISK_ENGINE_BUILD_CONTEXT
+  # for any other. No published port: only krakend reaches it.
+  # RULES_VERSION=v1 is byte-for-byte parity with the mock's thresholds;
+  # v2 (features + Jev signals) is opt-in. depends_on: [krakend] is
+  # ordering convenience only, as for the mock.
+  risk-engine:
+    build:
+      context: ${RISK_ENGINE_BUILD_CONTEXT:-../../Rust/loan-risk-engine}
+    depends_on:
+      - krakend
+    environment:
+      KRAKEND_URL: http://krakend:8080
+      RULES_VERSION: ${RISK_ENGINE_RULES_VERSION:-v1}
+      JEV_ENABLED: ${JEV_ENABLED:-false}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+    restart: on-failure
 
   # --- P7-2: worker processes (worker_main.py), same WORKER_MODE-split
   # pattern as review-approval-temporal's own worker-workflow/
