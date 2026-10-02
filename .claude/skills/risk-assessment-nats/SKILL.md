@@ -27,14 +27,20 @@ wherever it says the mock Risk Engine receives `/assess` and calls
 is unchanged and kept as the rollback.
 
 - **What changed here**: `krakend/krakend.json`'s `/assess` host
-  (`http://risk-engine:8000`) and `docker-compose.yml` (a `risk-engine`
-  service; `mock-risk-engine` behind `profiles: ["mock"]`). No Python,
-  NATS, Temporal, or schema change — the HTTP contract is identical.
-- **Build**: `risk-engine` builds from a local checkout of the other
-  repo. `RISK_ENGINE_BUILD_CONTEXT` defaults to
-  `../../Rust/loan-risk-engine` (the author's layout); set it for any
-  other. Without that checkout `docker compose up` fails to build.
-- **Rules**: `RISK_ENGINE_RULES_VERSION=v1` (default) is exact parity
+  (`http://host.docker.internal:18000`) and `docker-compose.yml`
+  (`mock-risk-engine` behind `profiles: ["mock"]`; an `extra_hosts`
+  line on `krakend`). No Python, NATS, Temporal, or schema change — the
+  HTTP contract is identical.
+- **Where it runs**: as a standalone container from its own repo
+  (`docker compose up -d --build` in the loan-risk-engine checkout),
+  **not** as a service in this project's compose file. The stacks share
+  no Docker network; they meet at published host ports — KrakenD calls
+  the engine at `host.docker.internal:18000`, the engine calls KrakenD
+  at `host.docker.internal:8090`. If the engine container isn't up,
+  `/assess` fails at KrakenD and applications sit in
+  `PENDING_RISK_ASSESSMENT`. (An earlier same-day revision built it as
+  an in-stack `risk-engine` service; that was replaced by this.)
+- **Rules**: the engine's `RULES_VERSION=v1` (default) is exact parity
   with the mock — `< $15,000 → LOW`, `< $100,000 → MEDIUM`, else
   `HIGH`, enforced there by a test against this repo's own
   `mock_risk_engine/tests/test_main.py` boundary table. `v2` adds

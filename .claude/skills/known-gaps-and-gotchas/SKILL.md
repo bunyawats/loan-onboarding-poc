@@ -262,17 +262,21 @@ entry, unless a more specific pointer is given.)*
   `mock_risk_engine/main.py`. The question itself is no closer to
   answered; the engine's `v2` thresholds (LTV 0.97, loan-to-income 1.0,
   AI cut-offs) are equally unconfirmed placeholders.
-- **The Risk Engine is now a second repo this stack can't start
-  without (2026-10-02).** `docker compose up` builds `risk-engine` from
-  a local checkout of loan-risk-engine at `RISK_ENGINE_BUILD_CONTEXT`
-  (default `../../Rust/loan-risk-engine`); on a machine without it the
-  build fails. Either clone it there, set the variable, or roll back to
-  the mock (`krakend.json` host + `--profile mock` — see the
+- **The Risk Engine is a separate container this stack doesn't start
+  (2026-10-02).** `docker compose up` here no longer brings up any Risk
+  Engine: the real one runs standalone from the loan-risk-engine repo
+  on host port 18000, and KrakenD reaches it via
+  `host.docker.internal`. Forget to start it and every new application
+  waits in `PENDING_RISK_ASSESSMENT` with a KrakenD backend error in
+  `risk-adapter`'s log — nothing here retries. Either start it there
+  (`docker compose up -d --build`), or roll back to the mock
+  (`krakend.json` host + `--profile mock` — see the
   `risk-assessment-nats` skill).
 - **Jev (Typesafe AI) is a new external dependency, off by default.**
-  The engine's rules `v2` call Jev for signals over the payload's free
-  text. It's only used with `RISK_ENGINE_RULES_VERSION=v2` and
-  `JEV_ENABLED=true` (needs `TYPESAFE_API_KEY`). By design an outage
+  The engine's rules `v2`/`v3` call Jev for signals over the payload's
+  free text. It's only used when the engine is started with
+  `RULES_VERSION=v2` (or `v3`) and `JEV_ENABLED=true` (needs
+  `TYPESAFE_API_KEY`). By design an outage
   can't auto-approve or auto-reject anything: on timeout/error, or with
   Jev disabled under `v2`, every would-be `LOW` becomes `MEDIUM`, so the
   cost of a Jev outage is a fuller Underwriter queue, not a wrong

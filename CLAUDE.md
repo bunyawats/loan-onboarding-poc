@@ -420,9 +420,12 @@ rejecting a `202` response by default) and why NATS connectivity was
 moved entirely out of this codebase's own process.
 
 **The Risk Engine behind KrakenD is now the real one (2026-10-02), not
-the mock.** KrakenD's `/assess` backend points at `risk-engine:8000`, a
-separate Rust service built from its own repo
-(github.com/bunyawats/loan-risk-engine) — nothing in `loan_onboarding/`,
+the mock.** KrakenD's `/assess` backend points at
+`host.docker.internal:18000`, a separate Rust service
+(github.com/bunyawats/loan-risk-engine) running as its **own standalone
+container, started from its own repo — not a service in this project's
+`docker-compose.yml` at all**; it calls back to this stack's KrakenD on
+host port 8090 — nothing in `loan_onboarding/`,
 `risk_adapter/`, NATS, or the workflow changed, since it speaks the
 same two-endpoint HTTP contract the mock did. It runs its rules `v1` by
 default, which reproduces the mock's amount thresholds exactly;
@@ -1768,15 +1771,17 @@ image instead of seven:
   "Automated risk assessment via NATS"), `risk-adapter` (the NATS
   Adapter — sole owner of NATS connectivity, `depends_on: [nats,
   temporal]`), `krakend` (fronting the Risk-Engine boundary,
-  `depends_on: [risk-adapter]`), `risk-engine` (the real Risk Engine,
-  built from the separate loan-risk-engine checkout named by
-  `RISK_ENGINE_BUILD_CONTEXT`; HTTP-only, no NATS — `depends_on:
-  [krakend]`, since it calls the Adapter's webhook *through* KrakenD),
-  and `mock-risk-engine` (the Phase 21 mock, same shape, now started
-  only with `--profile mock` as the rollback). **`depends_on` deliberately doesn't match a
+  `depends_on: [risk-adapter]`, plus an `extra_hosts` entry so
+  `host.docker.internal` resolves on Linux too), and `mock-risk-engine`
+  (the Phase 21 mock, HTTP-only, no NATS, `depends_on: [krakend]`, now
+  started only with `--profile mock` as the rollback). The real Risk
+  Engine is deliberately **not** in this file: it runs standalone from
+  the loan-risk-engine repo and the two stacks meet only at published
+  host ports (KrakenD → `host.docker.internal:18000`; engine →
+  `host.docker.internal:8090`). **`depends_on` deliberately doesn't match a
   literal reading of "each service depends on the other two it talks
-  to"** — `risk-adapter`↔`krakend` and `krakend`↔`risk-engine` (or
-  `mock-risk-engine`) would each form a real cycle Docker Compose rejects outright; every
+  to"** — `risk-adapter`↔`krakend` and `krakend`↔`mock-risk-engine`
+  would each form a real cycle Docker Compose rejects outright; every
   cross-service call here is lazy (made well after startup), so neither
   direction was functionally needed anyway. See the `risk-assessment-nats`
   skill for the full story.

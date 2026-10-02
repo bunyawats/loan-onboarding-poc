@@ -14,7 +14,7 @@
           "url_pattern": "/assess",
           "method": "POST",
           "encoding": "no-op",
-          "host": ["http://risk-engine:8000"]
+          "host": ["http://host.docker.internal:18000"]
         }
       ]
     },
